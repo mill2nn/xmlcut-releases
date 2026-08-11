@@ -87,6 +87,9 @@ class Job:
         # browser so the table, the summary and the cut cannot disagree about what is
         # being cut — one source of truth, checked in exactly one place.
         self.excluded: set[str] = set()
+        # Every cut the XML yielded, before the type filter. Kept so switching a type back
+        # on can rebuild the list without re-reading and re-probing the whole timeline.
+        self.all_cuts: list = []
 
     def say(self, msg: str):
         with self.lock:
@@ -100,9 +103,12 @@ class Job:
                 # Sorted here rather than in the browser so the CLI, the manifest and the
                 # filenames all keep pure timeline order — a clip's number must not change
                 # because some other clip happens to be offline.
-                "rows": sorted((row_for(c, self.args.speed, self.excluded) for c in cuts),
+                "rows": sorted((row_for(c, self.args.speed) for c in cuts),
                                key=lambda r: (r["group"], r["index"])),
-                "types": type_counts(cuts, self.excluded),
+                # Counted from the full parse, not the filtered list — otherwise a type
+                # disappears from the panel the instant you switch it off, and there is no
+                # way to switch it back on.
+                "types": type_counts(self.all_cuts, self.excluded),
                 "log": list(self.log),
                 "progress": self.progress,
                 "total": self.total,
@@ -137,7 +143,7 @@ def ext_of(c: xmlcut.Cut) -> str:
     return Path(c.source_path).suffix.lower().lstrip(".") or "(none)"
 
 
-def row_for(c: xmlcut.Cut, speed: str, excluded: set[str] = frozenset()) -> dict:
+def row_for(c: xmlcut.Cut, speed: str) -> dict:
     frames = c.source_consumed_frames if speed == "native" else c.duration_frames
     # What makes this clip interesting, said in the table rather than buried in the log.
     notes = []
@@ -152,8 +158,7 @@ def row_for(c: xmlcut.Cut, speed: str, excluded: set[str] = frozenset()) -> dict
     if c.track_type == "audio":
         notes.append("audio")
     ext = ext_of(c)
-    off = ext in excluded
-    cuttable = c.source_exists and c.media_kind != "unsupported" and not off
+    cuttable = c.source_exists and c.media_kind != "unsupported"
     # Before a cut runs, every clip's status is still "pending". Showing that as "ready"
     # was a lie for the ones that can never be cut — and doubly confusing once they sit
     # under a divider saying they aren't. Say why here, from what the scan already knows.
@@ -163,16 +168,14 @@ def row_for(c: xmlcut.Cut, speed: str, excluded: set[str] = frozenset()) -> dict
         # hunting for a path when the fix is to render it out.
         status = ("AE comp — render it" if c.media_kind == "unsupported"
                   else "missing source" if not c.source_exists
-                  else f"skipped — .{ext} off" if off
                   else "ready")
     else:
         status = {"ok": "written", "skipped_existing": "already there",
                   "no_audio": "silent source"}.get(c.status, c.status)
     return {
-        # 0 ready · 1 switched off by type · 2 cannot be cut at all. Three groups rather
-        # than two so the divider above each says the right thing: "you turned this off"
-        # and "this is broken" need different fixes.
-        "group": 0 if cuttable else (1 if off else 2),
+        # 0 ready · 1 cannot be cut at all. A type switched off no longer appears here at
+        # all — the filter runs at scan time now, so those cuts are not in the list.
+        "group": 0 if cuttable else 1,
         "ext": ext,
         "index": c.index,
         "tc": c.timeline_in_tc,
@@ -192,6 +195,24 @@ def row_for(c: xmlcut.Cut, speed: str, excluded: set[str] = frozenset()) -> dict
     }
 
 
+def apply_type_filter() -> None:
+    """Rebuild the working cut list from the full parse, honouring the type selection.
+
+    The filter belongs to the SCAN, not the cut: dropping a type has to re-index and
+    re-name what remains, so the output is a clean 01..N instead of a run with gaps where
+    the skipped clips used to be. Same as `--ext` on the CLI, which filters before the
+    indices are handed out.
+    """
+    tl = JOB.timeline
+    if tl is None:
+        return
+    tl.cuts = [c for c in JOB.all_cuts if ext_of(c) not in JOB.excluded]
+    for i, c in enumerate(tl.cuts, start=1):
+        c.index = i
+    xmlcut.assign_output_names(tl.cuts, JOB.args.container, tl.sequence_fps)
+    JOB.total = len(tl.cuts)
+
+
 def type_counts(cuts, excluded: set[str]) -> list[dict]:
     """Every source type present, with how many cuts use it — built from the timeline
     rather than a fixed list, so it can only ever offer types you actually have."""
@@ -201,7 +222,7 @@ def type_counts(cuts, excluded: set[str]) -> list[dict]:
 
 
 def summarize(cuts, speed: str, excluded: set[str] = frozenset()) -> str:
-    off = sum(1 for c in cuts if ext_of(c) in excluded)
+    off = 0
     missing = sum(1 for c in cuts if not c.source_exists
                   and c.media_kind != "unsupported")
     unsupported = sum(1 for c in cuts if c.media_kind == "unsupported")
@@ -221,8 +242,7 @@ def summarize(cuts, speed: str, excluded: set[str] = frozenset()) -> str:
                  if tally["skipped_existing"] else ""))
         return (f"{done} · {tally['failed']} failed · {missing} missing · "
                 f"{unsupported} unsupported · {ramped} retimed{extra}")
-    ready = sum(1 for c in cuts if c.source_exists
-                and c.media_kind != "unsupported" and ext_of(c) not in excluded)
+    ready = sum(1 for c in cuts if c.source_exists and c.media_kind != "unsupported")
     return (f"{len(cuts)} cuts · {ready} ready · "
             + (f"{off} type-skipped · " if off else "")
             + f"{missing} missing · {unsupported} unsupported · {ramped} retimed{extra}")
@@ -361,6 +381,7 @@ def do_scan(payload: dict) -> dict:
             if ready else "Nothing cuttable — fix the media paths first.")
 
     JOB.timeline = tl
+    JOB.all_cuts = list(tl.cuts)
     JOB.total = len(tl.cuts)
     return JOB.snapshot()
 
@@ -375,8 +396,7 @@ def do_cut(payload: dict) -> dict:
     if not str(outdir):
         raise ValueError("Choose where the clips should go.")
 
-    ready = [c for c in tl.cuts if c.source_exists and c.media_kind != "unsupported"
-             and ext_of(c) not in JOB.excluded]
+    ready = [c for c in tl.cuts if c.source_exists and c.media_kind != "unsupported"]
     if not ready:
         raise ValueError("Nothing to cut — every clip is missing, unsupported, or "
                          "switched off in File types.")
@@ -398,8 +418,6 @@ def do_cut(payload: dict) -> dict:
                 for c in tl.cuts:
                     if JOB.cancel.is_set():
                         break
-                    if ext_of(c) in JOB.excluded:
-                        continue        # switched off; leave its status untouched
                     futures.append(ex.submit(xmlcut.run_cut, c, outdir,
                                              args, tl.sequence_fps))
                 for fut in futures:
@@ -517,8 +535,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/cut":
                 return self._json(do_cut(payload))
             if path == "/api/types":
+                if JOB.running:
+                    return self._json({"error": "a cut is running — cancel it first"}, 400)
                 JOB.excluded = {str(e).lower().lstrip(".")
                                 for e in (payload.get("excluded") or [])}
+                apply_type_filter()
                 return self._json(JOB.snapshot())
             if path == "/api/cancel":
                 JOB.cancel.set()
@@ -875,8 +896,7 @@ function render(st){
     : "Pick an XML export, then Scan. Nothing is encoded until you press Cut.";
   let lastGroup = 0;
   const DIVIDERS = {
-    1: "Switched off in File types — turn the type back on to include these",
-    2: "Not cuttable — fix the paths, or render the comps out of After Effects first",
+    1: "Not cuttable — fix the paths, or render the comps out of After Effects first",
   };
   $("rows").innerHTML = st.rows.length ? st.rows.map(r => {
     const head = (r.group > lastGroup && DIVIDERS[r.group])

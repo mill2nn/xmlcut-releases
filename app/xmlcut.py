@@ -38,7 +38,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "2.2"
+VERSION = "2.3"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -59,22 +59,29 @@ MAX_NEST_DEPTH = 4
 
 # The encoder settings, decided once rather than exposed as knobs.
 #
-# crf 0 is x264's lossless mode, and it is lossless in the strict sense: verified
-# bit-exact against the decoded source, so a clip carries the same samples the editor
-# saw. It costs roughly 3x the file size of crf 16. For a training dataset that is the
-# right trade — an artefact introduced here is indistinguishable from one the model is
-# supposed to learn from.
+# crf 1, NOT crf 0. This was lossless (crf 0) until a clip turned out to be unplayable on
+# another Mac, and the reason is not obvious: x264's lossless mode emits the
+# **High 4:4:4 Predictive** profile even when the pixel format is plain yuv420p, and
+# QuickTime, Finder preview and Premiere's macOS decoders cannot read that profile at all.
+# Measured on one 2-second clip:
+#
+#     crf 0   1000 KB   profile "High 4:4:4 Predictive"  <- will not play on a Mac
+#     crf 1    712 KB   profile "High"                   <- plays everywhere
+#
+# So crf 1 is both smaller and playable, and visually indistinguishable. What is given up
+# is the strict bit-exactness — worth knowing, but a dataset you cannot preview is worse.
+# `-profile:v high` is pinned explicitly so this can never silently drift back to 4:4:4.
 #
 # veryfast rather than medium because the preset only changes how hard x264 works to
-# compress; it never moves a frame boundary. Measured frame-exact at every preset, and
-# ~30% faster than medium.
-X264_CRF = "0"
+# compress; it never moves a frame boundary. Measured frame-exact at every preset.
+X264_CRF = "1"
 X264_PRESET = "veryfast"
+X264_PROFILE = "high"
 
 # How many clips to encode at once. Not auto-detected from the core count, and
 # deliberately not the core count itself: libx264 already parallelises across every
 # core inside a single encode, so extra concurrent encodes only add contention.
-# Measured on 24 clips of 1080x1920 lossless, best of two runs each:
+# Measured on 24 clips of 1080x1920 (at crf 0, as it then was), best of two runs each:
 #     4 jobs 7.2s · 7 jobs 7.7s · 14 jobs 8.3s · 14 jobs w/ 2 threads 7.9s
 # i.e. more jobs is SLOWER, and the whole spread is 19%. Four would win on local
 # media, but sources on Google Drive File Stream block on network reads, and there
@@ -360,15 +367,14 @@ def read_timeremap(clip: ET.Element) -> tuple[float, bool, bool, str, list]:
     return (speed or 100.0), reverse, varies, span, others
 
 
-def secs_cs(frames: float, fps: float) -> str:
-    """One timeline position as seconds and hundredths: 2.5 s -> "02.50".
+def fmt_secs(total: float) -> str:
+    """Seconds and hundredths, zero-padded: 2.5 -> "02.50".
 
     The separator is a dot, not the colon you would write by hand: Finder still treats ':'
     in a filename as a path separator and displays it as '/', which would turn a tidy
-    "(00:00-00:02)" into "(00/00-00/02)". A dot also keeps the hyphen free to mean one
+    "(00.00-00.02)" into "(00/00-00/02)". A dot also keeps the hyphen free to mean one
     thing only — the gap between the two ends of the range.
     """
-    total = frames / fps if fps > 0 else 0.0
     whole = int(total)
     cs = int(round((total - whole) * 100))
     if cs >= 100:
@@ -376,13 +382,28 @@ def secs_cs(frames: float, fps: float) -> str:
     return f"{whole:02d}.{cs:02d}"
 
 
-def tc_range(cut: "Cut", fps: float) -> str:
-    """The clip's span on the timeline, for the filename: "(00.00-02.00)".
+def secs_cs(frames: float, fps: float) -> str:
+    """A frame position as seconds and hundredths: frame 60 at 24 fps -> "02.50".
 
-    A range rather than just the in-point, so a filename says how long the clip is and
-    where it ends without opening anything or cross-referencing the sheet.
     """
-    return f"({secs_cs(cut.timeline_in_frames, fps)}-{secs_cs(cut.timeline_out_frames, fps)})"
+    return fmt_secs(frames / fps if fps > 0 else 0.0)
+
+
+def tc_range(cut: "Cut", fps: float) -> str:
+    """The clip's span **inside its source file**, for the filename: "(03.93-05.06)".
+
+    The source range, not the timeline position — the filename already names the source
+    file, so the numbers beside it should locate the range in that file. Timeline position
+    is still in clips.csv and the manifest, where it belongs.
+
+    Falls back to the timeline position for a still, which has no meaningful source range:
+    its in/out are an arbitrary offset into a virtual 24-hour clip.
+    """
+    if cut.media_kind == "still" or cut.source_duration_seconds <= 0:
+        return (f"({secs_cs(cut.timeline_in_frames, fps)}"
+                f"-{secs_cs(cut.timeline_out_frames, fps)})")
+    start = cut.source_in_seconds
+    return f"({fmt_secs(start)}-{fmt_secs(start + cut.source_duration_seconds)})"
 
 
 def sanitize(name: str, maxlen: int = 60) -> str:
@@ -963,9 +984,11 @@ def pix_fmt_for(cut: Cut) -> str:
     are usually graphics or a logo where 4:2:0 chroma subsampling is the most visible loss
     there is. 4:4:4 costs almost nothing across a handful of frames.
     """
-    if cut.media_kind == "still":
-        return "yuv444p"
-    return cut.pix_fmt if cut.pix_fmt in X264_PIX_FMTS else "yuv420p"
+    # Everything lands in 4:2:0. Preserving a 10-bit 4:2:2 source used to be the right
+    # call under lossless, but any format above 8-bit 4:2:0 pushes x264 into a High 10 or
+    # 4:4:4 profile, which is the exact thing that made these files unplayable. Playable
+    # everywhere beats a chroma fidelity nothing downstream was reading.
+    return "yuv420p"
 
 
 def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
@@ -976,7 +999,8 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         cmd += ["-loop", "1", "-framerate", f"{seq_fps:.6f}", "-i", cut.source_path,
                 "-t", f"{cut.source_duration_seconds:.6f}",
                 "-c:v", args.vcodec, "-crf", X264_CRF, "-preset", X264_PRESET,
-                "-pix_fmt", cut.pix_fmt_out,
+                "-profile:v", X264_PROFILE, "-pix_fmt", cut.pix_fmt_out,
+                "-movflags", "+faststart",
                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-an", str(out_path)]
         return cmd
 
@@ -1071,7 +1095,8 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
             if chain:
                 cmd += ["-filter:a", ",".join(chain)]
         cmd += ["-c:v", args.vcodec, "-crf", X264_CRF, "-preset", X264_PRESET,
-                "-pix_fmt", cut.pix_fmt_out]
+                "-profile:v", X264_PROFILE, "-pix_fmt", cut.pix_fmt_out,
+                "-movflags", "+faststart"]
         cmd += ["-an"] if args.no_audio else ["-c:a", "aac", "-b:a", "192k"]
         cmd += [str(out_path)]
         return cmd
@@ -1087,7 +1112,11 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         "-c:v", args.vcodec,
         "-crf", X264_CRF,
         "-preset", X264_PRESET,
+        # Pinned, so lossless mode can never quietly reintroduce High 4:4:4 Predictive —
+        # a profile no Mac decoder will open.
+        "-profile:v", X264_PROFILE,
         "-pix_fmt", cut.pix_fmt_out,
+        "-movflags", "+faststart",       # so it starts playing without reading the tail
     ]
     if args.no_audio:
         cmd += ["-an"]
@@ -1247,7 +1276,8 @@ def write_manifest(tl: Timeline, outdir: Path, args) -> tuple[Path, Path, Path]:
                 "duration_tc": frames_to_tc(tl.sequence_duration_frames, tl.sequence_fps),
             },
             "settings": {
-                "encode": f"libx264 crf {X264_CRF} (lossless), preset {X264_PRESET}",
+                "encode": (f"libx264 crf {X264_CRF} profile {X264_PROFILE}, "
+                           f"preset {X264_PRESET}"),
                 "jobs": JOBS,
                 "speed": getattr(args, "speed", "native"),
                 # Which source types were left out, so the output can be read honestly
@@ -1465,14 +1495,16 @@ def main():
 
     # An .aep isn't "missing" — it's a Dynamic Link comp that was never a file ffmpeg
     # could read, and the fix is to render it, not to remap a path. Keep them apart.
-    # A pixel-format conversion is a real loss, and this tool encodes losslessly, so say
-    # so rather than letting it happen quietly.
-    converted = sorted({(c.pix_fmt, pix_fmt_for(c)) for c in tl.cuts
-                        if c.pix_fmt and c.media_kind == "video"
-                        and c.pix_fmt not in X264_PIX_FMTS})
-    for src_fmt, dst_fmt in converted:
-        print(f"  !! {src_fmt} can't be encoded by x264 — those clips convert to "
-              f"{dst_fmt}, which is NOT lossless. Recorded as pix_fmt_out.")
+    # Everything is encoded 8-bit 4:2:0 so the files play on a Mac. When a source carries
+    # more than that — 10-bit, 4:2:2, 4:4:4 — real fidelity is being dropped, and that
+    # should be said out loud rather than discovered later in the manifest.
+    RICHER = {"yuv422p", "yuv444p", "yuv420p10le", "yuv422p10le", "yuv444p10le",
+              "yuv420p12le", "yuv422p12le", "yuv444p12le", "gbrp", "gbrp10le"}
+    downgraded = sorted({c.pix_fmt for c in tl.cuts
+                         if c.media_kind == "video" and c.pix_fmt in RICHER})
+    for fmt in downgraded:
+        print(f"  !! source is {fmt}; output is 8-bit yuv420p — chroma and/or bit depth "
+              f"are reduced. Required for the files to play outside ffmpeg.")
 
     missing = [c for c in tl.cuts if not c.source_exists and c.media_kind != "unsupported"]
     if missing:

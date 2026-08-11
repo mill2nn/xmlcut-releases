@@ -134,18 +134,23 @@ clips/
   manifest.json
 ```
 
-Filenames are **`index_(start-end)_originalfilename.ext`** — the order the clip appears in the
-timeline, the span it occupies, and which source file it came from. Times are seconds and
-hundredths, so `(02.00-04.50)` is a two-and-a-half second clip starting two seconds in. They
-sort in timeline order, and the index widens past 99 clips so that stays true.
+Filenames are **`index_(in-out)_originalfilename.ext`**. The index is the order the clip
+appears in the timeline; the range is **where inside that source file the clip came from**, in
+seconds and hundredths. So `03_(12.50-14.00)_CAM_A.mp4` is the third cut, taken from 12.5 s to
+14.0 s of `CAM_A.mp4`.
+
+The **source** range rather than the timeline position, because the filename already names the
+source file — the numbers beside it should tell you where to look in that file. Timeline
+position is in `clips.csv` and the manifest, where it belongs. (A still has no meaningful
+source range — its in/out are an arbitrary offset into a virtual 24-hour clip — so it falls
+back to its timeline position.)
 
 Why a dot inside each time and not the colon you would write by hand: Finder still treats `:`
-in a filename as a path separator and shows it as `/`, which would turn `(00:00-00:02)` into
-`(00/00-00/02)`. The dot also leaves the hyphen meaning one thing only — the gap between the
+in a filename as a path separator and shows it as `/`, which would turn `(12:50-14:00)` into
+`(12/50-14/00)`. The dot also leaves the hyphen meaning one thing only — the gap between the
 two ends of the range.
 
-The source file's name rather than the Premiere clip name, because that is what you go looking
-for when you want the original. Both are in `clips.csv` either way.
+Files sort in timeline order, and the index widens past 99 clips so that stays true.
 
 ### Choosing which file types to cut
 
@@ -157,9 +162,13 @@ your timeline actually uses with a count:
  ☑ .mp4 16      ☑ .aep 1      ☑ .png 1
 ```
 
-Switch one off and those clips drop out immediately — the ready count, the table and the Cut
-button all follow. Their rows move under a divider saying *"Switched off in File types"*, kept
-separate from the ones that are genuinely broken, because the two need different fixes.
+Switch one off and those clips leave the scan entirely — the list, the count and the numbering
+all rebuild, so the output is a clean run of numbers rather than one with gaps where the
+skipped clips used to be. The panel keeps offering the type so you can switch it back on; it
+counts from the full timeline, not the filtered list.
+
+This happens at **scan** time, not cut time, which is what makes the renumbering possible —
+the same point at which `--ext` filters on the CLI.
 
 From the terminal it's `--ext`:
 
@@ -227,44 +236,44 @@ clips carried material from the following shot, which for a training dataset is 
 being a few frames late.
 
 And it bought almost nothing: 0.42 s against 0.91 s for the same 16 clips — while the
-lossless re-encode that replaced both now runs the same 16 in 0.75 s. The speed copy was
-reached for is available without giving up accuracy. See §5.1.
+re-encode that replaced both runs the same 16 in about 0.75 s. The speed copy was reached for
+is available without giving up accuracy. See §5.1.
 
 Remaining encode options: `--vcodec libx264`, `--container mp4`, `--no-audio`. Quality is not
 an option — see §5.1.
 
-### 5.1 Quality is fixed: lossless
+### 5.1 Quality is fixed: crf 1, and it plays everywhere
 
-There is no `--crf` and no `--preset`. Every clip is encoded with **x264 crf 0** — x264's
-lossless mode — at the **veryfast** preset.
+There is no `--crf` and no `--preset`. Every clip is **x264 crf 1, High profile, yuv420p**, at
+the **veryfast** preset, with `+faststart`.
 
-`crf 0` is lossless in the strict sense, not "visually lossless": every comparable clip in the
-fixture decodes **bit-for-bit identical** to the same range decoded straight from the source.
-For a dataset that is the point — an artefact introduced here is indistinguishable from one the
-model is meant to learn from.
+This was crf 0 — mathematically lossless — until clips turned out to be unplayable on another
+Mac. The reason is not obvious and worth writing down: **x264's lossless mode emits the
+`High 4:4:4 Predictive` profile even when the pixel format is plain `yuv420p`**, and QuickTime,
+Finder preview and Premiere's macOS decoders cannot read that profile at all. Measured on one
+2-second clip:
 
-The cost is size, and it is smaller than you would guess, because dropping to `veryfast` pays
-for part of it:
+| | Size | Profile | Plays on a Mac |
+|---|---|---|---|
+| crf 0 (lossless) | 1000 KB | High 4:4:4 Predictive | **no** |
+| **crf 1 (now)** | **712 KB** | **High** | **yes** |
+| crf 16 | 299 KB | High | yes |
 
-| | 16 fixture clips | Output size |
-|---|---|---|
-| lossless, veryfast **(now)** | 0.75 s | 16.2 MB |
-| crf 16, medium (before) | 0.91 s | 5.4 MB |
+So crf 1 is both smaller and playable. What is given up is strict bit-exactness; what is gained
+is a clip you can double-click. `-profile:v high` is pinned explicitly so lossless mode can
+never quietly reintroduce 4:4:4.
 
-Roughly **3x the bytes, and slightly faster**. The preset only changes how hard x264 works to
-compress; it never moves a frame boundary, which is why dropping from medium to veryfast costs
-nothing in accuracy — re-verified exact at ultrafast, veryfast, medium and slow.
+The preset only changes how hard x264 works to compress; it never moves a frame boundary, which
+is why veryfast costs nothing in accuracy — verified frame-exact at ultrafast, veryfast, medium
+and slow.
 
-**Pixel format is preserved.** "Lossless" would be a lie if a 10-bit 4:2:2 ProRes source were
-flattened to `yuv420p` before the encoder saw it, so the source's format is kept wherever
-libx264 can take it (4:2:0 / 4:2:2 / 4:4:4, 8- and 10-bit). `pix_fmt_out` records what was
-actually used, and anything x264 cannot encode is reported as a lossy conversion rather than
-done quietly. Stills are the deliberate exception: they arrive as RGB, which x264 cannot take,
-so they go to `yuv444p` — graphics and logos are where 4:2:0 chroma subsampling shows most.
+**Everything lands in 8-bit 4:2:0.** Preserving a 10-bit 4:2:2 source was the right call under
+lossless, but any format above 8-bit 4:2:0 pushes x264 into a High 10 or 4:4:4 profile — the
+same thing that made these files unplayable. `pix_fmt_out` records what was used.
 
 **Parallelism is fixed too.** There is no `--jobs`: it is `min(8, cores)`, and deliberately not
 the core count. libx264 already parallelises across every core inside a single encode, so extra
-concurrent encodes mostly add contention. Measured on 24 clips of 1080x1920 lossless, best of
+concurrent encodes mostly add contention. Measured on 24 clips of 1080x1920, best of
 two runs each:
 
 | jobs | wall | vs fastest |
