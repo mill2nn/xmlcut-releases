@@ -1,0 +1,10 @@
+{
+  "version": "1.9",
+  "notes": "Filenames carry the timecode range; clips.csv sheet; fixed job count.",
+  "files": [
+    "xmlcut.py",
+    "xmlcut_gui.py",
+    "README.md",
+    "Open xmlcut GUI.command"
+  ]
+}
