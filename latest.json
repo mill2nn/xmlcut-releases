@@ -1,6 +1,6 @@
 {
-  "version": "2.1",
-  "notes": "Released files moved to app/ so the repo keeps its own landing page.",
+  "version": "2.2",
+  "notes": "Pick which source file types to cut \u2014 a checkbox per type in the GUI, --ext on the CLI.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

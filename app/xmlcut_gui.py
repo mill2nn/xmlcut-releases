@@ -83,6 +83,10 @@ class Job:
         self.finished = False
         self.cancel = threading.Event()
         self.manifest: str = ""
+        # Source extensions the user has switched OFF. Held here rather than in the
+        # browser so the table, the summary and the cut cannot disagree about what is
+        # being cut — one source of truth, checked in exactly one place.
+        self.excluded: set[str] = set()
 
     def say(self, msg: str):
         with self.lock:
@@ -96,8 +100,9 @@ class Job:
                 # Sorted here rather than in the browser so the CLI, the manifest and the
                 # filenames all keep pure timeline order — a clip's number must not change
                 # because some other clip happens to be offline.
-                "rows": sorted((row_for(c, self.args.speed) for c in cuts),
+                "rows": sorted((row_for(c, self.args.speed, self.excluded) for c in cuts),
                                key=lambda r: (r["group"], r["index"])),
+                "types": type_counts(cuts, self.excluded),
                 "log": list(self.log),
                 "progress": self.progress,
                 "total": self.total,
@@ -106,7 +111,7 @@ class Job:
                 "manifest": self.manifest,
                 "update": UPDATE["info"],
                 "update_applied": UPDATE["applied"],
-                "summary": summarize(cuts, self.args.speed) if cuts else "",
+                "summary": summarize(cuts, self.args.speed, self.excluded) if cuts else "",
             }
 
 
@@ -128,7 +133,11 @@ def start_update_check() -> None:
     threading.Thread(target=work, daemon=True).start()
 
 
-def row_for(c: xmlcut.Cut, speed: str) -> dict:
+def ext_of(c: xmlcut.Cut) -> str:
+    return Path(c.source_path).suffix.lower().lstrip(".") or "(none)"
+
+
+def row_for(c: xmlcut.Cut, speed: str, excluded: set[str] = frozenset()) -> dict:
     frames = c.source_consumed_frames if speed == "native" else c.duration_frames
     # What makes this clip interesting, said in the table rather than buried in the log.
     notes = []
@@ -142,7 +151,9 @@ def row_for(c: xmlcut.Cut, speed: str) -> dict:
         notes.append(f"{c.nested_trimmed} trimmed")
     if c.track_type == "audio":
         notes.append("audio")
-    cuttable = c.source_exists and c.media_kind != "unsupported"
+    ext = ext_of(c)
+    off = ext in excluded
+    cuttable = c.source_exists and c.media_kind != "unsupported" and not off
     # Before a cut runs, every clip's status is still "pending". Showing that as "ready"
     # was a lie for the ones that can never be cut — and doubly confusing once they sit
     # under a divider saying they aren't. Say why here, from what the scan already knows.
@@ -152,12 +163,17 @@ def row_for(c: xmlcut.Cut, speed: str) -> dict:
         # hunting for a path when the fix is to render it out.
         status = ("AE comp — render it" if c.media_kind == "unsupported"
                   else "missing source" if not c.source_exists
+                  else f"skipped — .{ext} off" if off
                   else "ready")
     else:
         status = {"ok": "written", "skipped_existing": "already there",
                   "no_audio": "silent source"}.get(c.status, c.status)
     return {
-        "group": 0 if cuttable else 1,
+        # 0 ready · 1 switched off by type · 2 cannot be cut at all. Three groups rather
+        # than two so the divider above each says the right thing: "you turned this off"
+        # and "this is broken" need different fixes.
+        "group": 0 if cuttable else (1 if off else 2),
+        "ext": ext,
         "index": c.index,
         "tc": c.timeline_in_tc,
         "clip": c.clip_name,
@@ -176,7 +192,16 @@ def row_for(c: xmlcut.Cut, speed: str) -> dict:
     }
 
 
-def summarize(cuts, speed: str) -> str:
+def type_counts(cuts, excluded: set[str]) -> list[dict]:
+    """Every source type present, with how many cuts use it — built from the timeline
+    rather than a fixed list, so it can only ever offer types you actually have."""
+    tally = collections.Counter(ext_of(c) for c in cuts)
+    return [{"ext": e, "count": n, "on": e not in excluded}
+            for e, n in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def summarize(cuts, speed: str, excluded: set[str] = frozenset()) -> str:
+    off = sum(1 for c in cuts if ext_of(c) in excluded)
     missing = sum(1 for c in cuts if not c.source_exists
                   and c.media_kind != "unsupported")
     unsupported = sum(1 for c in cuts if c.media_kind == "unsupported")
@@ -196,9 +221,11 @@ def summarize(cuts, speed: str) -> str:
                  if tally["skipped_existing"] else ""))
         return (f"{done} · {tally['failed']} failed · {missing} missing · "
                 f"{unsupported} unsupported · {ramped} retimed{extra}")
-    ready = len(cuts) - missing - unsupported
-    return (f"{len(cuts)} cuts · {ready} ready · {missing} missing · "
-            f"{unsupported} unsupported · {ramped} retimed{extra}")
+    ready = sum(1 for c in cuts if c.source_exists
+                and c.media_kind != "unsupported" and ext_of(c) not in excluded)
+    return (f"{len(cuts)} cuts · {ready} ready · "
+            + (f"{off} type-skipped · " if off else "")
+            + f"{missing} missing · {unsupported} unsupported · {ramped} retimed{extra}")
 
 
 # --------------------------------------------------------------------------
@@ -284,7 +311,7 @@ def do_scan(payload: dict) -> dict:
         old, new = raw.split("=", 1)
         remaps.append((old.strip(), new.strip()))
 
-    JOB.__init__()                            # fresh state for a fresh scan
+    JOB.__init__()                            # fresh state for a fresh scan, selection included
     JOB.args = args
     JOB.outdir = Path(payload["out"]).expanduser() if payload.get("out") else None
     JOB.say(f"Reading {xml.name} …")
@@ -348,9 +375,11 @@ def do_cut(payload: dict) -> dict:
     if not str(outdir):
         raise ValueError("Choose where the clips should go.")
 
-    ready = [c for c in tl.cuts if c.source_exists and c.media_kind != "unsupported"]
+    ready = [c for c in tl.cuts if c.source_exists and c.media_kind != "unsupported"
+             and ext_of(c) not in JOB.excluded]
     if not ready:
-        raise ValueError("No cuttable clips — fix the media paths first.")
+        raise ValueError("Nothing to cut — every clip is missing, unsupported, or "
+                         "switched off in File types.")
 
     args = JOB.args
     JOB.outdir = outdir
@@ -360,6 +389,8 @@ def do_cut(payload: dict) -> dict:
     def work():
         try:
             outdir.mkdir(parents=True, exist_ok=True)
+            if JOB.excluded:
+                JOB.say(f"  skipping types: {', '.join('.' + e for e in sorted(JOB.excluded))}")
             JOB.say(f"Cutting {len(ready)} clip(s), {xmlcut.JOBS} parallel job(s), "
                     f"speed={args.speed} …")
             with ThreadPoolExecutor(max_workers=xmlcut.JOBS) as ex:
@@ -367,6 +398,8 @@ def do_cut(payload: dict) -> dict:
                 for c in tl.cuts:
                     if JOB.cancel.is_set():
                         break
+                    if ext_of(c) in JOB.excluded:
+                        continue        # switched off; leave its status untouched
                     futures.append(ex.submit(xmlcut.run_cut, c, outdir,
                                              args, tl.sequence_fps))
                 for fut in futures:
@@ -376,6 +409,7 @@ def do_cut(payload: dict) -> dict:
                     if c.error:
                         JOB.say(f"  {c.status.upper()} {c.clip_name}: "
                                 f"{c.error.splitlines()[0][:150]}")
+            args.types_excluded = sorted(JOB.excluded) or None
             csv_p, _, sheet_p = xmlcut.write_manifest(tl, outdir, args)
             tally = collections.Counter(c.status for c in tl.cuts)
             if JOB.cancel.is_set():
@@ -482,6 +516,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json(do_scan(payload))
             if path == "/api/cut":
                 return self._json(do_cut(payload))
+            if path == "/api/types":
+                JOB.excluded = {str(e).lower().lstrip(".")
+                                for e in (payload.get("excluded") or [])}
+                return self._json(JOB.snapshot())
             if path == "/api/cancel":
                 JOB.cancel.set()
                 JOB.say("Cancelling — running ffmpeg jobs will finish, no new ones start.")
@@ -624,6 +662,11 @@ PAGE = r"""<!doctype html>
        background:var(--panel);color:var(--accent);font-weight:650;
        border:2px dashed var(--accent);z-index:5}
   .drophint{color:var(--dim);font-size:12px;margin-top:10px}
+  .types{display:flex;flex-wrap:wrap;gap:8px 18px}
+  .types label{display:flex;align-items:center;gap:6px;color:var(--text);font-size:13px;
+       cursor:pointer}
+  .types .n{color:var(--dim);font-variant-numeric:tabular-nums}
+  .types label.off{color:var(--dim)}
   #updbar{display:flex;align-items:center;gap:12px;margin:0 0 14px;padding:10px 12px;
        border:1px solid var(--accent);border-radius:10px;background:var(--panel);
        font-size:13px}
@@ -701,6 +744,14 @@ PAGE = r"""<!doctype html>
       choice: <b>x264 crf 0</b>, verified bit-exact against the decoded source, at the
       <b>veryfast</b> preset. Stream copy was removed because it can only start on a keyframe,
       which overran measured cut lengths by 22–147%.</div>
+  </fieldset>
+
+  <fieldset id="typesbox" hidden><legend>File types<span class="tip" data-tip="Every source
+    type your timeline actually uses, with how many cuts come from each. Switch one off and
+    those clips drop out of the cut — the count, the table and the Cut button all follow
+    immediately. Built from the timeline, so it never offers a type you do not have."></span>
+    </legend>
+    <div id="types" class="types"></div>
   </fieldset>
 
   <div class="bar">
@@ -823,10 +874,13 @@ function render(st){
     ? "No cuts matched — check the sequence and Min frames."
     : "Pick an XML export, then Scan. Nothing is encoded until you press Cut.";
   let lastGroup = 0;
-  const divider = `<tr class="divider"><td colspan="8">Not cuttable — fix the paths, or render
-      the comps out of After Effects first</td></tr>`;
+  const DIVIDERS = {
+    1: "Switched off in File types — turn the type back on to include these",
+    2: "Not cuttable — fix the paths, or render the comps out of After Effects first",
+  };
   $("rows").innerHTML = st.rows.length ? st.rows.map(r => {
-    const head = (r.group === 1 && lastGroup === 0) ? divider : "";
+    const head = (r.group > lastGroup && DIVIDERS[r.group])
+      ? `<tr class="divider"><td colspan="8">${DIVIDERS[r.group]}</td></tr>` : "";
     lastGroup = r.group;
     return head + `<tr>
       <td class="num">${r.index}</td><td>${esc(r.tc)}</td>
@@ -847,6 +901,7 @@ function render(st){
   $("scan").disabled = st.running;
   $("cancel").disabled = !st.running;
   $("reveal").disabled = !st.manifest && !st.finished;
+  renderTypes(st);
   renderUpdate(st);
 }
 async function poll(){
@@ -932,6 +987,22 @@ $("cut").onclick = async () => {
 $("cancel").onclick = () => api("/api/cancel", {}).catch(e => say("!! " + e.message, true));
 $("reveal").onclick = () => api("/api/reveal", {path: $("out").value.trim()})
                               .catch(e => say("!! " + e.message, true));
+let excluded = new Set();
+function renderTypes(st){
+  const box = $("typesbox");
+  if(!st.types || !st.types.length){ box.hidden = true; return; }
+  box.hidden = false;
+  $("types").innerHTML = st.types.map(t => `<label class="${t.on ? "" : "off"}">
+      <input type="checkbox" data-ext="${esc(t.ext)}"${t.on ? " checked" : ""}>
+      .${esc(t.ext)} <span class="n">${t.count}</span></label>`).join("");
+  $("types").querySelectorAll("input").forEach(cb => {
+    cb.onchange = async () => {
+      if(cb.checked) excluded.delete(cb.dataset.ext); else excluded.add(cb.dataset.ext);
+      try{ render(await api("/api/types", {excluded: [...excluded]})); }
+      catch(e){ say("!! " + e.message, true); }
+    };
+  });
+}
 function renderUpdate(st){
   const bar = $("updbar");
   if(st.update_applied){

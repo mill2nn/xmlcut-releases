@@ -147,6 +147,30 @@ two ends of the range.
 The source file's name rather than the Premiere clip name, because that is what you go looking
 for when you want the original. Both are in `clips.csv` either way.
 
+### Choosing which file types to cut
+
+A timeline usually mixes types you want and types you don't — generated `.mp4`, a `.png`
+logo, an `.aep` comp. The GUI shows a **File types** panel after a scan, listing every type
+your timeline actually uses with a count:
+
+```
+ ☑ .mp4 16      ☑ .aep 1      ☑ .png 1
+```
+
+Switch one off and those clips drop out immediately — the ready count, the table and the Cut
+button all follow. Their rows move under a divider saying *"Switched off in File types"*, kept
+separate from the ones that are genuinely broken, because the two need different fixes.
+
+From the terminal it's `--ext`:
+
+```bash
+python3 xmlcut.py timeline.xml -o ./clips --sequence 1 --ext mp4,mov
+```
+
+Either way the filter is **recorded in the manifest** (`types_kept` / `types_excluded`). A
+dataset with every still removed is a different dataset, and nothing else in the output would
+say so.
+
 ### clips.csv — the sheet
 
 Six columns, made for opening in Sheets and looking things up:
@@ -322,6 +346,8 @@ Sequence markers land in `manifest.json` under `markers`, with name, comment, an
   --no-audio             drop audio from outputs
   --speed {native,timeline}   how to treat speed-ramped clips (default native)
   --min-frames N         skip cuts shorter than N frames
+  --ext LIST             only cut clips whose source file has one of these extensions,
+                         comma separated (--ext mp4,mov); default is every type present
   --resume               skip cuts whose output file already exists and is non-empty
   --no-probe             skip ffprobe technical specs (faster)
   --manifest-only        write the manifest, cut nothing

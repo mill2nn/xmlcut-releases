@@ -38,7 +38,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "2.1"
+VERSION = "2.2"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -1250,6 +1250,11 @@ def write_manifest(tl: Timeline, outdir: Path, args) -> tuple[Path, Path, Path]:
                 "encode": f"libx264 crf {X264_CRF} (lossless), preset {X264_PRESET}",
                 "jobs": JOBS,
                 "speed": getattr(args, "speed", "native"),
+                # Which source types were left out, so the output can be read honestly
+                # later: a dataset missing every still is a different dataset, and
+                # nothing else in here would say so.
+                "types_kept": getattr(args, "types_kept", None),
+                "types_excluded": getattr(args, "types_excluded", None),
             },
             "warnings": tl.warnings,
             "counts": {
@@ -1364,6 +1369,9 @@ def main():
                          "(default, best for training data); 'timeline' retimes the clip so "
                          "it matches what played on screen")
     ap.add_argument("--min-frames", type=int, default=1, help="skip cuts shorter than N frames")
+    ap.add_argument("--ext", metavar="LIST",
+                    help="only cut clips whose SOURCE file has one of these extensions, "
+                         "comma separated: --ext mp4,mov (default: every type present)")
     ap.add_argument("--resume", action="store_true",
                     help="skip cuts whose output file already exists and is non-empty "
                          "(pick a long run back up where it stopped)")
@@ -1415,6 +1423,15 @@ def main():
     if args.tracks != "all":
         tl.cuts = [c for c in tl.cuts if c.track_type == args.tracks]
     tl.cuts = [c for c in tl.cuts if c.duration_frames >= args.min_frames]
+    if args.ext:
+        # Filtered BEFORE the indices are assigned, so a run limited to one type gets a
+        # clean 01..N rather than gaps where the other types used to be.
+        want = {e.strip().lower().lstrip(".") for e in args.ext.split(",") if e.strip()}
+        args.types_kept = sorted(want)
+        before = len(tl.cuts)
+        tl.cuts = [c for c in tl.cuts
+                   if Path(c.source_path).suffix.lower().lstrip(".") in want]
+        print(f"  --ext {','.join(sorted(want))}: kept {len(tl.cuts)} of {before} cuts")
     for i, c in enumerate(tl.cuts, start=1):
         c.index = i
     # Named now, while the list is final — so --manifest-only and the sheet can show the
