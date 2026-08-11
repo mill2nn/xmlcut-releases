@@ -38,7 +38,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "1.9"
+VERSION = "2.0"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -198,6 +198,10 @@ def apply_update(info: dict) -> tuple[bool, str]:
                 compile(data.decode("utf-8"), rel, "exec")
             except (SyntaxError, UnicodeDecodeError) as e:
                 return False, f"{rel} did not parse ({e}) — nothing was changed"
+            # NOTE: this catches a publish whose files and version disagree, but it
+            # cannot catch one version published twice with different bytes — both
+            # copies report the same number. That is why Publish Update.command bumps
+            # rather than reusing a number; see the --same warning there.
             if rel == "xmlcut.py":
                 m = re.search(r'VERSION\s*=\s*"([^"]+)"', data.decode("utf-8"))
                 if not m or m.group(1) != info.get("version"):

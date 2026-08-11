@@ -1,6 +1,6 @@
 {
-  "version": "1.9",
-  "notes": "xmlcut 1.8: filenames carry the timecode range, not just the in-point",
+  "version": "2.0",
+  "notes": "Self-update: check GitHub, one click to install, rolls back on any failure.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
