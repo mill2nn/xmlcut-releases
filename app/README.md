@@ -73,6 +73,11 @@ and one **Update** button. No re-downloading, no new zip. From the terminal inst
 python3 xmlcut.py --update
 ```
 
+The button is the status line while it works — *Downloading xmlcut_gui.py (2/4)*, *Backing up
+the current version*, *Installing 2.4* — and turns into **Quit server** when it's done, because
+the running process still holds the old code in memory and restarting is the only thing left to
+do.
+
 How it behaves, because an updater you can't trust is worse than none:
 
 - **Nothing on disk is touched until every file has downloaded and been checked.** Python

@@ -1,6 +1,6 @@
 {
-  "version": "2.3",
-  "notes": "Clips now play in QuickTime and Premiere; filenames show the source in/out; file types are chosen at scan.",
+  "version": "2.4",
+  "notes": "The Update button now shows progress while it installs.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

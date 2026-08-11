@@ -38,7 +38,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "2.3"
+VERSION = "2.4"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -181,7 +181,7 @@ def check_update() -> Optional[dict]:
     return None
 
 
-def apply_update(info: dict) -> tuple[bool, str]:
+def apply_update(info: dict, progress=None) -> tuple[bool, str]:
     """Download the released files and swap them in, or change nothing at all.
 
     Every file is fetched and validated BEFORE anything on disk is touched, because a
@@ -189,7 +189,15 @@ def apply_update(info: dict) -> tuple[bool, str]:
     not start. Python files are compiled to prove they parse, and the new xmlcut.py must
     report the version latest.json promised — that catches a publish where the files and
     the version number disagree.
+
+    `progress` is called with a short human string at each step, so a caller can show what
+    is happening rather than leaving a dead button. Four files over an office connection is
+    long enough that silence reads as a hang.
     """
+    def say(msg: str) -> None:
+        if progress:
+            progress(msg)
+
     here = install_dir()
     if (here / ".git").exists():
         return False, ("this is the source checkout, not an installed copy — "
@@ -199,7 +207,8 @@ def apply_update(info: dict) -> tuple[bool, str]:
     # and lands back beside xmlcut.py under its own name.
     files = [Path(f).name for f in (info.get("files") or UPDATE_FILES)]
     got: dict[str, bytes] = {}
-    for rel in files:
+    for n, rel in enumerate(files, start=1):
+        say(f"Downloading {rel} ({n}/{len(files)})")
         try:
             data = _fetch(f"{UPDATE_DIR}/{rel}")
         except Exception as e:
@@ -223,6 +232,7 @@ def apply_update(info: dict) -> tuple[bool, str]:
                                    f"{info.get('version')} — nothing was changed")
         got[rel] = data
 
+    say("Backing up the current version")
     backup = here / ".backup"
     saved: list[str] = []
     try:
@@ -237,6 +247,7 @@ def apply_update(info: dict) -> tuple[bool, str]:
     except Exception as e:
         return False, f"couldn't back up the current version ({e}) — nothing was changed"
 
+    say(f"Installing {info['version']}")
     try:
         for rel, data in got.items():
             target = here / rel

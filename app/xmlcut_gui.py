@@ -117,6 +117,9 @@ class Job:
                 "manifest": self.manifest,
                 "update": UPDATE["info"],
                 "update_applied": UPDATE["applied"],
+                "update_busy": UPDATE["busy"],
+                "update_stage": UPDATE["stage"],
+                "update_ok": UPDATE["ok"],
                 "summary": summarize(cuts, self.args.speed, self.excluded) if cuts else "",
             }
 
@@ -125,7 +128,8 @@ JOB = Job()
 
 # Checked once per server start, off the request path so a slow or absent network never
 # delays the page. None = not checked yet or nothing newer.
-UPDATE: dict = {"info": None, "checked": False, "applied": ""}
+UPDATE: dict = {"info": None, "checked": False, "applied": "",
+                "busy": False, "stage": "", "ok": None}
 
 
 def start_update_check() -> None:
@@ -554,11 +558,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 info = UPDATE["info"]
                 if not info:
                     return self._json({"error": "no update available"}, 400)
-                ok, msg = xmlcut.apply_update(info)
-                UPDATE["applied"] = msg
-                if ok:
-                    UPDATE["info"] = None
-                return self._json({"ok": ok, "message": msg}, 200 if ok else 400)
+                if UPDATE["busy"]:
+                    return self._json({"error": "already updating"}, 400)
+
+                # Run it off the request thread and report through UPDATE["stage"], so the
+                # page can show which file is downloading rather than hanging on one POST
+                # for however long four files take on a slow connection.
+                def work():
+                    UPDATE["busy"], UPDATE["stage"] = True, "Starting"
+                    try:
+                        ok, msg = xmlcut.apply_update(
+                            info, progress=lambda m: UPDATE.__setitem__("stage", m))
+                        UPDATE["ok"], UPDATE["applied"] = ok, msg
+                        if ok:
+                            UPDATE["info"] = None
+                    except Exception as e:
+                        UPDATE["ok"], UPDATE["applied"] = False, f"update failed: {e}"
+                    finally:
+                        UPDATE["busy"], UPDATE["stage"] = False, ""
+                threading.Thread(target=work, daemon=True).start()
+                return self._json({"started": True})
             if path == "/api/quit":
                 threading.Timer(0.3, lambda: os._exit(0)).start()
                 return self._json({"ok": True})
@@ -928,7 +947,9 @@ async function poll(){
   try{
     const st = await api("/api/state");
     render(st);
-    if(!st.running && st.finished){ clearInterval(polling); polling = null; }
+    if(!st.running && !st.update_busy && st.finished){
+      clearInterval(polling); polling = null;
+    }
   }catch(e){ say("!! " + e.message, true); clearInterval(polling); polling = null; }
 }
 $("bxml").onclick = async () => {
@@ -1024,34 +1045,54 @@ function renderTypes(st){
   });
 }
 function renderUpdate(st){
-  const bar = $("updbar");
+  const bar = $("updbar"), btn = $("updbtn");
+  // Mid-update: the button IS the status line. Nothing else on the page moves, so a
+  // static "Update" label for the length of four downloads reads as a hang.
+  if(st.update_busy){
+    bar.hidden = false; bar.className = "";
+    $("updtext").innerHTML = "Updating to <b>" +
+      esc((st.update && st.update.version) || "") + "</b>";
+    btn.hidden = false; btn.disabled = true;
+    btn.textContent = st.update_stage || "Working …";
+    if(!polling) polling = setInterval(poll, 500);
+    return;
+  }
   if(st.update_applied){
     bar.hidden = false;
-    bar.className = /^updated/.test(st.update_applied) ? "done" : "bad";
+    bar.className = st.update_ok ? "done" : "bad";
     $("updtext").textContent = st.update_applied;
-    $("updbtn").hidden = true;
+    btn.disabled = false;
+    if(st.update_ok){
+      // It succeeded but this process still holds the old code in memory, so the only
+      // useful next action is to stop the server and reopen it.
+      btn.hidden = false; btn.textContent = "Quit server"; btn.onclick = quitServer;
+    }else{
+      btn.hidden = false; btn.textContent = "Retry"; btn.onclick = startUpdate;
+    }
     return;
   }
   if(!st.update){ bar.hidden = true; return; }
   bar.hidden = false; bar.className = "";
-  $("updbtn").hidden = false;
+  btn.hidden = false; btn.disabled = false;
+  btn.textContent = "Update"; btn.onclick = startUpdate;
   $("updtext").innerHTML = "<b>" + esc(st.update.version) + "</b> is available" +
     (st.update.notes ? " — " + esc(st.update.notes) : "");
 }
-$("updbtn").onclick = async () => {
+async function startUpdate(){
   $("updbtn").disabled = true;
-  $("updtext").textContent = "Downloading …";
+  $("updbtn").textContent = "Starting …";
   try{
-    const j = await api("/api/update", {});
-    say(j.message);
-  }catch(e){ say("!! " + e.message, true); }
-  finally{ $("updbtn").disabled = false; poll(); }
-};
-$("quit").onclick = async () => {
+    await api("/api/update", {});
+    if(!polling) polling = setInterval(poll, 500);
+    poll();
+  }catch(e){ say("!! " + e.message, true); $("updbtn").disabled = false; poll(); }
+}
+async function quitServer(){
   await api("/api/quit", {}).catch(() => {});
   document.body.innerHTML =
-    '<main><p>Server stopped. You can close this tab.</p></main>';
-};
+    '<main><p>Server stopped. Reopen xmlcut to use the new version.</p></main>';
+}
+$("quit").onclick = quitServer;
 poll();
 </script></body></html>
 """
