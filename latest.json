@@ -1,6 +1,6 @@
 {
-  "version": "2.0",
-  "notes": "Self-update: check GitHub, one click to install, rolls back on any failure.",
+  "version": "2.1",
+  "notes": "Released files moved to app/ so the repo keeps its own landing page.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

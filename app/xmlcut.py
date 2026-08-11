@@ -38,7 +38,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "2.0"
+VERSION = "2.1"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -106,6 +106,10 @@ X264_PIX_FMTS = {
 UPDATE_OWNER = "mill2nn"
 UPDATE_REPO = "xmlcut-releases"
 UPDATE_BRANCH = "main"
+# Released files live in a subfolder of the releases repo, not at its root. The root has to
+# stay free for that repo's own README, which is the page people land on — publishing the
+# project README to the root overwrote it, twice.
+UPDATE_DIR = "app"
 UPDATE_FILES = ["xmlcut.py", "xmlcut_gui.py", "README.md", "Open xmlcut GUI.command"]
 UPDATE_TIMEOUT = 15
 
@@ -184,11 +188,13 @@ def apply_update(info: dict) -> tuple[bool, str]:
         return False, ("this is the source checkout, not an installed copy — "
                        "use `git pull` instead so nothing overwrites your work")
 
-    files = info.get("files") or UPDATE_FILES
+    # latest.json lists plain filenames; the remote copy of each lives under UPDATE_DIR
+    # and lands back beside xmlcut.py under its own name.
+    files = [Path(f).name for f in (info.get("files") or UPDATE_FILES)]
     got: dict[str, bytes] = {}
     for rel in files:
         try:
-            data = _fetch(rel)
+            data = _fetch(f"{UPDATE_DIR}/{rel}")
         except Exception as e:
             return False, f"download failed ({rel}): {e} — nothing was changed"
         if not data:
