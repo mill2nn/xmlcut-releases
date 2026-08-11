@@ -1,6 +1,6 @@
 {
-  "version": "2.4",
-  "notes": "The Update button now shows progress while it installs.",
+  "version": "2.5",
+  "notes": "Fix: the update bar no longer appears when you are already up to date.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

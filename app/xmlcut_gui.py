@@ -710,6 +710,11 @@ PAGE = r"""<!doctype html>
   #updbar{display:flex;align-items:center;gap:12px;margin:0 0 14px;padding:10px 12px;
        border:1px solid var(--accent);border-radius:10px;background:var(--panel);
        font-size:13px}
+  /* An author `display` beats the browser's [hidden]{display:none}, so setting
+     display:flex above silently defeated the hidden attribute: the bar sat on screen
+     empty, with an Update button that could only ever answer "no update available".
+     Any element styled with display AND toggled by [hidden] needs this line. */
+  #updbar[hidden]{display:none}
   #updbar span{flex:1}
   #updbar.done{border-color:var(--ok)}
   #updbar.bad{border-color:var(--bad)}
@@ -1044,8 +1049,10 @@ function renderTypes(st){
     };
   });
 }
+let lastUpdate = null;
 function renderUpdate(st){
   const bar = $("updbar"), btn = $("updbtn");
+  lastUpdate = st.update || null;
   // Mid-update: the button IS the status line. Nothing else on the page moves, so a
   // static "Update" label for the length of four downloads reads as a hang.
   if(st.update_busy){
@@ -1079,6 +1086,7 @@ function renderUpdate(st){
     (st.update.notes ? " — " + esc(st.update.notes) : "");
 }
 async function startUpdate(){
+  if(!lastUpdate){ say("Already on the newest version."); return; }
   $("updbtn").disabled = true;
   $("updbtn").textContent = "Starting …";
   try{
