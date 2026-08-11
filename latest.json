@@ -1,6 +1,6 @@
 {
   "version": "1.9",
-  "notes": "Filenames carry the timecode range; clips.csv sheet; fixed job count.",
+  "notes": "xmlcut 1.8: filenames carry the timecode range, not just the in-point",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

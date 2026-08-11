@@ -123,11 +123,15 @@ def _update_urls(rel: str) -> list[str]:
     at 60 an hour per address, and a shared office connection can reach that. A late
     update is worth more than no update.
     """
+    # Percent-encode each segment but keep the slashes: one of the released files is
+    # "Open xmlcut GUI.command", and an unencoded space makes urllib refuse the URL
+    # outright ("URL can't contain control characters").
+    safe = urllib.parse.quote(rel)
     return [
-        f"https://api.github.com/repos/{UPDATE_OWNER}/{UPDATE_REPO}/contents/{rel}"
+        f"https://api.github.com/repos/{UPDATE_OWNER}/{UPDATE_REPO}/contents/{safe}"
         f"?ref={UPDATE_BRANCH}",
         f"https://raw.githubusercontent.com/{UPDATE_OWNER}/{UPDATE_REPO}/"
-        f"{UPDATE_BRANCH}/{rel}",
+        f"{UPDATE_BRANCH}/{safe}",
     ]
 
 
