@@ -429,11 +429,195 @@ the exact output length with `-frames:v`. Verified frame-exact on mixed 24/30 fp
   change) are flagged, not followed: `speed_varies` and `speed_span` record that the speed moves
   across the clip, and a warning is printed. The extracted *range* is still exact; only
   `--speed timeline` approximates, retiming uniformly instead of along the curve.
+- **Variable-frame-rate sources** (screen captures, some phone video) are the one case where
+  the frame count can still be wrong: it is derived from the source's declared rate, and a VFR
+  file has no single rate. `tools/source_check.py` detects and reports this — see below — but
+  the cut is not yet compensated. Constant-rate media, which is nearly all camera footage, is
+  unaffected.
 - **Third-party effects** don't survive the XML export; only the effect name is captured.
 - **Multicam clips** export as their flattened result, which is usually what you want.
 - **Audio** clips extract as `.m4a` via `--tracks audio`. Premiere mirrors linked audio onto
   its own track, so `--tracks all` gives you most video clips a second time as audio. A clip on
   an audio track whose source has no audio is reported as `no_audio` rather than failing.
+
+---
+
+## 10.1 Checking the media, not just the XML
+
+The XML records what Premiere *believed* about each source file. Everything xmlcut derives —
+where to seek, how many frames to keep — rests on the source's frame rate and on the file
+running at that rate, evenly, from time zero. When a file breaks either assumption the cut
+comes out the wrong length and the XML cannot tell you, because the XML is not where the truth
+is.
+
+```bash
+python3 tools/source_check.py "timeline.xml"
+```
+
+It probes each source once and reports variable frame rate, dropped frames, a non-zero start
+time, a header that miscounts its own frames, stream-vs-container duration splits, and any
+disagreement between the rate Premiere recorded and the file's own. Then, per cut, it counts
+the frames that really exist in the range being extracted and compares that to the number
+xmlcut will pin. Add `--all` to list every cut, `--deep` to decode each source in full.
+
+Nothing is encoded and nothing is written, so it is safe to run on anything. A clean report
+means the media is not where your error is:
+
+```
+all 16 match       — every cut's frame count equals the frames really in its range
+```
+
+For timing and speed rather than media, `tools/speed_check.py "timeline.xml"` checks the other
+invariant: source length ÷ speed should equal the clip's length on the timeline.
+
+---
+
+## 10.2 The Premiere panel — cut straight from the timeline
+
+**It updates itself.** Install once; after that the panel shows an **Update** button whenever a
+new version is published, and pressing it refreshes `xmlcut.py`, the browser GUI *and* the panel
+files, then copies the panel back into Premiere's extensions folder. Quit Premiere (⌘Q) and
+reopen to load it. Nobody re-downloads a zip.
+
+
+No XML export, no sequence picker. `panel/` reads the sequence you have open and cuts it.
+
+Install by double-clicking **`panel/Install xmlcut reader (Mac).command`**, then quit and reopen
+Premiere and find it under **Window → Extensions → xmlcut reader**.
+
+Three steps, in order, nothing happening until you ask for it:
+
+1. **Read timeline & export XML** — reads the open sequence through Premiere's API *and* has
+   Premiere export it as a Final Cut Pro 7 XML. Changes nothing in your project.
+2. **Choose what to cut** — file types, and where the clips go.
+3. **Export** — a progress bar per clip, then a status report.
+
+It cuts from **both** sources, because neither is complete on its own:
+
+| | comes from | why |
+|---|---|---|
+| Source ranges, nested sequences | **the XML** | the verified path, and the only one that resolves nests |
+| Speed-ramp keyframes | **Premiere** | an XML flattens a whole curve to one number |
+| Current media paths | **Premiere** | a stale path in the XML gets repaired automatically |
+| Speed, frame rate, ranges | **both** | cross-checked; a disagreement is reported, never silently resolved |
+
+You don't choose. The panel says which sources it's using, and if Premiere won't export an XML
+it falls back to reading alone and tells you nests will be skipped.
+
+It shows what it found:
+
+```
+MY_SEQUENCE
+29.97 fps · 28 video clips
+⚠ 3 clips have a keyframed speed ramp.
+XML + Premiere · nests resolved, ramp keyframes read
+
+FILE TYPES     [x] .mp4 24   [x] .mov 3   [ ] .aep 1
+SAVE TO        …/Desktop/xmlcut clips           [Change]
+
+              [ Export 27 clips ]
+```
+
+Untick a type to skip it; project files like `.aep` start unticked because they can't be
+decoded.
+
+Step 2 also lists **every clip the export will make**, the same columns as the browser GUI:
+
+```
+#   Timeline in   Clip               Speed    Timing  Frames  Status          Notes
+01  00:00:00:00   Wide_establishing  100%     ticks       48  ready
+05  00:00:09:00   Cutaway_fast       200%     ticks       50  ready
+08  00:00:12:25   Reverse_shot       100% ⏪  ticks       50  ready           reversed
+10  00:00:16:15   Ramp_keyframed     150%     ticks       60  ready           ramp 100–220%
+15  00:00:25:10   Nested_head_trim   100%     ticks       24  ready           in Nested Sequence 05
+── cannot be cut — fix these or untick their type
+14  00:00:23:20   Offline_shot       100%     ticks       50  missing source
+```
+
+The list comes from a real `--manifest-only` pass, so it's produced by the same code that does
+the cutting — not a second guess at it. Clips that can't be cut sort to the bottom under a
+divider but keep their true number. Switch a file type off and the rest renumber to match the
+filenames you'll actually get.
+
+### The status report
+
+After the run you get a report built from the manifest — one row per clip, carrying the numbers
+that let you check any cut without doing arithmetic:
+
+```
+16 written   1 offline   1 not media   1 ramp   4 retimed   2 reversed
+
+05_(06.67-08.33)_CAM_B.mp4
+    1.667s · 50f · 200.00% · → 0.833s on the timeline
+10_(08.33-10.83)_CAM_C.mp4
+    2.500s · 60f · 150.00% · → 1.667s · ramp 100–220%, cut at one speed
+15_(00.33-02.00)_MISSING.mp4
+    Source not found: /Volumes/OldDrive/Footage/MISSING.mp4
+```
+
+Read that as: the file is **1.667s** long and holds **50 frames**; its timeline clip ran at
+**200%** and occupied **0.833s**. Tick **only problems** to hide everything that worked, **Copy
+report** to paste it elsewhere, **Show in Finder** to open the folder.
+
+A cut is written at the source's own speed, so a **sped-up clip comes out longer** than it looks
+on the timeline, and a slowed one comes out shorter. Re-speeding a cut by the percentage shown
+returns it to the timeline length — to within about a frame. It will not land on the percentage
+exactly: the frame count is a whole number and the range Premiere consumed is not, and a ratio of
+two rounded integers cannot reproduce an unrounded one. On a short clip that shows up as up to
+about 1%.
+
+The same four numbers are now columns in `clips.csv` too — `speed %`, `cut length s`, `frames`,
+`timeline length s`.
+
+Reading the sequence changes nothing in your project and renders nothing. Both files land
+**beside your Premiere project**, one folder per sequence, as a new timestamped pair each read:
+
+```
+<project folder>/xmlcut/<Sequence Name>/2026-08-12_134500.xml
+                                        2026-08-12_134500.json
+```
+
+Nothing is overwritten; the ten most recent reads are kept and older pairs are pruned. An
+unsaved project falls back to `~/Desktop/xmlcut-dumps/`. The panel shows the folder with a
+**Show** button. The same run works from the terminal:
+
+```bash
+python3 xmlcut.py "…/xmlcut/MY_SEQ/2026-08-12_134500.xml" --panel "…/xmlcut/MY_SEQ/2026-08-12_134500.json" -o ./clips
+```
+
+`--panel` is the merge: the XML is the base, the dump overlays the ramp keyframes and repairs
+stale paths, and everything both carry is cross-checked. The JSON also works on its own —
+`xmlcut.py` takes it anywhere it takes an XML — with nests skipped.
+
+**The panel does not do the cutting.** It reads Premiere and hands the list to `xmlcut.py`,
+which is the code verified frame-exact against a fixture. Both inputs were checked to produce
+**byte-identical files** for the same timeline, so nothing about accuracy depends on which one
+you use.
+
+### What Premiere knows that the XML doesn't
+
+1. **Time Remapping keyframes.** The XML gives one speed value per clip, which cannot describe
+   a clip whose speed changes across itself. The panel reads the curve and flags those clips.
+2. **The interpreted frame rate** — what the edit is really built on. Reinterpret 24 fps footage
+   as 23.976 and the file says one thing while Premiere cut against another. Those clips are
+   named on export; their ranges are right, their lengths are reported as unverified.
+3. **Real media paths**, so `--remap` has nothing left to do.
+
+To see whether any of that matters on your material, compare the two inputs directly:
+
+```bash
+python3 tools/compare_panel.py "timeline.xml"
+```
+
+If it says they agree, the XML loses nothing on that timeline and the panel is pure
+convenience.
+
+### Nested sequences
+
+Handled — but by the XML half, not the panel. Premiere hands a nest over as a single clip, so
+the panel alone would skip it. Because the panel auto-exports the XML and merges, nests are
+resolved as normal. Only if the XML export fails does the panel fall back to reading alone, and
+then it says so and reports how many nests it skipped.
 
 ---
 

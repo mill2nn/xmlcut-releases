@@ -26,6 +26,7 @@ import argparse
 import collections
 import csv
 import json
+import math
 import os
 import re
 import shutil
@@ -38,7 +39,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "2.6"
+VERSION = "3.0"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -127,7 +128,91 @@ UPDATE_BRANCH = "main"
 # stay free for that repo's own README, which is the page people land on — publishing the
 # project README to the root overwrote it, twice.
 UPDATE_DIR = "app"
-UPDATE_FILES = ["xmlcut.py", "xmlcut_gui.py", "README.md", "Open xmlcut GUI.command"]
+UPDATE_FILES = [
+    "xmlcut.py", "xmlcut_gui.py", "README.md", "Open xmlcut GUI.command",
+    # The Premiere panel rides along, so a teammate never re-downloads anything: the
+    # files land under <install>/panel/ and are then copied into Adobe's extensions
+    # folder by reinstall_panel(). Subpaths are why safe_rel() exists.
+    "panel/CSXS/manifest.xml",
+    "panel/client/index.html",
+    "panel/client/main.js",
+    "panel/client/style.css",
+    "panel/client/CSInterface.js",
+    "panel/jsx/host.jsx",
+    "panel/.debug",
+    "panel/Install xmlcut reader (Mac).command",
+    "panel/Uninstall xmlcut reader (Mac).command",
+]
+
+# Where the panel has to end up for Premiere to see it.
+PANEL_ID = "com.bom.xmlcutreader"
+PANEL_PARTS = ["CSXS", "client", "jsx", ".debug"]
+
+
+def cep_extensions_dir() -> Path:
+    return (Path.home() / "Library" / "Application Support" / "Adobe" / "CEP"
+            / "extensions")
+
+
+def safe_rel(name: str) -> Optional[str]:
+    """A relative path from latest.json, or None if it is not one we will write.
+
+    latest.json comes from a PUBLIC repo, so its filenames are untrusted input. This
+    used to be `Path(f).name`, which neutralised traversal by throwing the directory
+    away — fine until the panel needed `panel/client/main.js` to stay nested.
+
+    So: forward slashes only, no absolute paths, no `..`, no hidden directories, a
+    conservative character set, and a depth cap. Anything else is skipped rather than
+    guessed at.
+    """
+    if not name or "\\" in name or name.startswith("/"):
+        return None
+    parts = [p for p in name.split("/") if p not in ("", ".")]
+    if not parts or len(parts) > 4:
+        return None
+    for i, p in enumerate(parts):
+        if p == ".." or not re.fullmatch(r"[A-Za-z0-9 ._()+-]+", p):
+            return None
+        # A leading dot is allowed only on the final component (`.debug`), never as a
+        # directory — nothing should be writing into a dot-directory.
+        if p.startswith(".") and i != len(parts) - 1:
+            return None
+    return "/".join(parts)
+
+
+def reinstall_panel(here: Path, progress=None) -> tuple[bool, str]:
+    """Copy <install>/panel into Adobe's extensions folder.
+
+    An update refreshes the files in the xmlcut folder, but Premiere loads the panel
+    from its own directory — so without this step a teammate's panel stays on the old
+    code no matter how many times xmlcut updates itself.
+
+    Premiere only scans extensions at launch, so the caller has to say "restart
+    Premiere". Copying under a running Premiere is safe; it simply keeps using what it
+    already loaded.
+    """
+    src = here / "panel"
+    if not src.is_dir():
+        return False, "no panel/ folder in this install — nothing to reinstall"
+    dest = cep_extensions_dir() / PANEL_ID
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        for part in PANEL_PARTS:
+            s = src / part
+            if not s.exists():
+                continue
+            d = dest / part
+            if s.is_dir():
+                # Replaced rather than merged, so a file deleted upstream really goes.
+                shutil.rmtree(d, ignore_errors=True)
+                shutil.copytree(s, d)
+            else:
+                d.write_bytes(s.read_bytes())
+            if progress:
+                progress(f"panel: {part}")
+    except Exception as e:
+        return False, f"panel copied into {dest} failed: {e}"
+    return True, f"panel updated in {dest} — restart Premiere to load it"
 UPDATE_TIMEOUT = 15
 
 
@@ -215,7 +300,13 @@ def apply_update(info: dict, progress=None) -> tuple[bool, str]:
 
     # latest.json lists plain filenames; the remote copy of each lives under UPDATE_DIR
     # and lands back beside xmlcut.py under its own name.
-    files = [Path(f).name for f in (info.get("files") or UPDATE_FILES)]
+    files = []
+    for f in (info.get("files") or UPDATE_FILES):
+        rel = safe_rel(str(f))
+        if rel is None:
+            return False, (f"latest.json names a file this updater will not write "
+                           f"({f!r}) — nothing was changed")
+        files.append(rel)
     got: dict[str, bytes] = {}
     for n, rel in enumerate(files, start=1):
         say(f"Downloading {rel} ({n}/{len(files)})")
@@ -273,8 +364,17 @@ def apply_update(info: dict, progress=None) -> tuple[bool, str]:
                 pass
         return False, f"update failed ({e}) — rolled back, still on {VERSION}"
 
+    # The panel lives in Adobe's extensions folder, not here, so refreshing the files
+    # above is only half of it. Done last, and a failure here does not roll the update
+    # back: the tool itself is already correctly updated.
+    tail = ""
+    if any(rel.startswith("panel/") for rel in files):
+        ok, msg = reinstall_panel(here, progress)
+        tail = ("\n" + ("Premiere panel: " + msg if ok
+                        else "the tool updated, but the panel did not: " + msg))
+
     return True, (f"updated {VERSION} → {info['version']}. The previous version is in "
-                  f".backup if you need it. Quit and reopen to run the new code.")
+                  f".backup if you need it. Quit and reopen to run the new code." + tail)
 
 
 # --------------------------------------------------------------------------
@@ -340,6 +440,61 @@ def frames_to_tc(frames: float, fps: float) -> str:
 
 def frames_to_seconds(frames: float, fps: float) -> float:
     return frames / fps if fps > 0 else 0.0
+
+
+MIN_USABLE_FPS = 1.0
+
+
+def usable_fps(value) -> float:
+    """A frame rate you can divide by, or 0.0.
+
+    Premiere reports a frame rate around 1e-7 for nested sequences, stills, audio and
+    Dynamic Link comps — 25 of 94 clips on a real timeline. That survives a `> 0` test,
+    then rounds to 0 inside frames_to_tc and divides by zero, and makes
+    `abs(interpreted - actual) / interpreted` astronomically large so every such clip
+    gets reported as reinterpreted footage.
+
+    Nothing below 1 fps is a real video rate. One definition, used everywhere, so the
+    two call sites cannot drift apart again.
+    """
+    if not isinstance(value, (int, float)):
+        return 0.0
+    v = float(value)
+    return v if v >= MIN_USABLE_FPS else 0.0
+
+
+def is_retimed(speed_percent: float) -> bool:
+    """True when a clip is not at 100%.
+
+    A tolerance, not `not in (0, 100)`. A tick-derived speed need not land exactly on
+    100.0, and this decides whether build_command takes the retime branch — so an
+    unlucky 100.0000001 would otherwise resample a clip that needed nothing done.
+    """
+    return bool(speed_percent) and abs(speed_percent - 100.0) > 0.01
+
+
+def consumed_frames(in_seconds: float, dur_seconds: float, fps: float) -> int:
+    """How many source frames lie in [in, in+dur) at `fps`.
+
+    Deliberately NOT round(dur * fps). Frames sit at k/fps, and a tick-derived
+    in-point almost never lands on one, so the count depends on WHERE the range
+    starts as well as how long it is: 1.3s at 24 fps holds 32 frames from 3.000s
+    but 31 from 3.020s. Rounding the duration alone is a frame out whenever the two
+    ends straddle their boundaries differently — measured on a real timeline, that
+    was 5 of 16 cuts, each 42 ms wrong.
+
+    This is the value -frames:v pins, so an error here is an error in the file.
+
+    The epsilon is in FRAMES, matching the seek tolerance in build_command: a hair
+    over a boundary must not promote to the next frame, but a genuinely mid-frame
+    edge still rounds up.
+    """
+    if fps <= 0:
+        return 0
+    e = 1e-4
+    n = (math.ceil((in_seconds + dur_seconds) * fps - e)
+         - math.ceil(in_seconds * fps - e))
+    return max(1, n)
 
 
 def read_timeremap(clip: ET.Element) -> tuple[float, bool, bool, str, list]:
@@ -473,6 +628,11 @@ class Cut:
     reversed: bool = False         # played backwards on the timeline
     speed_varies: bool = False     # keyframed ramp — speed_percent is an approximation
     speed_span: str = ""           # "min–max %" when the ramp is keyframed
+    # The ramp's actual keyframes, as [[seconds, speed_multiplier], ...]. Only a panel
+    # dump can supply these; an XML export flattens the curve to one number. Recorded
+    # for now — nothing follows the curve yet — but recorded exactly, so that when
+    # something does, the data is already in the manifest.
+    ramp_keys: list = field(default_factory=list)
     enabled: bool = True
     transition_in: str = ""
     transition_out: str = ""
@@ -487,6 +647,12 @@ class Cut:
     width: Optional[int] = None
     height: Optional[int] = None
     source_fps: float = 0.0
+    # Premiere's INTERPRETED rate, only ever set from a panel dump. Recorded rather
+    # than used: it is the rate the edit was built against, but ffmpeg seeks the file
+    # at the file's own rate, and silently converting between the two — untested, on
+    # footage I have none of — is how a half-second error gets introduced. Where the
+    # two disagree the clip is flagged instead.
+    interpreted_fps: float = 0.0
     pix_fmt: str = ""
     bitrate: Optional[int] = None
     audio_codec: str = ""
@@ -773,8 +939,9 @@ class Timeline:
                     if c.source_duration_seconds <= 0:
                         continue
                     if c.source_fps > 0:
-                        c.source_consumed_frames = max(
-                            1, int(round(c.source_duration_seconds * c.source_fps)))
+                        c.source_consumed_frames = consumed_frames(
+                            c.source_in_seconds, c.source_duration_seconds,
+                            c.source_fps)
 
                 # re-express in parent time
                 vis = (hi - lo) / k_nest
@@ -876,7 +1043,7 @@ class Timeline:
         # clip in a 30 fps timeline by 30/24 = 1.25x — the clips were correct while
         # the manifest describing them was not. Refined again after ffprobe, which
         # knows the real rate better than the XML does.
-        consumed = int(round(src_dur_sec * file_fps)) if file_fps > 0 else 0
+        consumed = consumed_frames(src_in_sec, src_dur_sec, file_fps)
 
         cut = Cut(
             clip_name=txt(clip, "name") or finfo.get("name", "clip"),
@@ -941,6 +1108,447 @@ class Timeline:
 
 
 # --------------------------------------------------------------------------
+# Panel dump input — the same cut list, read from Premiere instead of an XML
+# --------------------------------------------------------------------------
+
+class DumpTimeline:
+    """A Timeline built from the xmlcut reader panel's JSON instead of an XML.
+
+    Deliberately duck-types `Timeline`: same attribute names, same `Cut` objects, so
+    every downstream stage — naming, probing, building the ffmpeg command, the
+    manifest — runs unchanged and stays covered by the same reasoning.
+
+    What the panel gives that an XML cannot:
+
+      * the INTERPRETED frame rate, which is what Premiere actually cut against
+      * keyframed speed ramps, reported per clip rather than flattened to one number
+      * real media paths, so --remap has nothing left to do
+
+    What it cannot give: the contents of a nested sequence. Premiere hands the nest
+    over as a single clip, and resolving it would mean re-deriving the nest walking
+    that the XML path already does. Nests are reported and skipped, never guessed at.
+    """
+
+    GENERATOR = "xmlcut reader"
+
+    def __init__(self, dump_path: Path):
+        self.xml_path = dump_path
+        self.cuts: list[Cut] = []
+        self.markers: list[dict] = []
+        self.warnings: list[str] = []
+        self.available_sequences: list[dict] = []
+        self.sequence_name = ""
+        self.sequence_fps = 25.0
+        self.sequence_duration_frames = 0
+        self._load(dump_path)
+
+    @staticmethod
+    def looks_like_dump(path: Path) -> bool:
+        """Cheap sniff so the CLI can accept either input without a mode flag."""
+        try:
+            if path.suffix.lower() != ".json":
+                return False
+            with open(path, "r", encoding="utf-8") as fh:
+                return DumpTimeline.GENERATOR in fh.read(400)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _ticks(node) -> Optional[int]:
+        """Ticks arrive as a STRING — the values exceed float precision."""
+        if not isinstance(node, dict):
+            return None
+        v = node.get("ticks")
+        if v in (None, ""):
+            return None
+        try:
+            return int(str(v))
+        except (TypeError, ValueError):
+            return None
+
+    def _load(self, path: Path) -> None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise SystemExit(f"error: no such file: {path}")
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"error: {path.name} is not readable JSON ({e})")
+        if data.get("generator") != self.GENERATOR:
+            raise SystemExit(
+                f"error: {path.name} was not written by the xmlcut reader panel.")
+
+        seq = data.get("sequence") or {}
+        self.sequence_name = str(seq.get("name") or "Untitled Sequence")
+        fps = seq.get("fps")
+        if not isinstance(fps, (int, float)) or fps <= 0:
+            tb = seq.get("timebase_ticks_per_frame") or 0
+            fps = (PPRO_TICKS_PER_SECOND / tb) if tb else 25.0
+        self.sequence_fps = float(fps)
+
+        end_ticks = self._ticks(seq.get("end"))
+        if end_ticks:
+            self.sequence_duration_frames = int(
+                round(end_ticks / PPRO_TICKS_PER_SECOND * self.sequence_fps))
+
+        nests = 0
+        for entry in data.get("clips") or []:
+            cut = self._build(entry)
+            if cut is None:
+                nests += 1
+                continue
+            self.cuts.append(cut)
+
+        # Order the way the XML path does, so indices and filenames line up between
+        # the two inputs for the same timeline.
+        self.cuts.sort(key=lambda c: (c.track_type != "video", c.timeline_in_frames,
+                                      c.track_index))
+        if nests:
+            self.warnings.append(
+                f"{nests} nested sequence(s) skipped — Premiere hands a nest over as "
+                f"one clip. Export this timeline as XML to cut inside nests.")
+        if not self.cuts:
+            self.warnings.append("no cuttable clips found in the dump")
+
+    def _build(self, e: dict) -> Optional[Cut]:
+        pi = e.get("project_item") or {}
+        if pi.get("is_sequence"):
+            return None
+
+        path = str(pi.get("media_path") or "")
+        ext = Path(path).suffix.lower()
+        if ext in UNSUPPORTED_EXT:
+            kind = "unsupported"
+        elif ext in STILL_EXT:
+            kind = "still"
+        else:
+            kind = "video"
+
+        start = self._ticks(e.get("start")) or 0
+        end = self._ticks(e.get("end")) or 0
+        t_in = int(round(start / PPRO_TICKS_PER_SECOND * self.sequence_fps))
+        t_out = int(round(end / PPRO_TICKS_PER_SECOND * self.sequence_fps))
+        dur_frames = max(0, t_out - t_in)
+
+        speed_mult = e.get("speed")
+        speed = (float(speed_mult) * 100.0
+                 if isinstance(speed_mult, (int, float)) and speed_mult else 100.0)
+        speed = abs(speed) or 100.0
+        k = speed / 100.0
+
+        src_in_t = self._ticks(e.get("in_point"))
+        src_out_t = self._ticks(e.get("out_point"))
+        if src_in_t is None or src_out_t is None or src_out_t <= src_in_t:
+            src_in_sec = 0.0
+            src_dur_sec = frames_to_seconds(dur_frames, self.sequence_fps)
+            timing = "timeline"
+        else:
+            # MUST be scaled by speed. Premiere's TrackItem inPoint/outPoint are in
+            # TIMELINE units, not source units: on a 115.126% clip their difference is
+            # the 1.600s the clip occupies, not the 1.842s of source it consumes.
+            # Measured across a real 39-cut timeline: out-in equalled the timeline
+            # length on 16 clips and the consumed source range on none, while
+            # (value x speed) reproduced the XML's in-point and duration exactly.
+            #
+            # This is NOT the same as pproTicksIn/Out, which do span the consumed
+            # range. Taking these raw made every retimed cut short by (1 - 1/speed).
+            src_in_sec = (src_in_t / PPRO_TICKS_PER_SECOND) * k
+            src_dur_sec = ((src_out_t - src_in_t) / PPRO_TICKS_PER_SECOND) * k
+            timing = "ticks"
+
+        # Premiere's interpreted rate, which beats both the XML's <file><rate> and
+        # ffprobe: it is the rate the edit was actually built against. apply_probe
+        # would otherwise overwrite this from the file, so it is pinned below.
+        # usable_fps, not `> 0`: see its docstring for why a 1e-7 rate is poison.
+        src_fps = usable_fps((e.get("interpretation") or {}).get("frame_rate"))
+
+        name = str(e.get("name") or pi.get("name") or "clip")
+        ramp = bool(e.get("has_keyframed_remap"))
+        span_txt = ""
+        if ramp:
+            vals = [k.get("value") for comp in (e.get("components") or [])
+                    if comp.get("is_time_remap")
+                    for p in (comp.get("params") or [])
+                    for k in (p.get("keys") or [])
+                    if isinstance(k.get("value"), (int, float))]
+            if vals:
+                span_txt = f"{min(vals) * 100:g}–{max(vals) * 100:g}%"
+
+        cut = Cut(
+            clip_name=name,
+            track_type=str(e.get("track_type") or "video"),
+            track_index=int(e.get("track_index") or 1),
+            timeline_in_frames=t_in,
+            timeline_out_frames=t_out,
+            timeline_in_tc=frames_to_tc(t_in, self.sequence_fps),
+            timeline_out_tc=frames_to_tc(t_out, self.sequence_fps),
+            source_in_seconds=src_in_sec,
+            source_duration_seconds=src_dur_sec,
+            timing_source=timing,
+            duration_frames=dur_frames,
+            duration_seconds=round(frames_to_seconds(dur_frames, self.sequence_fps), 6),
+            source_path=path,
+            source_exists=bool(path) and os.path.isfile(path),
+            file_id=str(pi.get("node_id") or ""),
+            source_fps=round(src_fps, 6),
+            interpreted_fps=round(src_fps, 6),
+            speed_percent=speed,
+            reversed=bool(e.get("reversed")),
+            speed_varies=ramp,
+            speed_span=span_txt,
+            enabled=not bool(e.get("disabled")),
+            media_kind=kind,
+            filters=[str(c.get("displayName") or "")
+                     for c in (e.get("components") or [])
+                     if c.get("displayName") not in (None, "", "Opacity")],
+        )
+        if src_fps > 0:
+            cut.source_in_frames = int(round(src_in_sec * src_fps))
+            cut.source_out_frames = int(round((src_in_sec + src_dur_sec) * src_fps))
+            cut.source_in_tc = frames_to_tc(cut.source_in_frames, src_fps)
+            cut.source_out_tc = frames_to_tc(cut.source_out_frames, src_fps)
+            cut.source_consumed_frames = consumed_frames(src_in_sec, src_dur_sec, src_fps)
+
+        if kind == "still":
+            cut.source_in_seconds = 0.0
+            cut.source_duration_seconds = frames_to_seconds(dur_frames,
+                                                            self.sequence_fps)
+            cut.source_consumed_frames = dur_frames
+            cut.timing_source = "timeline"
+
+        if ramp:
+            self.warnings.append(
+                f"{name}: keyframed speed ramp ({span_txt or 'varies'}) — the extracted "
+                f"range is right, a uniform retime is not")
+
+        # The invariant that catches a wrong reading of the API before it becomes a
+        # wrong file: source length / speed should equal the length on the timeline.
+        # If Premiere's inPoint/outPoint ever stopped spanning the CONSUMED range,
+        # this is where it would surface, loudly, instead of silently mis-cutting.
+        if kind == "video" and timing == "ticks" and dur_frames > 0 and not ramp:
+            want = frames_to_seconds(dur_frames, self.sequence_fps)
+            got = src_dur_sec / (speed / 100.0)
+            if abs(got - want) > max(0.05, want * 0.02):
+                self.warnings.append(
+                    f"{name}: source range {src_dur_sec:.3f}s at {speed:g}% implies "
+                    f"{got:.3f}s on the timeline but it occupies {want:.3f}s "
+                    f"— treat this clip's length as unverified")
+        return cut
+
+
+def match_dump_clip(buckets: dict, want_ticks: int, slack: float,
+                    source_path: str) -> tuple:
+    """Find the panel clip that is the same clip as an XML cut.
+
+    Position alone is not an identity on a real timeline: graphics, titles and
+    adjustment layers sit at the same start ticks as the footage beneath them, so a
+    tick can name half a dozen clips. The media filename settles it — a cut and the
+    panel clip it came from necessarily reference the same file.
+
+    Returns (clip_or_None, how) where `how` is one of "exact", "byname", "only",
+    "ambiguous" or "none", so the caller can report what it could not resolve rather
+    than guessing.
+    """
+    cands = []
+    for t, lst in buckets.items():
+        if abs(t - want_ticks) <= slack:
+            cands.extend(lst)
+    if not cands:
+        return None, "none"
+
+    base = os.path.basename(source_path or "").lower()
+    if base:
+        named = [c for c in cands
+                 if os.path.basename(
+                     ((c.get("project_item") or {}).get("media_path") or "")
+                 ).lower() == base]
+        if len(named) == 1:
+            return named[0], "byname"
+        if named:
+            # Same file used twice at the same instant on different tracks. Either is
+            # as good as the other: they share the media, which is all the overlay
+            # reads that is position-independent.
+            return named[0], "byname"
+
+    if len(cands) == 1:
+        return cands[0], "only"
+    # Several clips here and none of them is this file. Matching one anyway would
+    # attach another clip's ramp keys, or repoint this cut at another clip's media.
+    return None, "ambiguous"
+
+
+def overlay_dump(tl, dump_path: Path) -> list[str]:
+    """Overlay a panel dump onto an XML-parsed timeline. Returns notes to print.
+
+    The two sources are not equal, and the merge reflects which is authoritative for
+    what rather than preferring one wholesale:
+
+      * The XML is the BASE. It is the path with the fixture behind it, and it is the
+        only one that resolves nested sequences.
+      * The panel supplies what an XML cannot express: the real keyframes of a speed
+        ramp, and the media's CURRENT location.
+      * Everything both of them carry — source range, speed, frame rate — is
+        cross-checked, and a disagreement is reported rather than silently resolved.
+
+    Only one thing here changes what gets cut: repairing a path the XML records at a
+    stale location and the panel knows the truth of. That is a strict improvement — it
+    only fires when the XML's path does not exist and the panel's does.
+    """
+    try:
+        data = json.loads(dump_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [f"panel dump not found: {dump_path} — cut from the XML alone"]
+    except json.JSONDecodeError as e:
+        return [f"panel dump is not readable JSON ({e}) — cut from the XML alone"]
+    if data.get("generator") != DumpTimeline.GENERATOR:
+        return [f"{dump_path.name} was not written by the xmlcut reader panel "
+                f"— cut from the XML alone"]
+
+    notes: list[str] = []
+    dseq = (data.get("sequence") or {}).get("name") or ""
+    if dseq and tl.sequence_name and dseq != tl.sequence_name:
+        notes.append(f"the panel read {dseq!r} but the XML is {tl.sequence_name!r} "
+                     f"— not the same timeline, so nothing was merged")
+        return notes
+
+    # Bucket the dump by timeline start ticks — but as a LIST per tick, not one clip.
+    # A real timeline stacks graphics, titles and adjustment layers over the footage,
+    # so many clips share a start tick; keeping only the first silently matched a cut
+    # against whatever happened to be on top. On his own timeline that mismatched most
+    # of the list, and since the merge can repoint a cut's media, a wrong match could
+    # have pointed a cut at the wrong file.
+    buckets: dict[int, list] = {}
+    for c in data.get("clips") or []:
+        if c.get("track_type") != "video":
+            continue
+        t = DumpTimeline._ticks(c.get("start"))
+        if t is not None:
+            buckets.setdefault(t, []).append(c)
+
+    slack = PPRO_TICKS_PER_SECOND / max(tl.sequence_fps, 1)   # one frame
+    repaired = ramps = rate_flags = range_flags = matched = ambiguous = 0
+
+    for cut in tl.cuts:
+        if cut.track_type != "video":
+            continue
+        want = int(round(cut.timeline_in_frames * PPRO_TICKS_PER_SECOND
+                         / tl.sequence_fps))
+        pc, how = match_dump_clip(buckets, want, slack, cut.source_path)
+        if how == "ambiguous":
+            ambiguous += 1
+        if pc is None:
+            # Expected for anything inside a nest — the panel saw the nest as one clip
+            # — and for titles, graphics and adjustment layers, which carry no media.
+            continue
+        matched += 1
+        pi = pc.get("project_item") or {}
+
+        # -- path repair, the one thing that changes the cut ---------------------
+        live = str(pi.get("media_path") or "")
+        if (live and not cut.source_exists and os.path.isfile(live)
+                and cut.media_kind != "unsupported"):
+            cut.source_path = live
+            cut.source_exists = True
+            repaired += 1
+
+        # -- the ramp curve, which only the panel has ---------------------------
+        keys = []
+        for comp in pc.get("components") or []:
+            if not comp.get("is_time_remap"):
+                continue
+            for p in comp.get("params") or []:
+                for k in p.get("keys") or []:
+                    secs = (k.get("time") or {}).get("seconds")
+                    val = k.get("value")
+                    if isinstance(secs, (int, float)) and isinstance(val, (int, float)):
+                        keys.append([round(float(secs), 6), round(float(val), 6)])
+        if len(keys) > 1:
+            keys.sort()
+            cut.ramp_keys = keys
+            cut.speed_varies = True
+            vals = [v for _, v in keys]
+            cut.speed_span = f"{min(vals) * 100:g}–{max(vals) * 100:g}%"
+            ramps += 1
+
+        # -- cross-checks: report, never silently resolve ------------------------
+        interp = usable_fps((pc.get("interpretation") or {}).get("frame_rate"))
+        if interp:
+            cut.interpreted_fps = round(interp, 6)
+
+        p_in = DumpTimeline._ticks(pc.get("in_point"))
+        p_out = DumpTimeline._ticks(pc.get("out_point"))
+        if p_in is not None and p_out is not None and p_out > p_in:
+            # Scaled by speed, for the same reason DumpTimeline._build scales: these are
+            # timeline units, not source units. Comparing them raw reported every
+            # retimed clip as a disagreement, which is noise that hides real ones.
+            p_speed = pc.get("speed")
+            k = (abs(float(p_speed)) if isinstance(p_speed, (int, float)) and p_speed
+                 else 1.0) or 1.0
+            p_in_sec = (p_in / PPRO_TICKS_PER_SECOND) * k
+
+            # Stills and Dynamic Link comps report inPoint as an ABSOLUTE media
+            # timecode, which starts at 01:00:00:00 on this kind of media — so a clip
+            # beginning at its own frame 0 comes back as 3600s. On a real timeline every
+            # single reported disagreement was this, and a warning that is always wrong
+            # is a warning you learn to skip. Subtract whole hours when the value is
+            # within a frame of one; nothing genuinely sits an exact hour into a still.
+            tc_base = 0.0
+            if p_in_sec >= 3600.0 - 1.0:
+                hours = round(p_in_sec / 3600.0)
+                if hours >= 1 and abs(p_in_sec - hours * 3600.0) < 1.0:
+                    tc_base = hours * 3600.0
+                    p_in_sec -= tc_base
+
+            d_in = p_in_sec - cut.source_in_seconds
+            d_dur = (((p_out - p_in) / PPRO_TICKS_PER_SECOND) * k
+                     - cut.source_duration_seconds)
+            # A transition makes the XML's range legitimately longer — it includes the
+            # material under the dissolve, which the panel's clip bounds do not — so
+            # those clips are not reported as disagreeing.
+            if not cut.edge_in_transition and (abs(d_in) > 0.004 or abs(d_dur) > 0.004):
+                range_flags += 1
+                notes.append(
+                    f"{cut.clip_name}: Premiere and the XML disagree on the source "
+                    f"range (in {d_in:+.4f}s, length {d_dur:+.4f}s"
+                    + (f", after removing a {int(tc_base / 3600)}h timecode base"
+                       if tc_base else "")
+                    + f"). The XML's value was used — it is the verified path.")
+
+        p_speed = pc.get("speed")
+        if isinstance(p_speed, (int, float)) and p_speed:
+            p_pct = abs(float(p_speed)) * 100.0
+            if abs(p_pct - cut.speed_percent) > 0.5 and not cut.speed_varies:
+                notes.append(f"{cut.clip_name}: speed differs — Premiere {p_pct:.2f}%, "
+                             f"XML {cut.speed_percent:.2f}%")
+
+    # Counted against VIDEO cuts only. The overlay runs before --tracks filtering, so
+    # comparing against every cut would report audio clips as "missing from the dump".
+    video_cuts = sum(1 for c in tl.cuts if c.track_type == "video")
+    unmatched = video_cuts - matched
+    lead = [f"merged the panel's read of {dseq or 'the sequence'}: {matched} of "
+            f"{video_cuts} video clip(s) matched"
+            + (f", {unmatched} only in the XML (nests, titles, graphics)"
+               if unmatched > 0 else "")]
+    if ambiguous:
+        # Almost always nested content: the panel hands over the NEST, so a child clip's
+        # filename is never in the bucket and no match is possible. Naming the cause
+        # matters — the mechanism on its own reads like a fault when it is expected.
+        nested_amb = sum(1 for c in tl.cuts
+                         if c.track_type == "video" and c.nested_from)
+        why = ("expected — these are inside nested sequences, which the panel sees as a "
+               "single clip" if nested_amb else
+               "several clips share that instant and none carries this cut's filename")
+        lead.append(f"{ambiguous} cut(s) kept the XML's values rather than guessing: {why}")
+    if repaired:
+        lead.append(f"repaired {repaired} media path(s) from Premiere's live location")
+    if ramps:
+        lead.append(f"read the real keyframes of {ramps} speed ramp(s) — "
+                    f"in the manifest as ramp_keys")
+    if range_flags:
+        lead.append(f"{range_flags} clip(s) disagree on the source range, listed below")
+    return lead + notes
+
+
+# --------------------------------------------------------------------------
 # ffprobe / ffmpeg
 # --------------------------------------------------------------------------
 
@@ -989,8 +1597,8 @@ def apply_probe(cut: Cut, cache: dict) -> None:
     # so recompute the consumed-frame count against it. This keeps the manifest column
     # identical to the -frames:v value build_command pins, by construction.
     if cut.media_kind != "still" and cut.source_fps > 0:
-        cut.source_consumed_frames = max(
-            1, int(round(cut.source_duration_seconds * cut.source_fps)))
+        cut.source_consumed_frames = consumed_frames(
+            cut.source_in_seconds, cut.source_duration_seconds, cut.source_fps)
 
 
 def pix_fmt_for(cut: Cut) -> str:
@@ -1036,7 +1644,7 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     # frames it occupies, and comes out 20% short.
     rate_mismatch = cut.source_fps > 0 and abs(cut.source_fps - seq_fps) > 0.01
     retime = (getattr(args, "speed", "native") == "timeline"
-              and (cut.speed_percent not in (0, 100) or rate_mismatch))
+              and (is_retimed(cut.speed_percent) or rate_mismatch))
 
     ss, t = cut.source_in_seconds, cut.source_duration_seconds
     fps = cut.source_fps or 0
@@ -1047,7 +1655,14 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         # not. 1e-4 of a frame is far above the noise and far below half a frame,
         # so a genuinely mid-frame in-point still floors correctly.
         start_f = int(ss * fps + 1e-4)
-        n_frames = max(1, int(round(t * fps)))
+        # THE SAME NUMBER THE MANIFEST REPORTS. This used to be round(t * fps) — the
+        # very rule consumed_frames() was written to replace, left behind here when that
+        # function was introduced. The two agree for any range covering a whole number
+        # of frames, which is every clip the fixture had, so the divergence went unseen:
+        # on a range of 55.26 frames the manifest said 56 and ffmpeg was told 55, and the
+        # file did not match its own label. One definition, one call.
+        n_frames = max(1, cut.source_consumed_frames
+                       or consumed_frames(ss, t, fps))
         # ffmpeg's -ss takes the first frame whose PTS is >= the seek time, so aim
         # HALF A FRAME EARLY to land squarely on the wanted frame. Without this, a
         # source at a different rate to the timeline (24 fps media in a 30 fps
@@ -1214,6 +1829,57 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
 SECONDS_FIELDS = ("source_in_seconds", "source_duration_seconds", "duration_seconds")
 
 
+def describe(cut: Cut) -> dict:
+    """How a cut should be presented: status wording, notes, and a severity class.
+
+    ONE definition, because there are now three front ends — the browser GUI, the
+    Premiere panel and the CLI — and they had already drifted: the GUI worded
+    `no_audio` as "silent source" and the panel said nothing at all. Anything that
+    reads a Cut for display should come through here.
+
+    Returns {"status", "notes", "kind", "cuttable"}. `kind` is one of "", "ok", "ramp",
+    "warn", "bad" — a class name in both front ends.
+    """
+    cuttable = cut.source_exists and cut.media_kind != "unsupported"
+
+    if cut.status == "pending":
+        # Unsupported is checked FIRST, matching run_cut: an .aep is a Dynamic Link comp
+        # whether or not it happens to be on disk, and "missing source" would send you
+        # hunting for a path when the fix is to render it out.
+        status = ("AE comp — render it" if cut.media_kind == "unsupported"
+                  else "missing source" if not cut.source_exists
+                  else "ready")
+    else:
+        status = {"ok": "written", "skipped_existing": "already there",
+                  "no_audio": "silent source",
+                  "missing_source": "missing source"}.get(cut.status, cut.status)
+
+    notes = []
+    if cut.reversed:
+        notes.append("reversed")
+    if cut.speed_varies:
+        notes.append(f"ramp {cut.speed_span}" if cut.speed_span else "speed ramp")
+    if cut.nested_from:
+        notes.append(f"in {cut.nested_from}")
+    if cut.nested_trimmed:
+        notes.append(f"{cut.nested_trimmed} trimmed")
+    if cut.edge_in_transition:
+        notes.append(f"{cut.edge_in_transition} under a transition")
+    if cut.track_type == "audio":
+        notes.append("audio")
+    if cut.pix_fmt_out and cut.pix_fmt and cut.pix_fmt_out != cut.pix_fmt:
+        notes.append(f"{cut.pix_fmt} → {cut.pix_fmt_out}")
+
+    kind = ("bad" if cut.status in ("failed", "missing_source") or not cut.source_exists
+            else "warn" if cut.media_kind == "unsupported" or cut.status == "no_audio"
+            else "ok" if cut.status in ("ok", "skipped_existing")
+            else "ramp" if is_retimed(cut.speed_percent) or cut.reversed
+            else "")
+
+    return {"status": status, "notes": " · ".join(notes), "kind": kind,
+            "cuttable": cuttable}
+
+
 def readable(cut: Cut) -> dict:
     """Cut as a dict, with the seconds fields rounded for human/CSV consumption.
 
@@ -1224,6 +1890,14 @@ def readable(cut: Cut) -> dict:
     for k in SECONDS_FIELDS:
         if isinstance(d.get(k), float):
             d[k] = round(d[k], 6)
+    # The display wording travels IN the manifest, so a front end reading the manifest
+    # gets the same status and notes as the CLI rather than reimplementing describe().
+    # This is what stops the GUI and the panel drifting apart again.
+    disp = describe(cut)
+    d["display_status"] = disp["status"]
+    d["display_notes"] = disp["notes"]
+    d["display_kind"] = disp["kind"]
+    d["cuttable"] = disp["cuttable"]
     return d
 
 
@@ -1232,6 +1906,17 @@ SHEET_COLUMNS = [
     ("clip name", "clip_name"),
     ("timeline in", "timeline_in_tc"),
     ("timeline out", "timeline_out_tc"),
+    # The four columns that let a cut be checked without doing arithmetic. A cut is
+    # written at the source's own speed, so it is LONGER than its timeline clip when
+    # sped up and shorter when slowed. Re-speeding it by "speed %" should return it to
+    # "timeline length" — near enough. It will not land on the percentage exactly,
+    # because "frames" is a whole number while the range Premiere consumed is not, and
+    # a ratio of two rounded integers cannot reproduce an unrounded one. On a short
+    # clip that shows up as up to about 1%.
+    ("speed %", "speed_percent"),
+    ("cut length s", "source_duration_seconds"),
+    ("frames", "source_consumed_frames"),
+    ("timeline length s", "duration_seconds"),
     ("original name", None),          # basename of source_path
     ("original path", "source_path"),
 ]
@@ -1253,8 +1938,11 @@ def write_sheet(tl: Timeline, outdir: Path) -> Path:
             for label, attr in SHEET_COLUMNS:
                 if attr is None:
                     row.append(Path(c.source_path).name)
-                else:
-                    row.append(getattr(c, attr))
+                    continue
+                v = getattr(c, attr)
+                # Seconds are held at full precision in memory because the ffmpeg seek
+                # needs it; a sheet meant for reading does not.
+                row.append(round(v, 3) if isinstance(v, float) else v)
             w.writerow(row)
     return path
 
@@ -1386,9 +2074,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    ap.add_argument("xml", type=Path, nargs="?",
-                    help="Final Cut Pro 7 XML exported from Premiere "
+    ap.add_argument("xml", type=Path, nargs="?", metavar="XML_OR_DUMP",
+                    help="Final Cut Pro 7 XML exported from Premiere, or a .json "
+                         "written by the xmlcut reader panel "
                          "(omit it to be walked through step by step)")
+    ap.add_argument("--panel", type=Path, metavar="DUMP.json",
+                    help="overlay a panel dump on the XML: adds real speed-ramp "
+                         "keyframes and repairs stale media paths, and cross-checks "
+                         "every value both sources carry")
     ap.add_argument("-o", "--out", type=Path, default=Path("./clips"), help="output directory")
     ap.add_argument("--tracks", choices=["video", "audio", "all"], default="video",
                     help="which tracks to extract (default: video)")
@@ -1414,6 +2107,13 @@ def main():
                          "(pick a long run back up where it stopped)")
     ap.add_argument("--update", action="store_true",
                     help="check for a newer release and install it (asks first)")
+    # Machine-readable variants, for the Premiere panel. It cannot import this module,
+    # so it shells out and reads JSON — which keeps one implementation of the update
+    # logic rather than a second one in JavaScript.
+    ap.add_argument("--check-update-json", action="store_true",
+                    help="print available-update info as JSON and exit")
+    ap.add_argument("--self-update-json", action="store_true",
+                    help="install the newest release, printing JSON progress, and exit")
     ap.add_argument("--no-probe", action="store_true", help="skip ffprobe technical specs")
     ap.add_argument("--manifest-only", action="store_true", help="write manifest, cut nothing")
     ap.add_argument("--dry-run", action="store_true", help="show what would happen")
@@ -1422,6 +2122,29 @@ def main():
 
     if args.update:
         return cli_update()
+
+    if args.check_update_json:
+        info = check_update()
+        print(json.dumps({
+            "current": VERSION,
+            "update": info,
+            "panel_dir": str(cep_extensions_dir() / PANEL_ID),
+            "source_checkout": (install_dir() / ".git").exists(),
+        }))
+        return
+
+    if args.self_update_json:
+        info = check_update()
+        if not info:
+            print(json.dumps({"ok": False, "current": VERSION,
+                              "message": f"already on {VERSION}; nothing newer published"}))
+            return
+        steps: list[str] = []
+        ok, msg = apply_update(info, progress=steps.append)
+        print(json.dumps({"ok": ok, "current": VERSION,
+                          "version": info.get("version"),
+                          "message": msg, "steps": steps}))
+        return
 
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
@@ -1439,6 +2162,8 @@ def main():
         old, new = r.split("=", 1)
         remaps.append((old, new))
 
+    merge_notes: list[str] = []
+
     def show_sequences(rows):
         print(f"{len(rows)} sequence(s) in {args.xml.name}:\n")
         print(f"  {'#':>3}  {'name':40s} {'fps':>7s} {'duration':>12s} {'clips':>7s}")
@@ -1446,16 +2171,42 @@ def main():
             print(f"  {s['index']:>3}  {s['name'][:40]:40s} {s['fps']:>7g} "
                   f"{s['duration_tc']:>12s} {s['clip_count']:>7d}")
 
-    if args.list_sequences:
-        show_sequences(Timeline.list_sequences(args.xml))
-        return
-
-    try:
-        tl = Timeline(args.xml, remaps, args.sequence)
-    except SequenceChoice as e:
-        show_sequences(e.options)
-        sys.exit("\nerror: this XML holds more than one sequence — pick one with "
-                 "--sequence NAME or --sequence N (refusing to guess).")
+    # A panel dump describes exactly one sequence — the one that was open — so there is
+    # nothing to list and nothing to pick.
+    if DumpTimeline.looks_like_dump(args.xml):
+        if args.list_sequences:
+            tl = DumpTimeline(args.xml)
+            print(f"1 sequence in {args.xml.name} (panel dumps hold only the open one):\n")
+            print(f"  {'#':>3}  {'name':40s} {'fps':>7s} {'clips':>7s}")
+            print(f"  {1:>3}  {tl.sequence_name[:40]:40s} {tl.sequence_fps:>7g} "
+                  f"{len(tl.cuts):>7d}")
+            return
+        tl = DumpTimeline(args.xml)
+        if args.panel:
+            sys.exit("error: --panel overlays a dump onto an XML. The input here is "
+                     "already a dump, so there is nothing to overlay it onto.")
+    else:
+        if args.list_sequences:
+            show_sequences(Timeline.list_sequences(args.xml))
+            return
+        try:
+            tl = Timeline(args.xml, remaps, args.sequence)
+        except SequenceChoice as e:
+            show_sequences(e.options)
+            sys.exit("\nerror: this XML holds more than one sequence — pick one with "
+                     "--sequence NAME or --sequence N (refusing to guess).")
+        # Merged before filtering and naming, so a repaired path counts as present when
+        # the missing-media report is built. The notes are held back and printed with
+        # the rest of the summary rather than ahead of the header.
+        #
+        # Skipped entirely for an audio-only run: the dump's video clips would all
+        # "match" cuts that the --tracks filter is about to discard, and reporting
+        # 18 matches on a run that cuts one audio clip describes work nobody asked for.
+        if args.panel and args.tracks != "audio":
+            merge_notes = overlay_dump(tl, args.panel)
+        elif args.panel:
+            merge_notes = ["--tracks audio: the panel overlay adds nothing to audio "
+                           "cuts, so it was skipped"]
 
     if args.tracks != "all":
         tl.cuts = [c for c in tl.cuts if c.track_type == args.tracks]
@@ -1491,6 +2242,8 @@ def main():
         print(f"  markers  : {len(tl.markers)}")
     for w in tl.warnings:
         print(f"  !! {w}")
+    for n in merge_notes:
+        print(f"  ++ {n}")
 
     if not tl.cuts:
         sys.exit("No cuts found. Check --tracks, or confirm the XML contains clipitems.")
@@ -1499,6 +2252,22 @@ def main():
         cache: dict = {}
         for c in tl.cuts:
             apply_probe(c, cache)
+
+    # Only a panel dump carries Premiere's interpreted rate, and only after probing can
+    # it be compared with the file's own. A disagreement means the edit was built on a
+    # different rate to the one ffmpeg will read, so those clips are named rather than
+    # quietly cut — see Cut.interpreted_fps for why this is a warning, not a fix.
+    reinterpreted = [c for c in tl.cuts
+                     if c.interpreted_fps > 0 and c.source_fps > 0
+                     and abs(c.interpreted_fps - c.source_fps) / c.interpreted_fps > 0.002]
+    if reinterpreted:
+        print(f"\n  !! {len(reinterpreted)} cut(s) use footage Premiere has "
+              f"REINTERPRETED — the edit was built at a different rate to the file's:")
+        for c in reinterpreted[:8]:
+            print(f"     {c.clip_name}: Premiere {c.interpreted_fps:g} fps, "
+                  f"file {c.source_fps:g} fps")
+        print("     Their ranges come from Premiere and are right; their lengths are "
+              "unverified.")
 
     # An .aep isn't "missing" — it's a Dynamic Link comp that was never a file ffmpeg
     # could read, and the fix is to render it, not to remap a path. Keep them apart.

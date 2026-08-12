@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>xmlcut</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+    <h1>xmlcut</h1>
+    <span id="ver" class="ver"></span>
+</header>
+
+<div id="updbar" class="updbar" hidden>
+    <div class="updtext" id="updtext"></div>
+    <button id="updbtn" class="mini">Update</button>
+</div>
+
+<!-- STEP 1 · read ------------------------------------------------------- -->
+<section class="step">
+    <div class="stephead"><span class="stepnum">1</span>Read the timeline</div>
+    <button id="read" class="primary">Read timeline &amp; export XML</button>
+    <p id="readhint" class="hint">Open the sequence you want in Premiere, then click.
+        Nothing in your project is changed.</p>
+
+    <div id="seqbox" class="card" hidden>
+        <div class="seqname" id="seqname">—</div>
+        <div class="seqmeta" id="seqmeta"></div>
+        <div id="mode" class="mode" hidden></div>
+        <div id="seqwarn" class="warn" hidden></div>
+        <div id="savedbox" class="saved" hidden>
+            <span class="lbl2">XML &amp; read saved to
+                <span class="q" data-tip="Beside your Premiere project, in xmlcut/&lt;sequence name&gt;/. Every read adds a new timestamped pair — nothing is overwritten.">?</span>
+            </span>
+            <div class="pathrow">
+                <span id="savedpath" class="path">—</span>
+                <button id="showsaved" class="mini">Show</button>
+            </div>
+            <div id="savednote" class="savednote"></div>
+        </div>
+    </div>
+</section>
+
+<!-- STEP 2 · choose ----------------------------------------------------- -->
+<section id="opts" class="step" hidden>
+    <div class="stephead"><span class="stepnum">2</span>Choose what to cut</div>
+
+    <p class="lbl">File types
+        <span class="q" data-tip="Only clips whose source file is one of these types get cut. The number is how many are on the timeline.">?</span>
+    </p>
+    <div id="types" class="types"></div>
+
+    <p class="lbl">Save to
+        <span class="q" data-tip="Each cut becomes its own video file here, plus clips.csv with the speed, length and frame count of every one.">?</span>
+    </p>
+    <div class="pathrow">
+        <span id="outpath" class="path">—</span>
+        <button id="pickout" class="mini">Change</button>
+    </div>
+    <label class="tick spaced"><input type="checkbox" id="resume">skip clips already
+        in that folder
+        <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. Useful after fixing offline media on a long timeline.">?</span>
+    </label>
+
+    <p class="lbl" id="listlbl">Clips
+        <span class="q" data-tip="Every cut this export will make, in timeline order. Numbers renumber as you switch file types off, so they match the filenames you'll get.">?</span>
+        <span id="listnote" class="listnote"></span>
+    </p>
+    <div id="scanning" class="hint" hidden>Reading the cut list…</div>
+    <div class="tablewrap" id="tablewrap" hidden>
+        <table id="cliptable">
+            <thead><tr>
+                <th>#</th>
+                <th>Timeline in</th>
+                <th>Clip</th>
+                <th>Speed<span class="q" data-tip="Premiere's speed percentage. The cut is written at the source's own speed, so a sped-up clip comes out longer than it looks on the timeline.">?</span></th>
+                <th>Timing<span class="q" data-tip="Where the source range came from. ticks = Premiere's exact tick values. frames = derived from frame numbers, which drifts on retimed clips.">?</span></th>
+                <th class="num">Frames<span class="q" data-tip="How many source frames the cut will contain. This is the number to check a clip against — not the speed percentage, which is a ratio of two rounded values.">?</span></th>
+                <th>Status<span class="q" data-tip="ready = not cut yet · missing source = not at the recorded path · AE comp = Dynamic Link, render it out first.">?</span></th>
+                <th>Notes<span class="q" data-tip="Anything unusual: reversed, a keyframed ramp, which nest it came out of, or that it is an audio clip.">?</span></th>
+            </tr></thead>
+            <tbody id="clipbody"></tbody>
+        </table>
+    </div>
+</section>
+
+<!-- STEP 3 · export ----------------------------------------------------- -->
+<section id="step3" class="step" hidden>
+    <div class="stephead"><span class="stepnum">3</span>Export</div>
+    <button id="export" class="primary">Export clips</button>
+</section>
+
+<section id="prog" hidden>
+    <div class="bar"><div id="barfill" class="fill"></div></div>
+    <div id="progtext" class="progtext">Starting…</div>
+    <button id="cancel" class="mini wide">Cancel</button>
+</section>
+
+<!-- REPORT -------------------------------------------------------------- -->
+<section id="report" hidden>
+    <div class="stephead">Status report</div>
+
+    <div id="tally" class="tally"></div>
+    <div id="mergebox" class="mergebox" hidden></div>
+
+    <div class="repbar">
+        <label class="tick"><input type="checkbox" id="onlyprob">only problems</label>
+        <span id="repcount" class="repcount"></span>
+    </div>
+
+    <div id="rows" class="rows"></div>
+
+    <p class="foot">A cut is written at the source's own speed, so a sped-up clip comes out
+        <b>longer</b> than it looks on the timeline. Re-speeding it by the percentage shown
+        returns it to the timeline length — to within about a frame, because the frame
+        count is whole and the range Premiere used is not.</p>
+
+    <button id="reveal" class="mini wide">Show in Finder</button>
+    <button id="copyrep" class="mini wide">Copy report</button>
+    <button id="again" class="mini wide">Back</button>
+</section>
+
+<div id="err" class="err" hidden></div>
+
+<details id="adv">
+    <summary>Advanced</summary>
+    <p class="lbl">xmlcut.py</p>
+    <div class="pathrow">
+        <span id="scriptpath" class="path">looking…</span>
+        <button id="pickscript" class="mini">Find</button>
+    </div>
+    <p class="lbl">Compare this sequence against its XML export</p>
+    <code id="cmd"></code>
+    <p class="lbl">Log</p>
+    <pre id="log" class="log">—</pre>
+</details>
+
+<div id="tip" class="tip" hidden></div>
+
+<script src="CSInterface.js"></script>
+<script src="main.js"></script>
+</body>
+</html>

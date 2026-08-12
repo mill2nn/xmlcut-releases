@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Remote-debug port for the panel. Open http://localhost:8090 in Chrome while
+     Premiere is running to get a console for it. Port 8089 is already taken by the
+     Auto Import panel, so this one uses 8090. -->
+<ExtensionList>
+    <Extension Id="com.bom.xmlcutreader.panel">
+        <HostList>
+            <Host Name="PPRO" Port="8090" />
+        </HostList>
+    </Extension>
+</ExtensionList>

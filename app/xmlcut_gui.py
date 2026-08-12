@@ -149,33 +149,13 @@ def ext_of(c: xmlcut.Cut) -> str:
 
 def row_for(c: xmlcut.Cut, speed: str) -> dict:
     frames = c.source_consumed_frames if speed == "native" else c.duration_frames
-    # What makes this clip interesting, said in the table rather than buried in the log.
-    notes = []
-    if c.reversed:
-        notes.append("reversed")
-    if c.speed_varies:
-        notes.append(f"ramp {c.speed_span}")
-    if c.nested_from:
-        notes.append(f"in {c.nested_from}")
-    if c.nested_trimmed:
-        notes.append(f"{c.nested_trimmed} trimmed")
-    if c.track_type == "audio":
-        notes.append("audio")
+    # Status wording, notes and severity all come from xmlcut.describe(), which the
+    # Premiere panel and the manifest also use. There used to be a second copy of this
+    # logic here and the two had already drifted — the GUI worded `no_audio` as "silent
+    # source" and the panel said nothing at all.
+    disp = xmlcut.describe(c)
+    notes, status, cuttable = disp["notes"], disp["status"], disp["cuttable"]
     ext = ext_of(c)
-    cuttable = c.source_exists and c.media_kind != "unsupported"
-    # Before a cut runs, every clip's status is still "pending". Showing that as "ready"
-    # was a lie for the ones that can never be cut — and doubly confusing once they sit
-    # under a divider saying they aren't. Say why here, from what the scan already knows.
-    if c.status == "pending":
-        # Unsupported is checked FIRST, matching run_cut: an .aep is a Dynamic Link comp
-        # whether or not it happens to be on disk, and "missing source" would send you
-        # hunting for a path when the fix is to render it out.
-        status = ("AE comp — render it" if c.media_kind == "unsupported"
-                  else "missing source" if not c.source_exists
-                  else "ready")
-    else:
-        status = {"ok": "written", "skipped_existing": "already there",
-                  "no_audio": "silent source"}.get(c.status, c.status)
     return {
         # 0 ready · 1 cannot be cut at all. A type switched off no longer appears here at
         # all — the filter runs at scan time now, so those cuts are not in the list.
@@ -188,12 +168,8 @@ def row_for(c: xmlcut.Cut, speed: str) -> dict:
         "timing": c.timing_source,
         "frames": frames,
         "status": status,
-        "kind": ("bad" if c.status in ("failed", "missing_source") or not c.source_exists
-                 else "warn" if c.media_kind == "unsupported" or c.status == "no_audio"
-                 else "ok" if c.status in ("ok", "skipped_existing")
-                 else "ramp" if c.speed_percent not in (0, 100) or c.reversed
-                 else ""),
-        "notes": " · ".join(notes),
+        "kind": disp["kind"],
+        "notes": notes,
         "error": c.error,
         "source": c.source_path,
     }
@@ -230,7 +206,7 @@ def summarize(cuts, speed: str, excluded: set[str] = frozenset()) -> str:
     missing = sum(1 for c in cuts if not c.source_exists
                   and c.media_kind != "unsupported")
     unsupported = sum(1 for c in cuts if c.media_kind == "unsupported")
-    ramped = sum(1 for c in cuts if c.speed_percent not in (0, 100))
+    ramped = sum(1 for c in cuts if xmlcut.is_retimed(c.speed_percent))
     reversed_n = sum(1 for c in cuts if c.reversed)
     nested_n = sum(1 for c in cuts if c.nested_from)
     tally = collections.Counter(c.status for c in cuts)

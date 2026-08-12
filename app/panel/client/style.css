@@ -1,0 +1,562 @@
+/* Premiere's panel chrome is dark and the panel can be resized very narrow, so
+ * everything here is single-column and flows. No external fonts or images — a CEP
+ * panel loads from disk with no network. */
+:root {
+    --bg: #232323;
+    --card: #1c1c1c;
+    --fg: #d8d8d8;
+    --dim: #8f8f8f;
+    --line: #3a3a3a;
+    --accent: #4a90d9;
+    --ok: #6fbf73;
+    --warn: #d9a441;
+    --bad: #e06c6c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    padding: 12px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 12px/1.5 -apple-system, "Segoe UI", sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+header {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+h1 { margin: 0; font-size: 13px; font-weight: 600; }
+.ver { color: var(--dim); font-size: 10px; }
+
+h2 {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 14px 0 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--dim);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+}
+
+/* ------------------------------------------------------------ update bar */
+
+.updbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    padding: 7px 9px;
+    border: 1px solid var(--ok);
+    border-left: 3px solid var(--ok);
+    border-radius: 4px;
+    background: #1e2a1f;
+}
+
+/* An author `display` rule beats the browser's [hidden]{display:none}. This exact
+ * omission shipped a permanently-visible bar with a dead button in the browser GUI, so
+ * the hidden case is restated deliberately. */
+.updbar[hidden] { display: none; }
+
+.updtext { flex: 1 1 auto; min-width: 0; color: var(--ok); font-size: 10px; }
+.updbar.busy { border-color: var(--line); border-left-color: var(--accent); background: var(--card); }
+.updbar.busy .updtext { color: var(--dim); }
+.updbar.done { border-color: var(--accent); border-left-color: var(--accent); background: #1c2733; }
+.updbar.done .updtext { color: var(--fg); }
+.updbar.bad { border-color: var(--bad); border-left-color: var(--bad); background: #2a1c1c; }
+.updbar.bad .updtext { color: var(--bad); }
+
+/* ---------------------------------------------------------------- buttons */
+
+button {
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: #2e2e2e;
+    color: var(--fg);
+    font: inherit;
+    cursor: pointer;
+}
+
+button:hover:not(:disabled) { background: #383838; }
+button:disabled { opacity: .5; cursor: default; }
+
+button.primary {
+    width: 100%;
+    padding: 9px 12px;
+    background: var(--accent);
+    border-color: transparent;
+    color: #fff;
+    font-weight: 600;
+}
+
+button.primary:hover:not(:disabled) { filter: brightness(1.12); }
+button.go { margin-top: 14px; }
+
+button.mini { padding: 4px 9px; font-size: 11px; white-space: nowrap; }
+button.mini.wide { width: 100%; margin-top: 6px; }
+
+/* ------------------------------------------------------------------ cards */
+
+.card {
+    margin-top: 10px;
+    padding: 9px 10px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--card);
+}
+
+/* An author `display` rule beats the browser's [hidden]{display:none}, so every
+ * rule that sets display must restate the hidden case. This exact trap shipped a
+ * dead button in the browser GUI once already. */
+.card[hidden], .types[hidden], .pathrow[hidden], header[hidden] { display: none; }
+section[hidden], div[hidden], details[hidden] { display: none; }
+
+.seqname {
+    font-weight: 600;
+    word-break: break-word;
+}
+
+.seqmeta { color: var(--dim); font-size: 11px; }
+
+.warn {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--line);
+    color: var(--warn);
+    font-size: 11px;
+}
+
+/* -------------------------------------------------------- clip table */
+
+/* The panel is much narrower than the browser GUI, so the table scrolls sideways
+ * rather than squeezing eight columns into 320px. Dragging the panel wider reveals
+ * more of it. The header tooltips are body-level bubbles positioned by JS precisely
+ * because this wrapper would clip them — that is what hid them in the browser GUI. */
+.tablewrap {
+    max-height: 320px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--card);
+}
+
+.tablewrap[hidden] { display: none; }
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10px;
+}
+
+thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 5px 6px;
+    background: #262626;
+    border-bottom: 1px solid var(--line);
+    color: var(--dim);
+    font-weight: 600;
+    text-align: left;
+    white-space: nowrap;
+}
+
+thead th .q { margin-left: 3px; }
+
+tbody td {
+    padding: 4px 6px;
+    border-bottom: 1px solid #262626;
+    color: var(--fg);
+    vertical-align: top;
+    white-space: nowrap;
+}
+
+tbody tr:last-child td { border-bottom: 0; }
+
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+th.num, td.num { min-width: 46px; }
+
+/* The clip name is the one column allowed to be long; everything else is short and
+ * fixed, so give this the slack and let the wrapper scroll. */
+td.clipname {
+    max-width: 190px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+tbody tr.k-ok td { color: var(--fg); }
+tbody tr.k-ramp td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+tbody tr.k-warn td { color: var(--warn); }
+tbody tr.k-bad td { color: var(--bad); }
+tbody tr.hidden-row { display: none; }
+
+/* A divider row before the clips that cannot be cut at all, so they are visibly
+ * separate from the ones that are merely unusual. */
+tbody tr.divider td {
+    padding: 5px 6px;
+    background: #2a2020;
+    color: var(--bad);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    white-space: normal;
+}
+
+.listnote { margin-left: 4px; color: var(--dim); font-weight: 400; }
+
+/* ------------------------------------------------------------- steps */
+
+.step { margin-bottom: 18px; }
+.step[hidden] { display: none; }
+
+.stephead {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--fg);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+}
+
+/* The step badge. Named `stepnum`, NOT `num`: the table's numeric cells use
+ * `class="num"`, and this rule turned every frame count into a 15px blue circle
+ * stacked on top of the column header. */
+.stepnum {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 9px;
+}
+
+.hint { margin: 6px 0 0; color: var(--dim); font-size: 10px; }
+
+/* --------------------------------------------------------- the report */
+
+.tally {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 8px;
+}
+
+.pill {
+    padding: 3px 8px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card);
+    font-size: 10px;
+}
+
+.pill.good { border-color: var(--ok); color: var(--ok); }
+.pill.bad { border-color: var(--bad); color: var(--bad); }
+.pill.warnp { border-color: var(--warn); color: var(--warn); }
+
+/* What the merge decided, promoted out of the Advanced log. */
+.mergebox {
+    margin-bottom: 8px;
+    padding: 7px 8px;
+    border: 1px solid var(--line);
+    border-left: 2px solid var(--accent);
+    border-radius: 3px;
+    background: var(--card);
+}
+
+.mergebox[hidden] { display: none; }
+
+.mergeline {
+    color: var(--dim);
+    font-size: 10px;
+    line-height: 1.45;
+}
+
+.mergeline + .mergeline { margin-top: 3px; }
+
+.tick.spaced { margin-top: 7px; }
+
+.savednote { margin-top: 4px; color: var(--dim); font-size: 9px; }
+
+.repbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.tick {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--dim);
+    font-size: 10px;
+    cursor: pointer;
+}
+
+.tick input { margin: 0; accent-color: var(--accent); }
+.repcount { color: var(--dim); font-size: 10px; }
+
+.rows {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--card);
+}
+
+.rows[hidden] { display: none; }
+
+.row2 {
+    padding: 6px 8px;
+    border-bottom: 1px solid #2a2a2a;
+    font-size: 10px;
+}
+
+.row2:last-child { border-bottom: 0; }
+
+.row2 .nm {
+    display: block;
+    color: var(--fg);
+    font: 10px/1.35 ui-monospace, Menlo, monospace;
+    word-break: break-all;
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+.row2 .facts { color: var(--dim); }
+.row2.isbad { background: #2a1c1c; }
+.row2.isbad .nm { color: var(--bad); }
+.row2.iswarn .facts { color: var(--warn); }
+
+.foot {
+    margin: 8px 0 4px;
+    color: var(--dim);
+    font-size: 10px;
+    line-height: 1.45;
+}
+
+.foot b { color: var(--fg); font-weight: 600; }
+
+/* Where the read landed. Shown rather than left to be hunted for. */
+.saved {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--line);
+}
+
+.saved[hidden] { display: none; }
+
+.lbl2 {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--dim);
+    font-size: 10px;
+}
+
+/* Which sources the next export will use. Stated rather than left to be inferred. */
+.mode {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--line);
+    font-size: 10px;
+}
+
+.mode[hidden] { display: none; }
+.mode.good { color: var(--ok); }
+.mode.warnmode { color: var(--warn); }
+.mode.busy { color: var(--dim); }
+
+.err {
+    margin-top: 10px;
+    padding: 9px 10px;
+    border: 1px solid var(--bad);
+    border-radius: 4px;
+    background: var(--card);
+    color: var(--bad);
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+/* ------------------------------------------------------------ type chips */
+
+.types {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.chip {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--card);
+    cursor: pointer;
+    font-size: 11px;
+}
+
+/* `on` and `off` only carry the un-typed fallback; the per-type colour is set inline
+ * from TYPE_COLORS, because a class per extension would mean editing CSS for every new
+ * format someone drops on a timeline. */
+.chip.on { border-color: var(--accent); background: #26384a; }
+.chip.off .dot { opacity: .35; }
+
+.dot {
+    display: inline-block;
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--dim);
+}
+
+td.clipname .dot { margin-right: 5px; vertical-align: 1px; }
+.chip input { margin: 0; accent-color: var(--accent); }
+.chip .n { color: var(--dim); }
+.chip.off .n, .chip.off { color: var(--dim); }
+
+/* --------------------------------------------------------------- paths */
+
+.pathrow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.path {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 5px 7px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--card);
+    color: var(--dim);
+    font: 10px/1.4 ui-monospace, Menlo, monospace;
+    /* Long paths must not push the button off the panel. The middle is dropped in JS
+     * (shortPath) rather than with `direction: rtl`, which does clip from the left but
+     * also drags a path's leading "/" to the wrong end — bidi reorders the neutral
+     * characters. Truncating the text itself is predictable; the full path is on the
+     * title attribute. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ------------------------------------------------------------- progress */
+
+.bar {
+    height: 6px;
+    margin: 12px 0 8px;
+    border-radius: 3px;
+    background: #2e2e2e;
+    overflow: hidden;
+}
+
+.fill {
+    height: 100%;
+    width: 0;
+    background: var(--accent);
+    transition: width .15s linear;
+}
+
+.progtext, .donetext {
+    font-size: 11px;
+    color: var(--dim);
+    word-break: break-word;
+}
+
+.donetext { color: var(--fg); }
+.donetext.good { color: var(--ok); }
+.donetext.bad { color: var(--bad); }
+
+/* -------------------------------------------------------------- advanced */
+
+details {
+    margin-top: 16px;
+    border-top: 1px solid var(--line);
+    padding-top: 8px;
+}
+
+summary {
+    color: var(--dim);
+    font-size: 11px;
+    cursor: pointer;
+    outline: none;
+}
+
+.lbl { margin: 10px 0 4px; color: var(--dim); font-size: 10px; }
+
+code, .log {
+    display: block;
+    margin: 0;
+    padding: 7px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--card);
+    color: var(--dim);
+    font: 10px/1.4 ui-monospace, Menlo, monospace;
+    white-space: pre-wrap;
+    word-break: break-all;
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+.log { max-height: 160px; overflow: auto; }
+
+/* ------------------------------------------------------------- tooltips */
+
+.q {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 13px;
+    height: 13px;
+    border: 1px solid var(--line);
+    border-radius: 50%;
+    color: var(--dim);
+    font-size: 9px;
+    cursor: help;
+}
+
+/* The bubble lives on the body, positioned by JS. Absolutely positioning it inside
+ * a scrolling container gets it clipped — that is why the browser GUI's
+ * table-header tooltips never appeared. */
+.tip {
+    position: fixed;
+    z-index: 99;
+    max-width: 210px;
+    padding: 6px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: #111;
+    color: var(--fg);
+    font-size: 11px;
+    line-height: 1.4;
+    pointer-events: none;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, .5);
+}
+
+.tip[hidden] { display: none; }
