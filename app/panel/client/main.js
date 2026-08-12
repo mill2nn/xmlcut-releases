@@ -27,8 +27,7 @@
                "report", "tally", "rows", "onlyprob", "repcount", "copyrep",
                "readhint", "scanning", "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
-               "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn",
-               "container"];
+               "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -48,7 +47,6 @@
         merge: [],       // the '++' lines xmlcut printed about the merge
         busy: false,
         resume: false,
-        container: "mp4",
         updateInfo: null
     };
 
@@ -62,7 +60,6 @@
         el.read.disabled = state.busy;
         el.pickout.disabled = state.busy;
         el.pickscript.disabled = state.busy;
-        el.container.disabled = state.busy;
         el.resume.disabled = state.busy;
         el.read.textContent = (state.busy && label) ? label
                                                     : "Read timeline & export XML";
@@ -85,9 +82,6 @@
                     "-o", outDir];
         } else {
             args = [state.script, state.dump, "-o", outDir];
-        }
-        if (state.container && state.container !== "mp4") {
-            args.push("--container", state.container);
         }
         if (!allTypes) {
             var exts = selectedExts();
@@ -379,16 +373,26 @@
         var remembered = savedTypeChoices();
         state.types = {};
         state.total = 0;
-        for (var i = 0; i < state.clips.length; i++) {
-            var ext = state.clips[i].ext;
+
+        function ensure(ext) {
             if (!state.types[ext]) {
                 var on;
                 if (remembered.hasOwnProperty(ext)) on = !!remembered[ext];
                 else on = !DEAD_TYPES[ext];   // project files start off
                 state.types[ext] = { count: 0, on: on };
             }
-            state.types[ext].count++;
+            return state.types[ext];
+        }
+
+        for (var i = 0; i < state.clips.length; i++) {
+            var t = ensure(state.clips[i].ext);
+            t.count++;
             state.total++;
+        }
+        // The stable set, plus anything a previous project taught us he cares about.
+        for (var a = 0; a < ALWAYS_TYPES.length; a++) ensure(ALWAYS_TYPES[a]);
+        for (var k in remembered) {
+            if (remembered.hasOwnProperty(k) && k !== "(none)") ensure(k);
         }
         return true;
     }
@@ -396,6 +400,15 @@
     // Not decodable media, so they start unticked rather than failing one by one during
     // the export. Overridden by anything remembered from last time.
     var DEAD_TYPES = { aep: 1, prproj: 1, psb: 1, c4d: 1, aet: 1, ppj: 1, fcpxml: 1 };
+
+    /* Always listed, even when the open timeline has none of them.
+     *
+     * A chip list that only shows what happens to be on THIS timeline changes shape
+     * between projects, so a type you rely on looks like it went missing — .mp4 is
+     * absent from a .mov shoot and present in the next one. Showing them at zero keeps
+     * the list stable and lets a preference be set once and remembered. They are dimmed
+     * and cannot be mistaken for something that will be cut. */
+    var ALWAYS_TYPES = ["mp4", "mov", "png"];
 
     function renderSequence() {
         var r = state.info;
@@ -428,30 +441,40 @@
         el.types.innerHTML = "";
         var exts = [];
         for (var k in state.types) if (state.types.hasOwnProperty(k)) exts.push(k);
-        // Most numerous first, so the type that dominates the timeline reads first.
+        // On this timeline first, most numerous first within that; the zero-count ones
+        // trail behind so the list reads as "what you have, then what you could have".
         exts.sort(function (a, b) {
-            var d = state.types[b].count - state.types[a].count;
+            var ca = state.types[a].count, cb = state.types[b].count;
+            if ((ca === 0) !== (cb === 0)) return ca === 0 ? 1 : -1;
+            var d = cb - ca;
             return d !== 0 ? d : (a < b ? -1 : a > b ? 1 : 0);
         });
         for (var i = 0; i < exts.length; i++) {
             (function (ext) {
                 var t = state.types[ext];
                 var col = colorFor(ext);
+                var absent = (t.count === 0);
                 var chip = document.createElement("label");
-                chip.className = "chip " + (t.on ? "on" : "off");
+                chip.className = "chip " + (t.on ? "on" : "off")
+                    + (absent ? " absent" : "");
+                if (absent) {
+                    chip.title = "no ." + ext + " on this timeline — ticking it is "
+                        + "remembered for the next one";
+                }
                 // The colour is per type and set inline, since it is data-driven — a
                 // class per extension would mean editing CSS for every new format.
-                chip.style.borderColor = t.on ? col : "";
-                chip.style.background = t.on ? tint(col) : "";
+                chip.style.borderColor = (t.on && !absent) ? col : "";
+                chip.style.background = (t.on && !absent) ? tint(col) : "";
 
                 var box = document.createElement("input");
                 box.type = "checkbox";
                 box.checked = t.on;
                 box.addEventListener("change", function () {
                     t.on = box.checked;
-                    chip.className = "chip " + (t.on ? "on" : "off");
-                    chip.style.borderColor = t.on ? col : "";
-                    chip.style.background = t.on ? tint(col) : "";
+                    chip.className = "chip " + (t.on ? "on" : "off")
+                        + (absent ? " absent" : "");
+                    chip.style.borderColor = (t.on && !absent) ? col : "";
+                    chip.style.background = (t.on && !absent) ? tint(col) : "";
                     rememberTypeChoices();
                     refreshExportEnabled();
                     // Re-filtered and renumbered locally — no need to re-run the scan,
@@ -509,8 +532,7 @@
         var ready = !!(state.dump && state.script && state.out && n > 0);
         el["export"].disabled = !ready;
         el["export"].textContent = n > 0
-            ? ("Export " + n + " clip" + (n === 1 ? "" : "s")
-               + " as ." + state.container)
+            ? ("Export " + n + " clip" + (n === 1 ? "" : "s"))
             : "Nothing selected";
         if (!state.script && state.dump) {
             el["export"].textContent = "Find xmlcut.py first";
@@ -1155,12 +1177,6 @@
 
     el.onlyprob.addEventListener("change", renderReport);
 
-    el.container.addEventListener("change", function () {
-        state.container = el.container.value || "mp4";
-        try { window.localStorage.setItem("xmlcut.container", state.container); } catch (e) {}
-        refreshExportEnabled();
-    });
-
     el.resume.addEventListener("change", function () {
         state.resume = el.resume.checked;
         try { window.localStorage.setItem("xmlcut.resume",
@@ -1220,11 +1236,6 @@
             state.resume = !!window.localStorage.getItem("xmlcut.resume");
         } catch (e) { state.resume = false; }
         el.resume.checked = state.resume;
-        try {
-            var savedCt = window.localStorage.getItem("xmlcut.container");
-            if (savedCt) state.container = savedCt;
-        } catch (e) {}
-        el.container.value = state.container;
         wireTips();
         // Off the critical path: a slow or absent network must never delay the panel.
         if (state.script) checkUpdate();

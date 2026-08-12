@@ -292,28 +292,6 @@ tbody tr.divider td {
 
 .tick.spaced { margin-top: 7px; }
 
-/* A labelled control on one line, for the few settings that are not checkboxes. */
-.optrow {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 8px;
-}
-
-.optrow[hidden] { display: none; }
-.optlbl { display: flex; align-items: center; gap: 4px; color: var(--dim); font-size: 10px; }
-
-select {
-    padding: 3px 6px;
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    background: #2e2e2e;
-    color: var(--fg);
-    font: inherit;
-    font-size: 11px;
-}
-
-select:disabled { opacity: .5; }
 
 .savednote { margin-top: 4px; color: var(--dim); font-size: 9px; }
 
@@ -446,6 +424,12 @@ select:disabled { opacity: .5; }
  * format someone drops on a timeline. */
 .chip.on { border-color: var(--accent); background: #26384a; }
 .chip.off .dot { opacity: .35; }
+
+/* A type this timeline does not use. Listed so the set stays the same between
+ * projects — a chip that appears and disappears reads as something breaking — but
+ * visibly not part of this run. */
+.chip.absent { opacity: .45; border-style: dashed; }
+.chip.absent .n { opacity: .8; }
 
 .dot {
     display: inline-block;

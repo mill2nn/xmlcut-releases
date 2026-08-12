@@ -1,6 +1,6 @@
 {
-  "version": "3.1",
-  "notes": "Output container option, and the real extension per row \u2014 v3.1",
+  "version": "3.2",
+  "notes": "Revert the Save as control; make the file-type list stable instead \u2014 v3.2",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
