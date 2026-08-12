@@ -429,6 +429,37 @@ tbody tr.divider td {
  * projects — a chip that appears and disappears reads as something breaking — but
  * visibly not part of this run. */
 .chip.absent { opacity: .45; border-style: dashed; }
+
+/* Why the export cannot run, said in words. A disabled button with no reason is the
+ * thing that made ".mp4 0 ticked, .mov unticked" look like a broken panel. */
+.typehint {
+    margin-top: 6px;
+    padding: 6px 8px;
+    border-left: 2px solid var(--warn);
+    border-radius: 2px;
+    background: var(--card);
+    color: var(--warn);
+    font-size: 10px;
+    line-height: 1.45;
+}
+
+.typehint[hidden] { display: none; }
+.typehint.fixed { border-left-color: var(--accent); color: var(--dim); }
+
+/* A text button that reads as a link, for a secondary action inside a label. */
+.linkbtn {
+    margin-left: auto;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    font-size: 10px;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.linkbtn:hover { background: none; filter: brightness(1.2); }
 .chip.absent .n { opacity: .8; }
 
 .dot {
@@ -524,7 +555,8 @@ summary {
     outline: none;
 }
 
-.lbl { margin: 10px 0 4px; color: var(--dim); font-size: 10px; }
+.lbl { display: flex; align-items: center; gap: 5px;
+       margin: 10px 0 4px; color: var(--dim); font-size: 10px; }
 
 code, .log {
     display: block;

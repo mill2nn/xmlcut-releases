@@ -27,7 +27,8 @@
                "report", "tally", "rows", "onlyprob", "repcount", "copyrep",
                "readhint", "scanning", "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
-               "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn"];
+               "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn",
+               "typehint", "typeall"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -47,6 +48,7 @@
         merge: [],       // the '++' lines xmlcut printed about the merge
         busy: false,
         resume: false,
+        typesReset: "",
         updateInfo: null
     };
 
@@ -394,7 +396,47 @@
         for (var k in remembered) {
             if (remembered.hasOwnProperty(k) && k !== "(none)") ensure(k);
         }
+
+        /* NEVER open in a state where nothing can be cut.
+         *
+         * Remembering choices plus always listing .mp4 combined into a trap: a .mov
+         * timeline opened with .mp4 ticked (remembered from another project, count 0)
+         * and .mov unticked (remembered from before it was even read correctly), so the
+         * panel said "0 of 0 cuttable · Nothing selected" and gave no hint why.
+         *
+         * A remembered "off" on the only type a timeline actually contains is not a
+         * decision anyone made about THIS timeline, so the present types are switched
+         * back on and the panel says it did that. */
+        state.typesReset = "";
+        var present = presentCuttable();
+        var anyOn = false;
+        for (var q = 0; q < present.length; q++) {
+            if (state.types[present[q]].on) anyOn = true;
+        }
+        if (present.length && !anyOn) {
+            var turned = [];
+            for (var w = 0; w < present.length; w++) {
+                state.types[present[w]].on = true;
+                turned.push("." + present[w]);
+            }
+            rememberTypeChoices();
+            state.typesReset = turned.join(" and ");
+        }
         return true;
+    }
+
+    /* Types this timeline actually has AND that can be decoded — the set that has to
+     * contain at least one ticked entry for the export to do anything. */
+    function presentCuttable() {
+        var out = [];
+        for (var k in state.types) {
+            if (state.types.hasOwnProperty(k) && state.types[k].count > 0
+                && !DEAD_TYPES[k] && k !== "(none)") {
+                out.push(k);
+            }
+        }
+        out.sort();
+        return out;
     }
 
     // Not decodable media, so they start unticked rather than failing one by one during
@@ -475,6 +517,7 @@
                         + (absent ? " absent" : "");
                     chip.style.borderColor = (t.on && !absent) ? col : "";
                     chip.style.background = (t.on && !absent) ? tint(col) : "";
+                    state.typesReset = "";
                     rememberTypeChoices();
                     refreshExportEnabled();
                     // Re-filtered and renumbered locally — no need to re-run the scan,
@@ -527,8 +570,33 @@
         return out;
     }
 
+    function typeHint() {
+        if (state.typesReset) {
+            return "Nothing was selected, so " + state.typesReset
+                 + " — the types on this timeline — were switched back on.";
+        }
+        var n = selectedCount();
+        if (n > 0) return "";
+        var present = presentCuttable();
+        if (!present.length) {
+            return "This timeline has no media that can be cut.";
+        }
+        var names = [];
+        for (var i = 0; i < present.length; i++) {
+            names.push("." + present[i] + " (" + state.types[present[i]].count + ")");
+        }
+        return "Nothing selected. This timeline has " + names.join(", ")
+             + " — tick one of those. A type showing 0 has none on this timeline.";
+    }
+
     function refreshExportEnabled() {
         var n = selectedCount();
+        if (el.typehint) {
+            var h = typeHint();
+            el.typehint.textContent = h;
+            el.typehint.className = "typehint" + (state.typesReset ? " fixed" : "");
+            show(el.typehint, !!h);
+        }
         var ready = !!(state.dump && state.script && state.out && n > 0);
         el["export"].disabled = !ready;
         el["export"].textContent = n > 0
@@ -1173,6 +1241,16 @@
         show(el.opts, true);
         show(el.step3, true);
         clearError();
+    });
+
+    el.typeall.addEventListener("click", function () {
+        var present = presentCuttable();
+        for (var i = 0; i < present.length; i++) state.types[present[i]].on = true;
+        state.typesReset = "";
+        rememberTypeChoices();
+        renderTypes();
+        renderClips();
+        refreshExportEnabled();
     });
 
     el.onlyprob.addEventListener("change", renderReport);

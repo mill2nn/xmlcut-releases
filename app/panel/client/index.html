@@ -47,9 +47,11 @@
     <div class="stephead"><span class="stepnum">2</span>Choose what to cut</div>
 
     <p class="lbl">File types
-        <span class="q" data-tip="Only clips whose source file is one of these types get cut. The number is how many are on the timeline.">?</span>
+        <span class="q" data-tip="Only clips whose source file is one of these types get cut. The number is how many are on this timeline; a type showing 0 is listed so the set stays the same between projects, and ticking it is remembered for a timeline that has it.">?</span>
+        <button id="typeall" class="linkbtn">select what's here</button>
     </p>
     <div id="types" class="types"></div>
+    <div id="typehint" class="typehint" hidden></div>
 
     <p class="lbl">Save to
         <span class="q" data-tip="Each cut becomes its own video file here, plus clips.csv with the speed, length and frame count of every one.">?</span>

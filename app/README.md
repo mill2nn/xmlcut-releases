@@ -474,6 +474,12 @@ invariant: source length ÷ speed should equal the clip's length on the timeline
 
 ## 10.2 The Premiere panel — cut straight from the timeline
 
+**It will not open in a state where nothing can be cut.** If the remembered selection leaves every
+type this timeline actually has switched off, the panel switches them back on and says so. And if you
+untick them yourself, it tells you what the timeline *does* contain instead of just greying the button
+out — *"Nothing selected. This timeline has .mov (1), .png (1) — tick one of those."* There is a
+**select what's here** link beside the heading.
+
 **The file-type list is stable between projects.** `.mp4`, `.mov` and `.png` are always listed,
 even when the open timeline has none of them — shown dimmed with a `0` and a dashed edge. A list that
 only showed what happened to be on *this* timeline changed shape every time you switched project, so
