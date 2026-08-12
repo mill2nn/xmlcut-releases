@@ -27,7 +27,8 @@
                "report", "tally", "rows", "onlyprob", "repcount", "copyrep",
                "readhint", "scanning", "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
-               "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn"];
+               "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn",
+               "container"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -47,6 +48,7 @@
         merge: [],       // the '++' lines xmlcut printed about the merge
         busy: false,
         resume: false,
+        container: "mp4",
         updateInfo: null
     };
 
@@ -60,6 +62,8 @@
         el.read.disabled = state.busy;
         el.pickout.disabled = state.busy;
         el.pickscript.disabled = state.busy;
+        el.container.disabled = state.busy;
+        el.resume.disabled = state.busy;
         el.read.textContent = (state.busy && label) ? label
                                                     : "Read timeline & export XML";
         refreshExportEnabled();
@@ -81,6 +85,9 @@
                     "-o", outDir];
         } else {
             args = [state.script, state.dump, "-o", outDir];
+        }
+        if (state.container && state.container !== "mp4") {
+            args.push("--container", state.container);
         }
         if (!allTypes) {
             var exts = selectedExts();
@@ -502,7 +509,8 @@
         var ready = !!(state.dump && state.script && state.out && n > 0);
         el["export"].disabled = !ready;
         el["export"].textContent = n > 0
-            ? ("Export " + n + " clip" + (n === 1 ? "" : "s"))
+            ? ("Export " + n + " clip" + (n === 1 ? "" : "s")
+               + " as ." + state.container)
             : "Nothing selected";
         if (!state.script && state.dump) {
             el["export"].textContent = "Find xmlcut.py first";
@@ -789,8 +797,16 @@
                 td.textContent = cells[k][0];
                 if (k === 2) {
                     td.title = v.source || v.clip;
-                    // Same colour as the type's chip, so a row can be tied to a type
-                    // without reading the extension off the filename.
+                    // The REAL extension, shown because the Clip column is Premiere's
+                    // clip NAME, not the filename. A clip called "shot.mov" can easily
+                    // be backed by an .mp4 after a transcode or a relink, and then the
+                    // type chips look wrong when they are in fact right. Showing both
+                    // makes that visible instead of confusing.
+                    var tag = document.createElement("span");
+                    tag.className = "exttag";
+                    tag.textContent = v.ext;
+                    tag.style.color = colorFor(v.ext);
+                    td.insertBefore(tag, td.firstChild);
                     var d = document.createElement("span");
                     d.className = "dot";
                     d.style.background = colorFor(v.ext);
@@ -1139,6 +1155,12 @@
 
     el.onlyprob.addEventListener("change", renderReport);
 
+    el.container.addEventListener("change", function () {
+        state.container = el.container.value || "mp4";
+        try { window.localStorage.setItem("xmlcut.container", state.container); } catch (e) {}
+        refreshExportEnabled();
+    });
+
     el.resume.addEventListener("change", function () {
         state.resume = el.resume.checked;
         try { window.localStorage.setItem("xmlcut.resume",
@@ -1198,6 +1220,11 @@
             state.resume = !!window.localStorage.getItem("xmlcut.resume");
         } catch (e) { state.resume = false; }
         el.resume.checked = state.resume;
+        try {
+            var savedCt = window.localStorage.getItem("xmlcut.container");
+            if (savedCt) state.container = savedCt;
+        } catch (e) {}
+        el.container.value = state.container;
         wireTips();
         // Off the critical path: a slow or absent network must never delay the panel.
         if (state.script) checkUpdate();

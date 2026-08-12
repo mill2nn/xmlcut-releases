@@ -292,6 +292,29 @@ tbody tr.divider td {
 
 .tick.spaced { margin-top: 7px; }
 
+/* A labelled control on one line, for the few settings that are not checkboxes. */
+.optrow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.optrow[hidden] { display: none; }
+.optlbl { display: flex; align-items: center; gap: 4px; color: var(--dim); font-size: 10px; }
+
+select {
+    padding: 3px 6px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: #2e2e2e;
+    color: var(--fg);
+    font: inherit;
+    font-size: 11px;
+}
+
+select:disabled { opacity: .5; }
+
 .savednote { margin-top: 4px; color: var(--dim); font-size: 9px; }
 
 .repbar {
@@ -433,7 +456,17 @@ tbody tr.divider td {
     background: var(--dim);
 }
 
-td.clipname .dot { margin-right: 5px; vertical-align: 1px; }
+td.clipname .dot { margin-right: 4px; vertical-align: 1px; }
+
+/* The source file's real extension, next to Premiere's clip name. */
+.exttag {
+    display: inline-block;
+    margin-right: 6px;
+    font: 9px/1 ui-monospace, Menlo, monospace;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    opacity: .85;
+}
 .chip input { margin: 0; accent-color: var(--accent); }
 .chip .n { color: var(--dim); }
 .chip.off .n, .chip.off { color: var(--dim); }

@@ -474,6 +474,16 @@ invariant: source length ÷ speed should equal the clip's length on the timeline
 
 ## 10.2 The Premiere panel — cut straight from the timeline
 
+**Output format.** Step 2 has a **Save as** control — `.mp4` or `.mov`. The video inside is
+identical in both (H.264 High, 4:2:0, no audio); only the wrapper changes, and both drop straight
+back into Premiere. Your choice is remembered, and the Export button names the format so it is never
+a surprise.
+
+`--container` on the CLI takes anything ffmpeg can mux, but **avoid `mkv`**: its muxer declares one
+frame more than the file actually holds (2.042 s for a 2.000 s clip at 24 fps), and an NLE reads the
+container's duration, not the frame count. That is the same defect that got audio removed in 2.6, so
+mkv is deliberately not offered in the panel.
+
 **It updates itself.** Install once; after that the panel shows an **Update** button whenever a
 new version is published, and pressing it refreshes `xmlcut.py`, the browser GUI *and* the panel
 files, then copies the panel back into Premiere's extensions folder. Quit Premiere (⌘Q) and

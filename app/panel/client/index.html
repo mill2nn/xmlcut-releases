@@ -58,6 +58,16 @@
         <span id="outpath" class="path">—</span>
         <button id="pickout" class="mini">Change</button>
     </div>
+    <div class="optrow">
+        <label for="container" class="optlbl">Save as
+            <span class="q" data-tip="The container the clips are written in. The video inside is identical either way — H.264 High, 4:2:0, no audio — so pick whichever your workflow prefers. Both drop straight back into Premiere.">?</span>
+        </label>
+        <select id="container">
+            <option value="mp4">.mp4</option>
+            <option value="mov">.mov</option>
+        </select>
+    </div>
+
     <label class="tick spaced"><input type="checkbox" id="resume">skip clips already
         in that folder
         <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. Useful after fixing offline media on a long timeline.">?</span>

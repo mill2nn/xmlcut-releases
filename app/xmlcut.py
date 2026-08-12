@@ -39,7 +39,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "3.0"
+VERSION = "3.1"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -2093,7 +2093,11 @@ def main():
     ap.add_argument("--list-sequences", action="store_true",
                     help="list the sequences in the XML and exit")
     ap.add_argument("--vcodec", default="libx264", help="video encoder (default libx264)")
-    ap.add_argument("--container", default="mp4", help="output container (default mp4)")
+    ap.add_argument("--container", default="mp4",
+                    help="output container: mp4 (default) or mov. The video is identical "
+                         "in both — H.264 High, 4:2:0, no audio; only the wrapper "
+                         "changes. Avoid mkv: its muxer declares one frame more than "
+                         "the file holds, and an NLE reads the container's duration.")
     ap.add_argument("--speed", choices=["native", "timeline"], default="native",
                     help="for speed-ramped clips: 'native' keeps the real source frames "
                          "(default, best for training data); 'timeline' retimes the clip so "
