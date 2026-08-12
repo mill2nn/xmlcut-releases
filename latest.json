@@ -1,6 +1,6 @@
 {
-  "version": "2.5",
-  "notes": "Fix: the update bar no longer appears when you are already up to date.",
+  "version": "2.6",
+  "notes": "Clips are video-only: an audio track made every file report a duration one frame too long.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

@@ -38,7 +38,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "2.5"
+VERSION = "2.6"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -77,6 +77,16 @@ MAX_NEST_DEPTH = 4
 X264_CRF = "1"
 X264_PRESET = "veryfast"
 X264_PROFILE = "high"
+
+# Video-only output, and not merely as a default: an AAC track makes the CONTAINER
+# declare a duration longer than the video stream it holds. AAC needs priming samples,
+# so the audio outruns the video by ~40 ms — one frame — and an NLE reading the container
+# imports every clip a frame long. Neither `-shortest` nor trimming the audio fixes the
+# mp4 header; only leaving audio out does. Measured: 48 frames of 24 fps video declared
+# 2.041 s with audio, 2.000 s without.
+#
+# Extracting audio-track clips on their own (`--tracks audio`) is a different job and
+# still works; it writes .m4a files where audio is the point.
 
 # How many clips to encode at once. Not auto-detected from the core count, and
 # deliberately not the core count itself: libx264 already parallelises across every
@@ -1094,21 +1104,9 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         else:
             cmd += ["-frames:v", str(max(1, n_frames))]
 
-        if not args.no_audio:
-            chain = ["areverse"] if cut.reversed else []
-            if retime:
-                rem = k
-                while rem > 2.0:        # atempo is valid only in [0.5, 2.0]
-                    chain.append("atempo=2.0"); rem /= 2.0
-                while rem < 0.5:
-                    chain.append("atempo=0.5"); rem /= 0.5
-                chain.append(f"atempo={rem:.6f}")
-            if chain:
-                cmd += ["-filter:a", ",".join(chain)]
         cmd += ["-c:v", args.vcodec, "-crf", X264_CRF, "-preset", X264_PRESET,
                 "-profile:v", X264_PROFILE, "-pix_fmt", cut.pix_fmt_out,
-                "-movflags", "+faststart"]
-        cmd += ["-an"] if args.no_audio else ["-c:a", "aac", "-b:a", "192k"]
+                "-movflags", "+faststart", "-an"]
         cmd += [str(out_path)]
         return cmd
 
@@ -1128,11 +1126,10 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         "-profile:v", X264_PROFILE,
         "-pix_fmt", cut.pix_fmt_out,
         "-movflags", "+faststart",       # so it starts playing without reading the tail
+        # NO AUDIO, always — see the note on the constants. An AAC track made every
+        # container declare a duration one frame longer than its own video stream.
+        "-an",
     ]
-    if args.no_audio:
-        cmd += ["-an"]
-    else:
-        cmd += ["-c:a", "aac", "-b:a", "192k"]
     cmd += [str(out_path)]
     return cmd
 
@@ -1404,7 +1401,6 @@ def main():
                     help="list the sequences in the XML and exit")
     ap.add_argument("--vcodec", default="libx264", help="video encoder (default libx264)")
     ap.add_argument("--container", default="mp4", help="output container (default mp4)")
-    ap.add_argument("--no-audio", action="store_true", help="drop audio from output clips")
     ap.add_argument("--speed", choices=["native", "timeline"], default="native",
                     help="for speed-ramped clips: 'native' keeps the real source frames "
                          "(default, best for training data); 'timeline' retimes the clip so "

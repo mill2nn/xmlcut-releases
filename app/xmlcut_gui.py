@@ -57,7 +57,7 @@ def default_args(**over) -> argparse.Namespace:
     One place, so a new CLI flag is one line here rather than a hunt.
     """
     a = argparse.Namespace(
-        tracks="video", vcodec="libx264", container="mp4", no_audio=False,
+        tracks="video", vcodec="libx264", container="mp4",
         speed="native", min_frames=1, no_probe=False, manifest_only=False,
         dry_run=False, timeout=1800, resume=False,
     )
@@ -324,7 +324,6 @@ def do_scan(payload: dict) -> dict:
 
     args = default_args(
         speed=payload.get("speed", "native"),
-        no_audio=bool(payload.get("no_audio")),
         min_frames=max(1, int(payload.get("min_frames") or 1)),
         tracks=payload.get("tracks") or "video",
         resume=bool(payload.get("resume")),
@@ -776,10 +775,6 @@ PAGE = r"""<!doctype html>
         a duplicate of most video clips."></span></label>
         <select id="tracks"><option>video</option><option>audio</option>
         <option>all</option></select></div>
-      <div class="opt chk"><input type="checkbox" id="noaudio">
-        <label for="noaudio">No audio<span class="tip" data-tip="Drop the audio
-        track from every output clip. Smaller files and slightly faster — worth it if the dataset
-        is image-only."></span></label></div>
       <div class="opt chk"><input type="checkbox" id="resume">
         <label for="resume">Resume<span class="tip" data-tip="Skip any clip
         whose file is already in the output folder and non-empty. Use it to pick a long run back
@@ -910,7 +905,7 @@ function opts(){
   return { xml:$("xml").value.trim(), out:$("out").value.trim(),
     sequence:$("seq").value, remap:$("remap").value.trim(), speed:$("speed").value,
     min_frames:+$("minf").value,
-    no_audio:$("noaudio").checked, tracks:$("tracks").value,
+    tracks:$("tracks").value,
     resume:$("resume").checked };
 }
 function render(st){

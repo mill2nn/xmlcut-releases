@@ -244,8 +244,18 @@ And it bought almost nothing: 0.42 s against 0.91 s for the same 16 clips — wh
 re-encode that replaced both runs the same 16 in about 0.75 s. The speed copy was reached for
 is available without giving up accuracy. See §5.1.
 
-Remaining encode options: `--vcodec libx264`, `--container mp4`, `--no-audio`. Quality is not
-an option — see §5.1.
+Remaining encode options: `--vcodec libx264`, `--container mp4`. Quality is not an option —
+see §5.1 — and neither is audio: clips are **video only**, for a reason worth knowing.
+
+An AAC track makes the container declare a longer duration than the video it holds. AAC needs
+priming samples, so the audio outruns the video by ~40 ms — one frame — and an NLE reads the
+container, not the frame count. So every clip imported one frame long, and a speed round trip
+landed short. Neither `-shortest` nor trimming the audio fixes the mp4 header; only leaving
+audio out does. Measured: 48 frames of 24 fps video declared **2.041 s** with audio,
+**2.000 s** without.
+
+Extracting audio-track clips on their own still works via `--tracks audio`, which writes `.m4a`
+files where audio is the point.
 
 ### 5.1 Quality is fixed: crf 1, and it plays everywhere
 
@@ -357,7 +367,6 @@ Sequence markers land in `manifest.json` under `markers`, with name, comment, an
   --list-sequences       list sequences in the XML and exit
   --vcodec NAME          encoder (default libx264)
   --container EXT        output container (default mp4)
-  --no-audio             drop audio from outputs
   --speed {native,timeline}   how to treat speed-ramped clips (default native)
   --min-frames N         skip cuts shorter than N frames
   --ext LIST             only cut clips whose source file has one of these extensions,
