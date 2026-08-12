@@ -1,57 +1,59 @@
-# xmlcut — downloads
+# xmlcut
 
-Built downloads for **xmlcut**, a command-line tool and local GUI that extracts every cut of
-an Adobe Premiere Pro timeline as an individual video file, straight from the timeline's
-Final Cut Pro 7 XML export. Each clip comes with a manifest row describing exactly where it
-came from, which makes the output usable as a labelled dataset.
+Cut every clip of a Premiere Pro timeline into its own video file — from inside Premiere, or from
+an XML export. Built for assembling training datasets: every clip comes with a row saying exactly
+where it came from.
 
-Source lives elsewhere. This repository holds the zips, plus the files an installed copy
-downloads when it updates itself (in `app/`).
+## Install
 
-## Download
+Paste this into Terminal:
 
-Grab the newest zip from **[Releases](../../releases/latest)**.
+```bash
+curl -fsSL https://raw.githubusercontent.com/mill2nn/xmlcut-releases/main/install.sh | bash
+```
 
-You only need to do that once. xmlcut updates itself after that: when a new version is
-published, the page shows a bar at the top with an **Update** button. One click and you are
-current — no new zip, no re-download. The version you were on is kept in a `.backup` folder
-beside the tool, and if anything fails mid-update nothing on disk is changed at all.
+That downloads xmlcut to `~/Desktop/xmlcut` and installs the Premiere panel. Then:
 
-## What you need
+1. **`brew install ffmpeg`** — once, if you don't already have it. (No Homebrew? [brew.sh](https://brew.sh))
+2. **Quit Premiere completely** (⌘Q) and reopen it.
+3. **Window → Extensions → xmlcut**
 
-- **macOS** with the built-in `python3` (3.8 or newer). No Python packages at all — the tool
-  imports nothing outside the standard library.
-- **ffmpeg**, once:
+Open the sequence you want, press **Read timeline**, pick a folder, **Export**.
 
-  ```bash
-  brew install ffmpeg
-  ```
+Prefer not to pipe a script into bash? Download it, read it, then run it:
 
-  Without Homebrew, see [brew.sh](https://brew.sh) first.
+```bash
+curl -fsSLO https://raw.githubusercontent.com/mill2nn/xmlcut-releases/main/install.sh
+less install.sh          # it's short, and it uses no sudo
+bash install.sh
+```
 
-## Running it
+Or take [the zip from the latest release](../../releases/latest) and follow `START HERE.txt`.
 
-Unzip anywhere, then double-click **Open xmlcut GUI.command**. macOS blocks anything
-downloaded from the internet on first launch — right-click the file → **Open** → **Open**.
-Once only.
+## You only install once
 
-Your browser opens. Drag the XML Premiere exported onto the page, pick the sequence, choose
-an output folder, then **Scan timeline** and **Cut clips**. Leave the Terminal window open
-while you work; it is the local server. Nothing is installed, and nothing leaves your machine
-apart from the update check, which reads one small file from GitHub.
+After that the panel shows an **Update** button whenever a new version is published, and it
+refreshes the tool, the browser GUI and the panel together.
 
-`README.md` inside the zip has the full detail, including what every manifest column means.
+## What it needs
 
-## What it is careful about
+- macOS
+- `ffmpeg` and `ffprobe` on your PATH
+- Python 3.8+ — already on macOS
+- Premiere Pro 2020 or newer, for the panel
 
-- **Frame exact.** Cuts are re-encoded rather than stream-copied, because a stream copy can
-  only start on a keyframe and overran measured cut lengths by 22–147%, leaving clips carrying
-  part of the following shot.
-- **Lossless.** x264 crf 0, verified bit-for-bit identical to the decoded source. The source's
-  pixel format is preserved, so a 10-bit 4:2:2 master is not quietly flattened.
-- **Honest about timing.** The source range is read from Premiere's own tick values, which stay
-  correct through speed ramps where frame arithmetic drifts by over a second. Reversed clips,
-  nested sequences, stills and speed ramps are each handled and labelled.
-- **It refuses to guess.** Premiere exports every sequence in a project into one XML, so if
-  there is more than one, the tool stops and asks which — silently cutting the wrong timeline
-  is the worst failure mode for a dataset.
+No Python packages. Nothing to keep up to date but xmlcut itself.
+
+## What you get
+
+```
+01_(05.71-07.71)_CAM_A.mp4     index · the range inside that source file · source name
+clips.csv                      file, clip name, timeline in/out, speed, length, frames
+manifest.csv / .json           the same plus 40 more columns per cut
+```
+
+Clips are H.264 High / 4:2:0 / video-only, so they play everywhere and never claim a length they
+don't have. Speed ramps, reversed clips and nested sequences are all handled; stills, After Effects
+comps and offline media are reported rather than silently skipped.
+
+Full documentation is in `README.md` inside the install.
