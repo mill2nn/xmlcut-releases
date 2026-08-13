@@ -29,8 +29,10 @@ python3 --version            # 3.8 or newer, already on macOS
 there is no virtualenv, no pip, and nothing to keep up to date.
 
 To hand xmlcut to someone else, double-click **Make Shareable Zip.command**. It writes
-`~/Desktop/xmlcut-v<version>.zip` with just the four files a user needs plus a START HERE
-note, and deliberately leaves out the working notes and the real cut list.
+`~/Desktop/xmlcut-v<version>.zip` holding the tool, the browser GUI, the Premiere panel and
+the diagnostics — the same set the update channel ships, read from one list in the source so
+the two cannot disagree — plus a START HERE note. It deliberately leaves out the working
+notes and the real cut list.
 
 ## 2. Export the XML from Premiere
 
@@ -83,9 +85,16 @@ How it behaves, because an updater you can't trust is worse than none:
 - **Nothing on disk is touched until every file has downloaded and been checked.** Python
   files must compile, and the new `xmlcut.py` must report the version `latest.json` promised.
   A failure at any point leaves you exactly where you were.
-- **The version you were on is kept** in `.backup/`, so you can put it back by hand.
+- **The version you were on is kept** in `.backup/`, so you can put it back by hand. A
+  failure part-way through puts the old files back *and* removes any file the update had
+  just created, so a rolled-back update leaves nothing behind.
 - **A source checkout refuses to self-update** — if there's a `.git` beside `xmlcut.py` it
-  tells you to `git pull` instead, rather than overwriting work in progress.
+  tells you to `git pull` instead, rather than overwriting work in progress. This applies to
+  the folder copy. The panel's bundled copy has no `.git` beside it and does update itself;
+  it never touches your folder (see §10.2).
+- **A check that failed says so.** "Could not reach the release channel" and "you are on the
+  newest release" are different messages, because they are different facts — the panel used
+  to report the first as the second to anyone without a network.
 - Restart the tool afterwards; a running Python process keeps the old code in memory.
 
 ⚠️ Worth being explicit: anyone who can push to the releases repo can run code on every
@@ -501,9 +510,20 @@ The repository still keeps exactly one `xmlcut.py` — the copy is made when you
 on every update, so the two can't drift.
 
 **It updates itself.** Install once; after that the panel shows an **Update** button whenever a
-new version is published, and pressing it refreshes `xmlcut.py`, the browser GUI *and* the panel
-files, then copies the panel back into Premiere's extensions folder. Quit Premiere (⌘Q) and
-reopen to load it. Nobody re-downloads a zip.
+new version is published, and pressing it refreshes the engine, the panel files and the
+diagnostics, then copies the panel back into Premiere's extensions folder. Quit Premiere (⌘Q)
+and reopen to load it. Nobody re-downloads a zip.
+
+What it updates is the copy **inside the extension folder** — the one the panel runs — and
+nothing else. It used to fetch the browser GUI, its launcher and the README in there too,
+which built a second installation nothing launches, and it never touched the folder you
+downloaded. So your own folder stays at whatever version you downloaded; if you also use the
+browser GUI, update that separately with `python3 xmlcut.py --update`, or re-run the panel
+installer from a fresh copy.
+
+Re-running the installer is safe in either direction: it **will not put an older engine back**
+over one the panel has updated itself to. That used to be a silent downgrade, and re-running
+the installer is exactly what you do when a panel is misbehaving.
 
 
 No XML export, no sequence picker. `panel/` reads the sequence you have open and cuts it.

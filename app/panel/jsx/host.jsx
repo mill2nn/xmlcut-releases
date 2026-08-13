@@ -309,7 +309,10 @@ function safeName(s) {
         ch = s.charAt(i);
         c = s.charCodeAt(i);
         if (c < 32) continue;                       // control characters
-        else if (ch === "/" || ch === ":") out += "-";
+        // "\" joins "/" and ":" here. It is legal in a macOS name but it is an escape
+        // character everywhere this path is subsequently quoted, and it turned a folder
+        // called "Cut\Final" into a write to a path that did not exist.
+        else if (ch === "/" || ch === ":" || ch === "\\") out += "-";
         else out += ch;
     }
     // A trailing dot or space makes a folder that some tools cannot address.

@@ -1,6 +1,6 @@
 {
-  "version": "3.8",
-  "notes": "A manual check-for-updates button, and the header version \u2014 v3.8",
+  "version": "3.9",
+  "notes": "Self-update fixes, Export can no longer run mid-read, and offline no longer reports 'up to date'.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
@@ -14,6 +14,9 @@
     "panel/jsx/host.jsx",
     "panel/.debug",
     "panel/Install xmlcut reader (Mac).command",
-    "panel/Uninstall xmlcut reader (Mac).command"
+    "panel/Uninstall xmlcut reader (Mac).command",
+    "tools/compare_panel.py",
+    "tools/source_check.py",
+    "tools/speed_check.py"
   ]
 }

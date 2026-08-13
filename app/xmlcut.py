@@ -39,7 +39,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "3.8"
+VERSION = "3.9"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -142,16 +142,49 @@ UPDATE_FILES = [
     "panel/.debug",
     "panel/Install xmlcut reader (Mac).command",
     "panel/Uninstall xmlcut reader (Mac).command",
+    # The diagnostics ship too. They were not in this list, so the shareable zip had no
+    # tools/ at all — which meant the installer's `if [ -d "../tools" ]` never fired and
+    # a teammate could never run compare_panel.py, while the panel's Advanced pane still
+    # carried a command for it. They are a few KB; shipping them is cheaper than
+    # explaining that they only work on one machine.
+    "tools/compare_panel.py",
+    "tools/source_check.py",
+    "tools/speed_check.py",
 ]
 
 # Where the panel has to end up for Premiere to see it.
 PANEL_ID = "com.bom.xmlcutreader"
 PANEL_PARTS = ["CSXS", "client", "jsx", ".debug"]
 
+# A released file may begin with a dot only if it is one of these. Nothing else has a
+# reason to, and `.zshrc` used to pass safe_rel() — harmless, since everything is written
+# under the install directory, but there is no case for allowing it.
+DOT_OK = {".debug"}
+
+# No released file is anywhere near this big. Without a cap, a wrong URL or a hostile
+# repo hands urlopen an arbitrarily large body straight into memory.
+MAX_UPDATE_BYTES = 8 * 1024 * 1024
+
 
 def cep_extensions_dir() -> Path:
     return (Path.home() / "Library" / "Application Support" / "Adobe" / "CEP"
             / "extensions")
+
+
+def is_bundled_install(here: Optional[Path] = None) -> bool:
+    """True when the running xmlcut.py is the copy inside Premiere's extension folder.
+
+    The panel ALWAYS runs that copy, which makes install_dir() the extension's lib/ —
+    not the folder the user downloaded. Until this was accounted for, pressing Update in
+    the panel wrote xmlcut_gui.py, README.md, a launcher and a whole second panel/ tree
+    into Adobe's extensions directory, and left the user's own folder on the old version:
+    two installations, one of them invisible.
+    """
+    here = here or install_dir()
+    try:
+        return cep_extensions_dir().resolve() in here.resolve().parents
+    except Exception:
+        return False
 
 
 def safe_rel(name: str) -> Optional[str]:
@@ -173,9 +206,9 @@ def safe_rel(name: str) -> Optional[str]:
     for i, p in enumerate(parts):
         if p == ".." or not re.fullmatch(r"[A-Za-z0-9 ._()+-]+", p):
             return None
-        # A leading dot is allowed only on the final component (`.debug`), never as a
-        # directory — nothing should be writing into a dot-directory.
-        if p.startswith(".") and i != len(parts) - 1:
+        # A leading dot is allowed only on the final component AND only for a name we
+        # actually ship. Never as a directory — nothing should write into a dot-directory.
+        if p.startswith(".") and (i != len(parts) - 1 or p not in DOT_OK):
             return None
     return "/".join(parts)
 
@@ -208,16 +241,30 @@ def reinstall_panel(here: Path, progress=None) -> tuple[bool, str]:
         # keeps exactly one xmlcut.py and the two can never drift.
         lib = dest / "lib"
         lib.mkdir(parents=True, exist_ok=True)
-        (lib / "xmlcut.py").write_bytes((here / "xmlcut.py").read_bytes())
-        if progress:
-            progress("panel: lib/xmlcut.py")
+
+        # `here` and `lib` are the SAME DIRECTORY when the caller is the bundled copy —
+        # which is every update the panel performs, since install_dir() is then the
+        # extension's own lib/. Copying a directory onto itself is not a no-op here: the
+        # tools branch did `rmtree(tdst)` and then globbed `tsrc`, so every panel update
+        # deleted the bundled diagnostics and left an empty lib/tools. Measured, three
+        # files to none. Compare resolved paths and skip rather than copy.
+        def same(a: Path, b: Path) -> bool:
+            try:
+                return a.resolve() == b.resolve()
+            except Exception:
+                return False
+
+        if not same(here / "xmlcut.py", lib / "xmlcut.py"):
+            (lib / "xmlcut.py").write_bytes((here / "xmlcut.py").read_bytes())
+            if progress:
+                progress("panel: lib/xmlcut.py")
         # The diagnostics come too, as lib/tools/. They do
         # sys.path.insert(parent.parent), which from lib/tools/ resolves to lib/ — where
         # xmlcut.py now is — so they run from inside the panel unchanged. Without them
         # the compare command the panel prints points at a folder that does not exist.
         tsrc = here / "tools"
-        if tsrc.is_dir():
-            tdst = lib / "tools"
+        tdst = lib / "tools"
+        if tsrc.is_dir() and not same(tsrc, tdst):
             shutil.rmtree(tdst, ignore_errors=True)
             tdst.mkdir(parents=True, exist_ok=True)
             for t in sorted(tsrc.glob("*.py")):
@@ -278,7 +325,13 @@ def _fetch(rel: str) -> bytes:
         })
         try:
             with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as r:
-                return r.read()
+                # One byte past the cap, so an oversized body is detected rather than
+                # silently truncated into a file that would then fail to parse.
+                data = r.read(MAX_UPDATE_BYTES + 1)
+            if len(data) > MAX_UPDATE_BYTES:
+                raise RuntimeError(
+                    f"{rel} is larger than {MAX_UPDATE_BYTES // (1024 * 1024)} MB")
+            return data
         except Exception as e:      # noqa: BLE001 - any failure just tries the fallback
             last = e
     raise RuntimeError(f"could not read {rel}: {last}")
@@ -292,15 +345,48 @@ def install_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def check_update() -> Optional[dict]:
-    """latest.json if it names a newer version, else None. Never raises."""
+def fetch_latest() -> "tuple[Optional[dict], Optional[str]]":
+    """(latest.json, None) or (None, why it could not be read). Never raises.
+
+    Two outcomes that must NOT be conflated: "nothing newer is published" and "the
+    release channel could not be reached". check_update() returned None for both, so with
+    the network down `--check-update-json` printed exactly what being current prints —
+    measured, byte for byte — and the panel told the user "up to date, nothing newer
+    published", which it had no basis for saying.
+
+    Also the only place that checks latest.json is a JSON *object*. It wasn't, and a
+    `latest.json` holding an array raised AttributeError straight out of the CLI.
+    """
     try:
-        info = json.loads(_fetch("latest.json").decode("utf-8"))
-    except Exception:
+        raw = _fetch("latest.json")
+    except Exception as e:
+        return None, f"could not reach the release channel ({e})"
+    try:
+        info = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        return None, f"latest.json is not readable JSON ({e})"
+    if not isinstance(info, dict):
+        return None, "latest.json is not a JSON object"
+    return info, None
+
+
+def newer_than_running(info: Optional[dict]) -> Optional[dict]:
+    """`info` if it names a version above this one, else None."""
+    if not info:
         return None
     if version_key(info.get("version", "0")) > version_key(VERSION):
         return info
     return None
+
+
+def check_update() -> Optional[dict]:
+    """latest.json if it names a newer version, else None. Never raises.
+
+    Kept for callers that only care whether there is something to install. Anything that
+    reports to a human should use fetch_latest() so a failed check can be said out loud.
+    """
+    info, _err = fetch_latest()
+    return newer_than_running(info)
 
 
 def apply_update(info: dict, progress=None) -> tuple[bool, str]:
@@ -327,13 +413,27 @@ def apply_update(info: dict, progress=None) -> tuple[bool, str]:
 
     # latest.json lists plain filenames; the remote copy of each lives under UPDATE_DIR
     # and lands back beside xmlcut.py under its own name.
+    #
+    # When the running copy is the one bundled inside the panel, "beside xmlcut.py" is
+    # Adobe's extensions folder — so only the files the panel actually runs are fetched.
+    # Everything else (the browser GUI, its launcher, the README) belongs beside a user's
+    # own copy, and writing it in here built a second installation nothing launches.
+    bundled = is_bundled_install(here)
+    wanted = info.get("files") or UPDATE_FILES
+    if bundled:
+        wanted = [f for f in wanted
+                  if str(f) == "xmlcut.py"
+                  or str(f).startswith("panel/") or str(f).startswith("tools/")]
+        say("Updating the copy inside the Premiere panel")
     files = []
-    for f in (info.get("files") or UPDATE_FILES):
+    for f in wanted:
         rel = safe_rel(str(f))
         if rel is None:
             return False, (f"latest.json names a file this updater will not write "
                            f"({f!r}) — nothing was changed")
         files.append(rel)
+    if not files:
+        return False, "latest.json listed nothing this copy can update — nothing was changed"
     got: dict[str, bytes] = {}
     for n, rel in enumerate(files, start=1):
         say(f"Downloading {rel} ({n}/{len(files)})")
@@ -363,6 +463,10 @@ def apply_update(info: dict, progress=None) -> tuple[bool, str]:
     say("Backing up the current version")
     backup = here / ".backup"
     saved: list[str] = []
+    # Files this update CREATES rather than replaces. A rollback restored the ones that
+    # existed and left every new one in place — on a first update from a copy that predates
+    # the panel, that is the whole panel/ tree surviving a failed install.
+    fresh: list[str] = []
     try:
         shutil.rmtree(backup, ignore_errors=True)
         for rel in files:
@@ -372,6 +476,8 @@ def apply_update(info: dict, progress=None) -> tuple[bool, str]:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(src.read_bytes())
                 saved.append(rel)
+            else:
+                fresh.append(rel)
     except Exception as e:
         return False, f"couldn't back up the current version ({e}) — nothing was changed"
 
@@ -389,6 +495,11 @@ def apply_update(info: dict, progress=None) -> tuple[bool, str]:
                 (here / rel).write_bytes((backup / rel).read_bytes())
             except Exception:
                 pass
+        for rel in fresh:                # and leave nothing behind that wasn't there
+            try:
+                (here / rel).unlink()
+            except Exception:
+                pass
         return False, f"update failed ({e}) — rolled back, still on {VERSION}"
 
     # The panel lives in Adobe's extensions folder, not here, so refreshing the files
@@ -399,6 +510,11 @@ def apply_update(info: dict, progress=None) -> tuple[bool, str]:
         ok, msg = reinstall_panel(here, progress)
         tail = ("\n" + ("Premiere panel: " + msg if ok
                         else "the tool updated, but the panel did not: " + msg))
+        # For a bundled install, here/panel was only ever a staging area — the copy
+        # Premiere loads now sits in the extension root. Leaving it behind meant a second
+        # panel/ tree accumulating inside Adobe's folder on every update.
+        if ok and bundled:
+            shutil.rmtree(here / "panel", ignore_errors=True)
 
     return True, (f"updated {VERSION} → {info['version']}. The previous version is in "
                   f".backup if you need it. Quit and reopen to run the new code." + tail)
@@ -2119,9 +2235,16 @@ def interactive_setup(args) -> None:
 
 def cli_update() -> int:
     print(f"xmlcut {VERSION} — checking for an update ...")
-    info = check_update()
+    latest, err = fetch_latest()
+    if err:
+        # Said plainly rather than folded into "you are on the newest release". A failed
+        # check is not good news and should not read like it.
+        print(f"  Could not check: {err}")
+        print(f"  Still on {VERSION}. Nothing was changed.")
+        return 1
+    info = newer_than_running(latest)
     if info is None:
-        print("  You are on the newest release (or the check could not reach GitHub).")
+        print(f"  You are on the newest release ({VERSION}).")
         return 0
     print(f"\n  {info['version']} is available.")
     if info.get("notes"):
@@ -2200,24 +2323,35 @@ def main():
         return cli_update()
 
     if args.check_update_json:
-        info = check_update()
+        latest, err = fetch_latest()
         print(json.dumps({
             "current": VERSION,
-            "update": info,
+            "update": newer_than_running(latest),
+            # `checked` is the field a front end must look at first. Without it, no
+            # network and up-to-date were the same reply, and the panel said "nothing
+            # newer published" to someone who had not reached GitHub at all.
+            "checked": err is None,
+            "error": err,
             "panel_dir": str(cep_extensions_dir() / PANEL_ID),
+            "bundled": is_bundled_install(),
             "source_checkout": (install_dir() / ".git").exists(),
         }))
         return
 
     if args.self_update_json:
-        info = check_update()
+        latest, err = fetch_latest()
+        if err:
+            print(json.dumps({"ok": False, "current": VERSION, "checked": False,
+                              "message": err}))
+            return
+        info = newer_than_running(latest)
         if not info:
-            print(json.dumps({"ok": False, "current": VERSION,
+            print(json.dumps({"ok": False, "current": VERSION, "checked": True,
                               "message": f"already on {VERSION}; nothing newer published"}))
             return
         steps: list[str] = []
         ok, msg = apply_update(info, progress=steps.append)
-        print(json.dumps({"ok": ok, "current": VERSION,
+        print(json.dumps({"ok": ok, "current": VERSION, "checked": True,
                           "version": info.get("version"),
                           "message": msg, "steps": steps}))
         return
@@ -2441,4 +2575,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # sys.exit(main()), not a bare main(): cli_update() returns 1 when the check failed and
+    # that was being thrown away, so `--update` reported success to a caller no matter what
+    # happened. None exits 0, which is every other path.
+    sys.exit(main())

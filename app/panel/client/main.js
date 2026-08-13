@@ -48,6 +48,8 @@
         report: [],      // rows built from the manifest after a run
         merge: [],       // the '++' lines xmlcut printed about the merge
         busy: false,
+        readTimer: null,     // watchdog on the two ExtendScript calls
+        manifestBefore: 0,   // manifest mtime before an export, so a cancel reports nothing
         resume: false,
         typesReset: "",
         hostHome: "",
@@ -63,6 +65,57 @@
     var READ_STEPS = ["Reading the sequence from Premiere",
                       "Asking Premiere to export the XML",
                       "Reading the cut list"];
+
+    /* A read is two ExtendScript calls, and neither can be cancelled. If the host never
+     * answers — Premiere busy in a modal, a project closing mid-read — every control was
+     * left disabled on "Reading…" with no way back but closing the panel. Generous,
+     * because a very long timeline legitimately takes a while, and recoverable: a late
+     * answer is still taken (see resumeRead). */
+    var READ_TIMEOUT = 180000;
+
+    function readTimer(on) {
+        if (state.readTimer) {
+            clearTimeout(state.readTimer);
+            state.readTimer = null;
+        }
+        if (!on) return;
+        state.readTimer = setTimeout(function () {
+            state.readTimer = null;
+            if (!state.busy) return;
+            setBusy(false);
+            readStage(-1);
+            fail("Premiere has not answered in " + Math.round(READ_TIMEOUT / 1000)
+                 + " seconds. If the read is still running it will finish on its own and "
+                 + "carry on from there. Otherwise switch to Premiere, check a sequence "
+                 + "is open and nothing is waiting on a dialog, then read again.");
+        }, READ_TIMEOUT);
+    }
+
+    /* Called first in every host callback. Returns false only if the panel has moved on
+     * to a different read; a reply that merely arrived after the watchdog gave up is
+     * good news and is picked back up. */
+    function resumeRead() {
+        readTimer(false);
+        if (!state.busy) {
+            clearError();
+            setBusy(true, "Reading…");
+        }
+        return true;
+    }
+
+    /* A string literal for ExtendScript.
+     *
+     * Backslash FIRST, and it is not decorative: escaping only the quotes meant a project
+     * folder called `Cut\Final` — legal on macOS — sent `\F` into the literal, which
+     * ExtendScript evaluates to `F`. The host then wrote the XML to a path that does not
+     * exist and the export failed with nothing useful to say. */
+    function jsStr(s) {
+        return '"' + String(s === null || s === undefined ? "" : s)
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, '\\"')
+            .replace(/\r/g, "\\r")
+            .replace(/\n/g, "\\n") + '"';
+    }
 
     function readStage(n, extra) {
         if (n < 0) {
@@ -187,11 +240,6 @@
 
     /* ------------------------------------------------------------ helpers */
 
-    function esc(s) {
-        return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
-                        .replace(/>/g, "&gt;");
-    }
-
     function show(node_, on) { node_.hidden = !on; }
 
     function log(line) {
@@ -210,6 +258,22 @@
 
     function exists(p) {
         try { return !!p && fs.existsSync(p); } catch (e) { return false; }
+    }
+
+    /* Where the panel's own working files go: the scan's manifest and the selection file.
+     *
+     * They used to be written beside the project, inside the xmlcut/<sequence>/ folder —
+     * which is often on the team's shared drive, and which pruneOldReads() cannot clean
+     * because it only ever considers Files matching a timestamp pattern. A directory
+     * called `scan` therefore lived there forever, holding the media paths of the whole
+     * timeline. These are regenerated on every read; temp is where they belong. */
+    function workDir() {
+        var base = "";
+        try { base = node.require("os").tmpdir(); } catch (e) {}
+        if (!base) return path.dirname(state.dump);
+        var d = path.join(base, "xmlcut-panel");
+        try { fs.mkdirSync(d, { recursive: true }); } catch (e) {}
+        return exists(d) ? d : path.dirname(state.dump);
     }
 
     /* Keep the tail of a path, which is the part that identifies it. The panel can be
@@ -362,8 +426,24 @@
         return "python3";
     }
 
+    /* The running version, read straight off the engine file.
+     *
+     * The header span was only ever filled in by a successful update check, so on a first
+     * launch with no network — or before the engine had been located — the panel never
+     * said what it was. No subprocess and no network: VERSION is a literal near the top of
+     * xmlcut.py. */
+    function readVersion() {
+        if (!state.script) return;
+        try {
+            var head = String(fs.readFileSync(state.script, "utf8")).substring(0, 4000);
+            var m = head.match(/VERSION\s*=\s*"([^"]+)"/);
+            if (m) el.ver.textContent = "v" + m[1];
+        } catch (e) {}
+    }
+
     function setScript(p) {
         state.script = p || "";
+        readVersion();
         if (state.script) {
             var isBundled = (state.bundled && state.bundled === state.script);
             if (isBundled) {
@@ -415,15 +495,45 @@
 
     function readSequence() {
         clearError();
-        setBusy(true, "Reading…");
+        /* NOTHING from the previous read may survive into this one.
+         *
+         * This used to clear only the merge notes and the per-clip ticks, which left the
+         * last read's clip table on screen and — worse — state.dump still pointing at it.
+         * setBusy() does not disable Export, so reading a second sequence gave you the
+         * first sequence's table above a header that had already changed, with a live
+         * "Export 2 clips" button wired to the old dump. Step 1 is the long step on a real
+         * timeline (ExtendScript walks every clip), so that window is not brief, and a
+         * click in it wrote the wrong sequence's clips and then reported them as this
+         * read's. Tear the whole previous read down before starting. */
+        state.dump = null;
+        state.info = null;
+        state.xml = null;
+        state.clips = [];
+        state.report = [];
         state.merge = [];
         state.unpicked = {};
+        // state.types too, or selectedCount() falls back to summing the PREVIOUS read's
+        // type counts and the Export button keeps its old "Export 2 clips" label while a
+        // different sequence is being read.
+        state.types = {};
+        state.typesReset = "";
+        el.clipbody.innerHTML = "";
+        el.types.innerHTML = "";
+        el.listnote.textContent = "";
+        show(el.seqbox, false);
+        show(el.opts, false);
+        show(el.step3, false);
+        show(el.tablewrap, false);
+        show(el.mode, false);
         show(el.mergebox, false);
         show(el.report, false);
-        readStage(0);
         show(el.prog, false);
+        setBusy(true, "Reading…");
+        readStage(0);
+        readTimer(true);
 
         cs.evalScript("dumpActiveSequence()", function (raw) {
+            if (!resumeRead()) return;
             var r;
             try {
                 r = JSON.parse(raw);
@@ -475,15 +585,18 @@
         setMode("Exporting XML…");
         readStage(1);
         var dest = state.dump.replace(/\.json$/i, ".xml");
-        cs.evalScript('exportSequenceXML("' + dest.replace(/"/g, '\\"') + '")',
+        readTimer(true);
+        cs.evalScript("exportSequenceXML(" + jsStr(dest) + ")",
             function (raw) {
-                var r;
+                if (!resumeRead()) return;
+                // An unreadable reply means no XML — not the end of the read. This used to
+                // `return` here, which left the panel busy on step 2 with every control
+                // disabled and no error shown. The dump alone still cuts.
+                var r = { ok: false, error: "unreadable reply from Premiere" };
                 try {
                     r = JSON.parse(raw);
                 } catch (e) {
                     log("xml export: unreadable reply: " + raw);
-                    setMode(null);
-                    return;
                 }
                 for (var i = 0; i < (r.tried || []).length; i++) {
                     log("xml export · " + r.tried[i]);
@@ -559,11 +672,14 @@
             t.count++;
             state.total++;
         }
-        // The stable set, plus anything a previous project taught us he cares about.
+        // The stable set, and only that.
+        //
+        // Every remembered extension used to be listed too, which put chips on screen for
+        // types this panel can never produce: the scan runs --tracks video, so a .wav or a
+        // .mp3 can only ever appear at count 0 with nothing behind it, no matter how it is
+        // ticked. Remembering still works — ensure() reads the saved choice the moment a
+        // timeline actually contains that type — it just no longer advertises it.
         for (var a = 0; a < ALWAYS_TYPES.length; a++) ensure(ALWAYS_TYPES[a]);
-        for (var k in remembered) {
-            if (remembered.hasOwnProperty(k) && k !== "(none)") ensure(k);
-        }
 
         /* NEVER open in a state where nothing can be cut.
          *
@@ -743,6 +859,10 @@
     }
 
     function typeHint() {
+        // Nothing to advise while a read is in flight: the type list is empty by
+        // construction at that point, and "this timeline has no media that can be cut" is
+        // a conclusion about a timeline that has not been read yet.
+        if (state.busy) return "";
         if (state.typesReset) {
             return "Nothing was selected, so " + state.typesReset
                  + " — the types on this timeline — were switched back on.";
@@ -769,7 +889,10 @@
             el.typehint.className = "typehint" + (state.typesReset ? " fixed" : "");
             show(el.typehint, !!h);
         }
-        var ready = !!(state.dump && state.script && state.out && n > 0);
+        // `!state.busy` is load-bearing, not belt-and-braces: setBusy() disables Read and
+        // the pickers but never touched Export, so it stayed live through a read — and
+        // during a read state.dump still points at the PREVIOUS sequence.
+        var ready = !!(state.dump && state.script && state.out && n > 0) && !state.busy;
         el["export"].disabled = !ready;
         el["export"].textContent = n > 0
             ? ("Export " + n + " clip" + (n === 1 ? "" : "s"))
@@ -791,10 +914,13 @@
 
     function doExport() {
         clearError();
+        // Reset so the report shows THIS run's notes. The scan already ran the same merge,
+        // so keeping its lines would print every one of them twice.
+        state.merge = [];
         var args = argsFor(state.out, false);
         if (state.resume) args.push("--resume");
         // Only when something is actually unticked; otherwise the flag is noise.
-        var pickPath = writePickFile(path.dirname(state.dump));
+        var pickPath = writePickFile(workDir());
         if (pickPath) {
             args.push("--pick", pickPath);
             log("selection: " + pickedClips().length + " clip(s) via " + pickPath);
@@ -840,6 +966,14 @@
             var mm = line.match(/^\s*\+\+\s*(.+)$/);
             if (mm) {
                 state.merge.push(mm[1]);
+                return;
+            }
+            // '!!' lines are xmlcut's own warnings, and one of them matters a lot: when a
+            // selection matches no clip the run cuts fewer clips than were ticked. It was
+            // reaching the Advanced log only.
+            var mw = line.match(/^\s*!!\s*(.+)$/);
+            if (mw) {
+                state.merge.push("⚠ " + mw[1]);
                 return;
             }
             // xmlcut prints "  [7/18] OK  name.mp4" per clip.
@@ -888,6 +1022,7 @@
             var built = buildReport();
             if (built) {
                 renderReport();
+                renderMerge();          // this run's '++' and '!!' lines, above the rows
                 show(el.report, true);
             }
 
@@ -921,7 +1056,7 @@
         show(el.scanning, true);
         el.listnote.textContent = "";
 
-        var scanDir = path.join(path.dirname(state.dump), "scan");
+        var scanDir = path.join(workDir(), "scan");
         var args = argsFor(scanDir, /* allTypes */ true);
         args.push("--manifest-only");
         log("$ " + state.python + " " + args.join(" "));
@@ -1067,6 +1202,19 @@
         var lines = ["# written by the xmlcut panel — one clip per line",
                      "# TRACKTYPE TRACKINDEX TIMELINEIN"];
         for (var k = 0; k < chosen.length; k++) lines.push(clipKey(chosen[k]));
+        /* The clips that CANNOT be cut go in too, even though they produce no file.
+         *
+         * --pick filters the cut list before the manifest is written, so listing only the
+         * ticked ones deleted every offline clip and every AE comp from the manifest the
+         * report is built from. Measured on the fixture: unticking one clip took it from
+         * 19 rows with "missing source" and "AE comp" to 16 rows all reading "ready", and
+         * counts.missing_sources to 0. Unticking a clip is not a request to stop being
+         * told that media is broken. They arrive as warnings, exactly as they do in a run
+         * with no selection at all. */
+        for (var u = 0; u < state.clips.length; u++) {
+            var d = state.clips[u];
+            if (d.group !== 0 && typeOn(d)) lines.push(clipKey(d));
+        }
         var p = path.join(dir, "pick.txt");
         try {
             fs.writeFileSync(p, lines.join("\n") + "\n", "utf8");
@@ -1286,6 +1434,23 @@
                 return;
             }
             if (r.current) el.ver.textContent = "v" + r.current;
+            /* The check FAILED, which is not the same as being current.
+             *
+             * check_update() used to return None for both, so with no network the reply
+             * was byte-identical to being up to date and this panel said "nothing newer
+             * published" — a claim it had no basis for. xmlcut.py now reports `checked`,
+             * and it is the first thing to look at. */
+            if (r.checked === false) {
+                log("update check failed: " + (r.error || "no reason given"));
+                if (manual) {
+                    setUpd("bad", "Could not check for updates — "
+                           + (r.error || "no reason given")
+                           + ". You are still running " + r.current + ".", "");
+                } else {
+                    show(el.updbar, false);
+                }
+                return;
+            }
             log("update check: on " + r.current
                 + (r.update ? ", " + r.update.version + " available" : ", up to date"));
             if (!r.update) {
@@ -1367,8 +1532,11 @@
             var st = String(c.status || "");
             var kind = String(c.display_kind || "");
             var bad = (kind === "bad");
-            var warn = (kind === "warn" || c.speed_varies === true
-                        || st === "skipped_existing");
+            // `skipped_existing` is deliberately NOT a problem. With resume on, every clip
+            // that was already there counted as one, so ticking "only problems" after a
+            // resumed run listed the clips that were fine. The row still says
+            // "already existed, kept".
+            var warn = (kind === "warn" || c.speed_varies === true);
 
             var facts = [];
             var cut = Number(c.source_duration_seconds || 0);
@@ -1525,7 +1693,7 @@
     el.read.addEventListener("click", readSequence);
 
     el.pickout.addEventListener("click", function () {
-        cs.evalScript('pickFolder("' + (state.out || "").replace(/"/g, '\\"') + '")',
+        cs.evalScript("pickFolder(" + jsStr(state.out || "") + ")",
             function (p) {
                 if (p && p !== "null" && p !== "undefined") setOut(p);
             });
