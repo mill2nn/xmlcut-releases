@@ -39,7 +39,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "3.6"
+VERSION = "3.7"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -1856,6 +1856,41 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
 SECONDS_FIELDS = ("source_in_seconds", "source_duration_seconds", "duration_seconds")
 
 
+def pick_key(cut: Cut) -> tuple:
+    """What identifies a clip for --pick.
+
+    (track type, track index, timeline in-point in frames). Stable against filtering
+    and re-indexing, and unique — two clips cannot start on the same frame of the same
+    track. An index would not do: it shifts whenever anything else is filtered out.
+    """
+    return (cut.track_type, int(cut.track_index), int(cut.timeline_in_frames))
+
+
+def read_pick_file(path: Path) -> set:
+    """Selectors from a --pick file. Blank lines and # comments ignored."""
+    keys = set()
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as e:
+        raise SystemExit(f"error: could not read --pick file {path} ({e})")
+    for n, line in enumerate(text.splitlines(), start=1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) != 3:
+            raise SystemExit(f"error: {path}:{n}: expected "
+                             f"'TRACKTYPE TRACKINDEX TIMELINEIN', got {line!r}")
+        try:
+            keys.add((parts[0], int(parts[1]), int(parts[2])))
+        except ValueError:
+            raise SystemExit(f"error: {path}:{n}: track index and timeline in-point "
+                             f"must be whole numbers, got {line!r}")
+    if not keys:
+        raise SystemExit(f"error: {path} selected no clips — nothing would be cut")
+    return keys
+
+
 def describe(cut: Cut) -> dict:
     """How a cut should be presented: status wording, notes, and a severity class.
 
@@ -2008,6 +2043,11 @@ def write_manifest(tl: Timeline, outdir: Path, args) -> tuple[Path, Path, Path]:
                 # nothing else in here would say so.
                 "types_kept": getattr(args, "types_kept", None),
                 "types_excluded": getattr(args, "types_excluded", None),
+                # A partial run has to say so. Without this the manifest describes a
+                # complete cut of the timeline, and a dataset built from it silently
+                # omits whatever was unticked — with nothing recording that it happened.
+                "picked_from": (str(getattr(args, "pick", "") or "") or None),
+                "picked_count": getattr(args, "picked", None),
             },
             "warnings": tl.warnings,
             "counts": {
@@ -2105,6 +2145,11 @@ def main():
                     help="Final Cut Pro 7 XML exported from Premiere, or a .json "
                          "written by the xmlcut reader panel "
                          "(omit it to be walked through step by step)")
+    ap.add_argument("--pick", type=Path, metavar="FILE",
+                    help="cut only the clips listed in FILE, one per line as "
+                         "'TRACKTYPE TRACKINDEX TIMELINEIN' (e.g. 'video 1 0'). Written "
+                         "by the Premiere panel when individual clips are unticked; a "
+                         "long timeline is too many clips for the command line.")
     ap.add_argument("--panel", type=Path, metavar="DUMP.json",
                     help="overlay a panel dump on the XML: adds real speed-ramp "
                          "keyframes and repairs stale media paths, and cross-checks "
@@ -2251,6 +2296,27 @@ def main():
         tl.cuts = [c for c in tl.cuts
                    if Path(c.source_path).suffix.lower().lstrip(".") in want]
         print(f"  --ext {','.join(sorted(want))}: kept {len(tl.cuts)} of {before} cuts")
+    if args.pick:
+        # Also before indices are assigned, for the same reason --ext is: a run limited
+        # to a handful of clips should number them 01..N, not leave gaps.
+        #
+        # Selectors are read from a FILE rather than the command line because a long
+        # timeline is hundreds of clips and that is a lot of argv. One per line:
+        #
+        #     video 1 0          track type, track index, timeline in-point in frames
+        #
+        # Matching on (type, track, timeline-in) rather than an index, because an index
+        # depends on what else was filtered and would silently select the wrong clip.
+        want_keys = read_pick_file(args.pick)
+        before = len(tl.cuts)
+        tl.cuts = [c for c in tl.cuts if pick_key(c) in want_keys]
+        args.picked = len(tl.cuts)
+        print(f"  --pick: kept {len(tl.cuts)} of {before} cuts")
+        missing = len(want_keys) - len(tl.cuts)
+        if missing > 0:
+            print(f"  !! {missing} selection(s) in {Path(args.pick).name} matched no clip "
+                  f"— the timeline may have changed since it was written")
+
     for i, c in enumerate(tl.cuts, start=1):
         c.index = i
     # Named now, while the list is final — so --manifest-only and the sheet can show the

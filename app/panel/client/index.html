@@ -24,6 +24,11 @@
     <p id="readhint" class="hint">Open the sequence you want in Premiere, then click.
         Nothing in your project is changed.</p>
 
+    <section id="readprog" hidden>
+        <div class="bar"><div id="readfill" class="fill"></div></div>
+        <div id="readtext" class="progtext"></div>
+    </section>
+
     <div id="seqbox" class="card" hidden>
         <div class="seqname" id="seqname">—</div>
         <div class="seqmeta" id="seqmeta"></div>
@@ -66,13 +71,15 @@
     </label>
 
     <p class="lbl" id="listlbl">Clips
-        <span class="q" data-tip="Every cut this export will make, in timeline order. Numbers renumber as you switch file types off, so they match the filenames you'll get.">?</span>
+        <span class="q" data-tip="Every cut this export will make, in timeline order. Untick any single clip to leave it out. Numbers renumber to match the filenames you'll actually get.">?</span>
         <span id="listnote" class="listnote"></span>
     </p>
     <div id="scanning" class="hint" hidden>Reading the cut list…</div>
     <div class="tablewrap" id="tablewrap" hidden>
         <table id="cliptable">
             <thead><tr>
+                <th class="pick"><input type="checkbox" id="pickall" checked
+                    title="tick or untick every clip below"></th>
                 <th>#</th>
                 <th>Timeline in</th>
                 <th>Clip</th>
@@ -94,6 +101,7 @@
 </section>
 
 <section id="prog" hidden>
+    <div class="stephead">Exporting</div>
     <div class="bar"><div id="barfill" class="fill"></div></div>
     <div id="progtext" class="progtext">Starting…</div>
     <button id="cancel" class="mini wide">Cancel</button>

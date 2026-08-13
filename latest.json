@@ -1,6 +1,6 @@
 {
-  "version": "3.6",
-  "notes": "Advanced was still presenting a solved problem \u2014 v3.6",
+  "version": "3.7",
+  "notes": "Per-clip selection, and progress for both actions \u2014 v3.7",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

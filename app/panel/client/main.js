@@ -28,7 +28,8 @@
                "readhint", "scanning", "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
                "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn",
-               "typehint", "typeall", "scripthelp", "enginerow"];
+               "typehint", "typeall", "scripthelp", "enginerow",
+               "readprog", "readfill", "readtext", "pickall"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -52,8 +53,30 @@
         hostHome: "",
         bundled: "",
         searchTried: [],
+        unpicked: {},   // clip key -> true when individually unticked
         updateInfo: null
     };
+
+    /* Reading is three steps with no progress of their own — ExtendScript gives none, and
+     * the scan is a subprocess. So the bar is staged: it says which step is running and
+     * how many are left, which is honest and more use than a spinner. */
+    var READ_STEPS = ["Reading the sequence from Premiere",
+                      "Asking Premiere to export the XML",
+                      "Reading the cut list"];
+
+    function readStage(n, extra) {
+        if (n < 0) {
+            show(el.readprog, false);
+            return;
+        }
+        var pct = Math.round((n / READ_STEPS.length) * 100);
+        el.readfill.style.width = pct + "%";
+        el.readtext.textContent = (n >= READ_STEPS.length)
+            ? (extra || "Done")
+            : ("Step " + (n + 1) + " of " + READ_STEPS.length + " · "
+               + READ_STEPS[n] + (extra ? " — " + extra : "") + " …");
+        show(el.readprog, true);
+    }
 
     /* One flag for the whole read → export XML → scan sequence.
      *
@@ -394,8 +417,10 @@
         clearError();
         setBusy(true, "Reading…");
         state.merge = [];
+        state.unpicked = {};
         show(el.mergebox, false);
         show(el.report, false);
+        readStage(0);
         show(el.prog, false);
 
         cs.evalScript("dumpActiveSequence()", function (raw) {
@@ -404,11 +429,13 @@
                 r = JSON.parse(raw);
             } catch (e) {
                 setBusy(false);
+                readStage(-1);
                 fail("Premiere did not return a readable reply:\n" + raw);
                 return;
             }
             if (!r.ok) {
                 setBusy(false);
+                readStage(-1);
                 fail(r.error || "unknown error");
                 show(el.seqbox, false);
                 show(el.opts, false);
@@ -446,6 +473,7 @@
         state.xml = null;
         state.xmlMethod = "";
         setMode("Exporting XML…");
+        readStage(1);
         var dest = state.dump.replace(/\.json$/i, ".xml");
         cs.evalScript('exportSequenceXML("' + dest.replace(/"/g, '\\"') + '")',
             function (raw) {
@@ -471,8 +499,13 @@
                 refreshExportEnabled();
                 // The cut list can only be produced once we know whether there is an
                 // XML to base it on, so it waits for the export attempt to settle.
-                if (state.script) scanClips();
-                else log("skipping the cut list: xmlcut.py not located yet");
+                if (state.script) {
+                    readStage(2);
+                    scanClips();
+                } else {
+                    readStage(-1);
+                    log("skipping the cut list: xmlcut.py not located yet");
+                }
             });
     }
 
@@ -685,7 +718,11 @@
         return "rgba(" + r + "," + g + "," + b + ",0.18)";
     }
 
+    /* What the Export button will actually write: type on, cuttable, and ticked. Counted
+     * from the clip list rather than by summing type counts, which ignored both the
+     * uncuttable clips and the per-clip ticks. */
     function selectedCount() {
+        if (state.clips.length) return pickedClips().length;
         var n = 0;
         for (var k in state.types) {
             if (state.types.hasOwnProperty(k) && state.types[k].on) {
@@ -756,6 +793,12 @@
         clearError();
         var args = argsFor(state.out, false);
         if (state.resume) args.push("--resume");
+        // Only when something is actually unticked; otherwise the flag is noise.
+        var pickPath = writePickFile(path.dirname(state.dump));
+        if (pickPath) {
+            args.push("--pick", pickPath);
+            log("selection: " + pickedClips().length + " clip(s) via " + pickPath);
+        }
 
         // Remember the manifest's mtime BEFORE starting. Cancelling used to leave the
         // previous run's manifest in place, which then rendered as though it described
@@ -889,6 +932,7 @@
         } catch (e) {
             show(el.scanning, false);
             setBusy(false);
+            readStage(-1);
             fail("Could not read the cut list:\n" + e);
             return;
         }
@@ -916,6 +960,7 @@
             if (errbuf) log("stderr: " + errbuf);
             if (code !== 0) {
                 setBusy(false);
+                readStage(-1);
                 fail("Reading the cut list failed (exit " + code + ")."
                      + (errbuf ? "\n" + errbuf.split("\n").slice(-4).join("\n") : "")
                      + "\nYou can still export; the list just isn't shown.");
@@ -930,6 +975,9 @@
                 show(el.step3, true);
             }
             renderMerge();
+            readStage(READ_STEPS.length,
+                      state.clips.length + " clip(s) read · "
+                      + (state.xml ? "XML + Premiere" : "Premiere only"));
             setBusy(false);
         });
     }
@@ -959,6 +1007,12 @@
             var spd = Number(c.speed_percent || 100);
 
             state.clips.push({
+                // What --pick matches on: (track type, track index, timeline in-point in
+                // frames). Stable against filtering and re-indexing, and unique — two
+                // clips cannot start on the same frame of the same track.
+                trackType: String(c.track_type || "video"),
+                trackIndex: Number(c.track_index || 1),
+                timelineIn: Number(c.timeline_in_frames || 0),
                 ext: ext,
                 group: cuttable ? 0 : 1,
                 tc: String(c.timeline_in_tc || ""),
@@ -973,6 +1027,54 @@
             });
         }
         return true;
+    }
+
+    function clipKey(c) {
+        return c.trackType + " " + c.trackIndex + " " + c.timelineIn;
+    }
+
+    /* A clip is cut when its type is on, it can be cut at all, and it has not been
+     * individually unticked. Type filtering and per-clip ticking are separate on
+     * purpose: switching a type back on should not resurrect a clip you deliberately
+     * dropped. */
+    function typeOn(c) {
+        return state.types[c.ext] ? state.types[c.ext].on : true;
+    }
+
+    function isPicked(c) {
+        return !state.unpicked[clipKey(c)];
+    }
+
+    function pickedClips() {
+        var out = [];
+        for (var i = 0; i < state.clips.length; i++) {
+            var c = state.clips[i];
+            if (c.group === 0 && typeOn(c) && isPicked(c)) out.push(c);
+        }
+        return out;
+    }
+
+    /* Write the selection for --pick. A file rather than argv, because a long timeline is
+     * hundreds of clips. Returns the path, or "" when everything is selected and the flag
+     * is not needed. */
+    function writePickFile(dir) {
+        var all = [], chosen = pickedClips();
+        for (var i = 0; i < state.clips.length; i++) {
+            var c = state.clips[i];
+            if (c.group === 0 && typeOn(c)) all.push(c);
+        }
+        if (chosen.length === all.length) return "";
+        var lines = ["# written by the xmlcut panel — one clip per line",
+                     "# TRACKTYPE TRACKINDEX TIMELINEIN"];
+        for (var k = 0; k < chosen.length; k++) lines.push(clipKey(chosen[k]));
+        var p = path.join(dir, "pick.txt");
+        try {
+            fs.writeFileSync(p, lines.join("\n") + "\n", "utf8");
+        } catch (e) {
+            log("could not write the selection file: " + e);
+            return "";
+        }
+        return p;
     }
 
     /* Rows for switched-off types are hidden and the rest are renumbered in place.
@@ -990,11 +1092,18 @@
         }
 
         // Numbered in TIMELINE order — the order the manifest is already in — because
-        // that is the order xmlcut assigns 1..N in after its own type filtering. Only
-        // then are the uncuttable ones sorted to the bottom for display, carrying the
-        // number they were given. Numbering after that sort would put an offline clip
-        // at the end with a number it will never have.
-        for (var q = 0; q < visible.length; q++) visible[q].n = q + 1;
+        // that is the order xmlcut assigns 1..N in after its own filtering. Only then are
+        // the uncuttable ones sorted to the bottom for display, carrying the number they
+        // were given. Numbering after that sort would put an offline clip at the end with
+        // a number it will never have.
+        //
+        // Unticked clips take no number at all: they will not be in the run, so giving
+        // them one would misdescribe every filename after them.
+        var n = 0;
+        for (var q = 0; q < visible.length; q++) {
+            var vv = visible[q];
+            vv.n = (vv.group === 0 && isPicked(vv)) ? (++n) : 0;
+        }
         visible = visible.slice().sort(function (a, b) { return a.group - b.group; });
 
         var dividerDone = false;
@@ -1005,15 +1114,39 @@
                 var dr = document.createElement("tr");
                 dr.className = "divider";
                 var dc = document.createElement("td");
-                dc.setAttribute("colspan", "8");
+                dc.setAttribute("colspan", "9");
                 dc.textContent = "cannot be cut — fix these or untick their type";
                 dr.appendChild(dc);
                 body.appendChild(dr);
             }
             var tr = document.createElement("tr");
-            tr.className = "k-" + v.kind;
+            var picked = isPicked(v);
+            tr.className = "k-" + v.kind + (picked ? "" : " unpicked");
+
+            // The tick lives in its own cell, built here rather than through the generic
+            // cell loop because it holds a control rather than text.
+            (function (clip, row) {
+                var td = document.createElement("td");
+                td.className = "pick";
+                var box = document.createElement("input");
+                box.type = "checkbox";
+                box.checked = picked;
+                box.disabled = (clip.group !== 0);   // nothing to include if it cannot cut
+                box.title = clip.clip;
+                box.addEventListener("change", function () {
+                    if (box.checked) delete state.unpicked[clipKey(clip)];
+                    else state.unpicked[clipKey(clip)] = true;
+                    row.className = "k-" + clip.kind + (box.checked ? "" : " unpicked");
+                    syncPickAll();
+                    renderClips();          // renumber, since the run changed
+                    refreshExportEnabled();
+                });
+                td.appendChild(box);
+                row.appendChild(td);
+            })(v, tr);
+
             var cells = [
-                [pad2(v.n), ""], [v.tc, ""], [v.clip, "clipname"], [v.speed, ""],
+                [v.n ? pad2(v.n) : "—", ""], [v.tc, ""], [v.clip, "clipname"], [v.speed, ""],
                 [v.timing, ""], [String(v.frames), "num"], [v.status, ""], [v.notes, ""]
             ];
             for (var k = 0; k < cells.length; k++) {
@@ -1041,12 +1174,33 @@
             }
             body.appendChild(tr);
         }
-        var cut = 0;
-        for (var m = 0; m < visible.length; m++) if (visible[m].group === 0) cut++;
-        el.listnote.textContent = cut + " of " + visible.length + " cuttable";
+        var cuttable = 0, chosen = 0;
+        for (var m = 0; m < visible.length; m++) {
+            if (visible[m].group !== 0) continue;
+            cuttable++;
+            if (isPicked(visible[m])) chosen++;
+        }
+        el.listnote.textContent = (chosen === cuttable)
+            ? (cuttable + " of " + visible.length + " cuttable")
+            : (chosen + " of " + cuttable + " ticked");
+        syncPickAll();
     }
 
     function pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+    /* The header tick reflects the rows: on when all are on, off when none are, and
+     * indeterminate in between — so it never claims a state the table contradicts. */
+    function syncPickAll() {
+        var total = 0, on = 0;
+        for (var i = 0; i < state.clips.length; i++) {
+            var c = state.clips[i];
+            if (c.group !== 0 || !typeOn(c)) continue;
+            total++;
+            if (isPicked(c)) on++;
+        }
+        el.pickall.checked = (total > 0 && on === total);
+        el.pickall.indeterminate = (on > 0 && on < total);
+    }
 
     /* The merge's own explanations, promoted out of the Advanced log. These say why a
      * clip kept the XML's values, and which media paths were repaired. */
@@ -1376,6 +1530,18 @@
         show(el.opts, true);
         show(el.step3, true);
         clearError();
+    });
+
+    el.pickall.addEventListener("change", function () {
+        var on = el.pickall.checked;
+        for (var i = 0; i < state.clips.length; i++) {
+            var c = state.clips[i];
+            if (c.group !== 0 || !typeOn(c)) continue;
+            if (on) delete state.unpicked[clipKey(c)];
+            else state.unpicked[clipKey(c)] = true;
+        }
+        renderClips();
+        refreshExportEnabled();
     });
 
     el.typeall.addEventListener("click", function () {

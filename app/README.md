@@ -565,6 +565,24 @@ the cutting — not a second guess at it. Clips that can't be cut sort to the bo
 divider but keep their true number. Switch a file type off and the rest renumber to match the
 filenames you'll actually get.
 
+### Picking individual clips
+
+Every row in the clip list has a tick. Untick one and it leaves the run: the numbering closes up so
+the remaining clips are still `01..N`, the count updates, and the row dims. The header tick selects or
+clears everything, and shows a mixed state when only some are on.
+
+That travels to the cutter as `--pick FILE`, one clip per line as `TRACKTYPE TRACKINDEX TIMELINEIN`:
+
+```
+video 1 0
+video 1 135
+```
+
+Matched on timeline position rather than an index, because an index shifts whenever anything else is
+filtered, and a file rather than command-line arguments because a long timeline is hundreds of clips.
+The manifest records `picked_from` and `picked_count`, so a partial run says it was one — a dataset
+built from a manifest that claimed to be complete would silently be missing whatever you unticked.
+
 ### The status report
 
 After the run you get a report built from the manifest — one row per clip, carrying the numbers
