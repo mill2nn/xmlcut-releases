@@ -28,7 +28,7 @@
                "readhint", "scanning", "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
                "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn",
-               "typehint", "typeall"];
+               "typehint", "typeall", "scripthelp"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -49,6 +49,8 @@
         busy: false,
         resume: false,
         typesReset: "",
+        hostHome: "",
+        searchTried: [],
         updateInfo: null
     };
 
@@ -99,7 +101,7 @@
             // filename to stdout without raising. Pin UTF-8.
             env: {
                 PATH: PATH,
-                HOME: node.process.env.HOME || "",
+                HOME: homeDir(),
                 LANG: "en_US.UTF-8",
                 PYTHONIOENCODING: "utf-8"
             }
@@ -213,20 +215,83 @@
 
     /* ------------------------------------------------- locating the tool */
 
+    /* Every way a CEP panel can learn where home is.
+     *
+     * `cep_node.process` is not guaranteed — the Node globals a panel gets vary with the
+     * CEP version — and a single failed lookup here silently turned every candidate path
+     * into "/Desktop/xmlcut/xmlcut.py", which of course does not exist. Ask everything
+     * available and keep whatever answers. */
+    function homeDirs() {
+        var out = [], seen = {};
+        function add(h) {
+            if (h && typeof h === "string" && h.charAt(0) === "/" && !seen[h]) {
+                seen[h] = 1;
+                out.push(h.replace(/\/+$/, ""));
+            }
+        }
+        try { if (node && node.process && node.process.env) add(node.process.env.HOME); } catch (e) {}
+        try { if (typeof process !== "undefined" && process.env) add(process.env.HOME); } catch (e) {}
+        try { add(node.require("os").homedir()); } catch (e) {}
+        try { add(node.process.env.USER ? "/Users/" + node.process.env.USER : ""); } catch (e) {}
+        add(state.hostHome);          // whatever ExtendScript said, once it has answered
+        return out;
+    }
+
+    function homeDir() {
+        var h = homeDirs();
+        return h.length ? h[0] : "";
+    }
+
     /* xmlcut.py is not inside the panel — the panel is installed into Adobe's
      * extensions folder, the tool lives wherever he keeps it. Guess the usual spots,
-     * remember what worked, and let him point at it when the guess is wrong. */
+     * remember what worked, and let him point at it when the guess is wrong.
+     *
+     * `state.searchTried` records every path examined, because a silent "not found" for
+     * a file that is plainly there is impossible to debug. On modern macOS ~/Desktop and
+     * ~/Documents are TCC-protected, so until Premiere has Files-and-Folders access a
+     * stat from in here says no for a file you can see in Finder. */
     function findScript() {
+        state.searchTried = [];
         var saved = null;
         try { saved = window.localStorage.getItem("xmlcut.script"); } catch (e) {}
-        var home = (node && node.process && node.process.env)
-            ? node.process.env.HOME : "";
-        var tries = [saved,
-                     home + "/Desktop/xmlcut/xmlcut.py",
-                     home + "/xmlcut/xmlcut.py",
-                     home + "/Documents/xmlcut/xmlcut.py"];
-        for (var i = 0; i < tries.length; i++) {
-            if (exists(tries[i])) return tries[i];
+
+        function tryPath(p) {
+            if (!p) return false;
+            state.searchTried.push(p);
+            return exists(p);
+        }
+
+        if (tryPath(saved)) return saved;
+
+        var homes = homeDirs();
+        var subs = ["/Desktop/xmlcut", "/xmlcut", "/Documents/xmlcut",
+                    "/Movies/xmlcut", "/Downloads/xmlcut",
+                    "/Desktop/xmlcut-main", "/Documents/xmlcut-main"];
+        var i, j;
+        for (i = 0; i < homes.length; i++) {
+            for (j = 0; j < subs.length; j++) {
+                var cand = homes[i] + subs[j] + "/xmlcut.py";
+                if (tryPath(cand)) return cand;
+            }
+        }
+
+        // One level down, so a folder called anything still turns up.
+        var scanRoots = [];
+        for (i = 0; i < homes.length; i++) {
+            scanRoots.push(homes[i] + "/Desktop", homes[i] + "/Documents", homes[i]);
+        }
+        for (i = 0; i < scanRoots.length; i++) {
+            var names;
+            try {
+                names = fs.readdirSync(scanRoots[i]);
+            } catch (e) {
+                continue;
+            }
+            for (j = 0; j < names.length && j < 80; j++) {
+                if (names[j].charAt(0) === ".") continue;
+                var p2 = scanRoots[i] + "/" + names[j] + "/xmlcut.py";
+                if (tryPath(p2)) return p2;
+            }
         }
         return "";
     }
@@ -242,8 +307,23 @@
 
     function setScript(p) {
         state.script = p || "";
-        if (state.script) setPathLabel(el.scriptpath, state.script, 40);
-        else el.scriptpath.textContent = "not found — click Find";
+        if (state.script) {
+            setPathLabel(el.scriptpath, state.script, 40);
+            show(el.scripthelp, false);
+        } else {
+            el.scriptpath.textContent = "not found — click Find";
+            // A silent failure for a file that is visibly there is the worst outcome, so
+            // name the likely cause and every path that was checked.
+            var tried = state.searchTried || [];
+            el.scripthelp.textContent =
+                "Looked in " + tried.length + " place(s) and found no xmlcut.py. If it IS "
+                + "on your Desktop, macOS is probably blocking Premiere from reading that "
+                + "folder — System Settings > Privacy & Security > Files and Folders > "
+                + "Adobe Premiere Pro, switch on Desktop Folder, then restart Premiere. "
+                + "Or just press Find and point at it.";
+            show(el.scripthelp, true);
+            for (var t = 0; t < tried.length; t++) log("looked for xmlcut.py: " + tried[t]);
+        }
         if (state.script) {
             try { window.localStorage.setItem("xmlcut.script", state.script); } catch (e) {}
             var dir = path.dirname(state.script);
@@ -1301,6 +1381,32 @@
     } else {
         state.python = findPython();
         setScript(findScript());
+        if (!state.script) {
+            // Second opinion from inside Premiere: it resolves "~" reliably and may see
+            // folders the panel's own stat cannot.
+            cs.evalScript("findXmlcut()", function (raw) {
+                var r = null;
+                try { r = JSON.parse(raw); } catch (e) {}
+                if (!r) { log("host search returned nothing readable"); return; }
+                if (r.home) {
+                    state.hostHome = r.home;
+                    log("host home: " + r.home);
+                }
+                for (var t = 0; t < (r.tried || []).length; t++) {
+                    log("host looked: " + r.tried[t]);
+                }
+                if (r.found) {
+                    log("host found xmlcut.py: " + r.found);
+                    setScript(r.found);
+                    if (state.dump && !state.busy) { setBusy(true, "Reading…"); scanClips(); }
+                    checkUpdate();
+                } else {
+                    // Re-run the panel-side search now that home is known for certain.
+                    var again = findScript();
+                    if (again) setScript(again);
+                }
+            });
+        }
         var savedOut = null;
         try { savedOut = window.localStorage.getItem("xmlcut.out"); } catch (e) {}
         if (savedOut) {

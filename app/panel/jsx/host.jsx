@@ -474,6 +474,75 @@ function exportSequenceXML(destPath) {
     return ser(result);
 }
 
+/* ---------------------------------------------------- locating xmlcut.py */
+
+/* Search for xmlcut.py from inside Premiere.
+ *
+ * The panel's own Node-side search can come back empty for a file that plainly
+ * exists: ~/Desktop and ~/Documents are TCC-protected on modern macOS, and until
+ * Premiere is granted Files-and-Folders access, a stat from the panel simply says no.
+ * This is a second opinion through Adobe's own File/Folder API, and — more useful than
+ * either result — it reports every path it looked at so the failure is diagnosable
+ * instead of a shrug.
+ *
+ * Returns {home, found, tried[]}. */
+function findXmlcut() {
+    var result = { home: "", found: "", tried: [] };
+    try {
+        try {
+            result.home = new Folder("~").fsName;
+        } catch (eh) {
+            result.home = "";
+        }
+
+        var roots = [];
+        function addRoot(p) {
+            try {
+                var f = new Folder(p);
+                if (f.exists) roots.push(f);
+            } catch (e) {}
+        }
+        addRoot("~/Desktop");
+        addRoot("~");
+        addRoot("~/Documents");
+        addRoot("~/Movies");
+        addRoot("~/Downloads");
+
+        function check(path) {
+            result.tried.push(path);
+            try {
+                var f = new File(path);
+                if (f.exists) {
+                    result.found = f.fsName;
+                    return true;
+                }
+            } catch (e) {}
+            return false;
+        }
+
+        // The conventional spot under each root first.
+        for (var i = 0; i < roots.length; i++) {
+            if (check(roots[i].fsName + "/xmlcut/xmlcut.py")) return ser(result);
+        }
+        // Then one level down, so a folder called anything still turns up.
+        for (var r = 0; r < roots.length; r++) {
+            var subs;
+            try {
+                subs = roots[r].getFiles(function (f) { return f instanceof Folder; });
+            } catch (eg) {
+                continue;
+            }
+            if (!subs) continue;
+            for (var k = 0; k < subs.length && k < 60; k++) {
+                if (check(subs[k].fsName + "/xmlcut.py")) return ser(result);
+            }
+        }
+    } catch (e) {
+        result.error = String(e);
+    }
+    return ser(result);
+}
+
 /* --------------------------------------------------------------- pickers */
 
 /* Native folder chooser. Returns "" when cancelled — the panel treats that as

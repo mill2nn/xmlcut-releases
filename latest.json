@@ -1,6 +1,6 @@
 {
-  "version": "3.3",
-  "notes": "The panel must never open unable to cut anything \u2014 v3.3",
+  "version": "3.4",
+  "notes": "Revert the one-command installer \u2014 he prefers the zip",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
