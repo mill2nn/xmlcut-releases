@@ -491,6 +491,15 @@ Output is always `.mp4`. On the CLI, `--container` takes anything ffmpeg can mux
 at 24 fps), and an NLE reads the container's duration, not the frame count. That is the same defect
 that got audio removed in 2.6.
 
+**`xmlcut.py` travels inside the panel.** It's copied to `lib/xmlcut.py` in the extension folder at
+install time, so the panel never has to go looking for it. That matters: `~/Desktop` and
+`~/Documents` are TCC-protected on modern macOS, and until Premiere is granted Files-and-Folders
+access a file sitting there in plain sight is invisible to the panel. The extension folder is one
+Premiere already reads to load the panel at all.
+
+The repository still keeps exactly one `xmlcut.py` — the copy is made when you install, and refreshed
+on every update, so the two can't drift.
+
 **It updates itself.** Install once; after that the panel shows an **Update** button whenever a
 new version is published, and pressing it refreshes `xmlcut.py`, the browser GUI *and* the panel
 files, then copies the panel back into Premiere's extensions folder. Quit Premiere (⌘Q) and

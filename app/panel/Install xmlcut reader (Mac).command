@@ -24,6 +24,19 @@ mkdir -p "$DEST"
 for item in CSXS client jsx .debug; do
     [ -e "$item" ] && cp -R "$item" "$DEST/"
 done
+
+# xmlcut.py travels INSIDE the panel, as lib/xmlcut.py. The panel used to search
+# ~/Desktop for it, which fails when macOS has not granted Premiere access to that
+# folder — the file is there and every check says no. The extension directory is one
+# Premiere already reads, so a copy here is always reachable. Copied at install time so
+# the repository keeps only one xmlcut.py.
+if [ -f "../xmlcut.py" ]; then
+    mkdir -p "$DEST/lib"
+    cp "../xmlcut.py" "$DEST/lib/xmlcut.py"
+    echo "  bundled: lib/xmlcut.py"
+else
+    echo "  !! ../xmlcut.py not found — the panel will have to be pointed at it by hand"
+fi
 echo "  copied to: $DEST"
 
 echo

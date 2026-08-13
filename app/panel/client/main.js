@@ -50,6 +50,7 @@
         resume: false,
         typesReset: "",
         hostHome: "",
+        bundled: "",
         searchTried: [],
         updateInfo: null
     };
@@ -242,9 +243,31 @@
         return h.length ? h[0] : "";
     }
 
-    /* xmlcut.py is not inside the panel — the panel is installed into Adobe's
-     * extensions folder, the tool lives wherever he keeps it. Guess the usual spots,
-     * remember what worked, and let him point at it when the guess is wrong.
+    /* Where this panel is installed, from the page's own URL.
+     *
+     * client/index.html is loaded as a file:// URL from inside the extension folder, so
+     * the extension root is two levels up. Derived from window.location rather than a
+     * CEP API call because it cannot be unavailable or version-dependent. */
+    function extensionDir() {
+        try {
+            var href = decodeURI(String(window.location.href));
+            var i = href.indexOf("/client/");
+            if (i < 0) return "";
+            var base = href.substring(0, i);
+            return base.replace(/^file:\/\//, "");
+        } catch (e) {
+            return "";
+        }
+    }
+
+    /* xmlcut.py now ships INSIDE the panel, at lib/xmlcut.py, copied there at install
+     * time. That is the whole answer in the normal case: the extension folder is one
+     * Premiere already reads to load this panel, so it is always reachable — unlike
+     * ~/Desktop, which macOS blocks until Premiere is granted Files-and-Folders access,
+     * and which made a file sitting in plain sight impossible to find.
+     *
+     * Everything below the bundled copy is a fallback for an install that predates the
+     * bundling, or a source checkout being driven by hand.
      *
      * `state.searchTried` records every path examined, because a silent "not found" for
      * a file that is plainly there is impossible to debug. On modern macOS ~/Desktop and
@@ -259,6 +282,17 @@
             if (!p) return false;
             state.searchTried.push(p);
             return exists(p);
+        }
+
+        // Bundled copy first, and normally last.
+        var ext = extensionDir();
+        state.bundled = "";
+        if (ext) {
+            var lib = ext + "/lib/xmlcut.py";
+            if (tryPath(lib)) {
+                state.bundled = lib;
+                return lib;
+            }
         }
 
         if (tryPath(saved)) return saved;
@@ -309,6 +343,8 @@
         state.script = p || "";
         if (state.script) {
             setPathLabel(el.scriptpath, state.script, 40);
+            el.scriptpath.title = state.script
+                + (state.bundled === state.script ? "  (bundled with this panel)" : "");
             show(el.scripthelp, false);
         } else {
             el.scriptpath.textContent = "not found — click Find";
@@ -316,11 +352,11 @@
             // name the likely cause and every path that was checked.
             var tried = state.searchTried || [];
             el.scripthelp.textContent =
-                "Looked in " + tried.length + " place(s) and found no xmlcut.py. If it IS "
-                + "on your Desktop, macOS is probably blocking Premiere from reading that "
-                + "folder — System Settings > Privacy & Security > Files and Folders > "
-                + "Adobe Premiere Pro, switch on Desktop Folder, then restart Premiere. "
-                + "Or just press Find and point at it.";
+                "xmlcut.py should be bundled inside this panel, at lib/xmlcut.py, and it "
+                + "is not — so this panel was installed by an older installer. Re-run "
+                + "panel/Install xmlcut reader (Mac).command from your xmlcut folder, or "
+                + "press Find and point at xmlcut.py. (" + tried.length
+                + " place(s) checked; the log lists them.)";
             show(el.scripthelp, true);
             for (var t = 0; t < tried.length; t++) log("looked for xmlcut.py: " + tried[t]);
         }

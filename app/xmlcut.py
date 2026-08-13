@@ -39,7 +39,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "3.4"
+VERSION = "3.5"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -197,6 +197,20 @@ def reinstall_panel(here: Path, progress=None) -> tuple[bool, str]:
     dest = cep_extensions_dir() / PANEL_ID
     try:
         dest.mkdir(parents=True, exist_ok=True)
+        # xmlcut.py goes INSIDE the installed panel, as lib/xmlcut.py.
+        #
+        # The panel used to hunt for it in ~/Desktop and friends, which fails outright
+        # when macOS has not granted Premiere access to those folders — the file is
+        # there and every stat says no. The extension directory is one Premiere already
+        # reads to load the panel at all, so a copy in here is always reachable.
+        #
+        # Copied at install time rather than committed under panel/, so the repository
+        # keeps exactly one xmlcut.py and the two can never drift.
+        lib = dest / "lib"
+        lib.mkdir(parents=True, exist_ok=True)
+        (lib / "xmlcut.py").write_bytes((here / "xmlcut.py").read_bytes())
+        if progress:
+            progress("panel: lib/xmlcut.py")
         for part in PANEL_PARTS:
             s = src / part
             if not s.exists():
