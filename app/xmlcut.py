@@ -39,7 +39,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "3.10"
+VERSION = "3.11"
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -1635,7 +1635,7 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
             buckets.setdefault(t, []).append(c)
 
     slack = PPRO_TICKS_PER_SECOND / max(tl.sequence_fps, 1)   # one frame
-    repaired = ramps = rate_flags = range_flags = matched = ambiguous = 0
+    repaired = ramps = rate_flags = range_flags = matched = ambiguous = tc_bases = 0
 
     for cut in tl.cuts:
         if cut.track_type != "video":
@@ -1716,12 +1716,19 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
             # those clips are not reported as disagreeing.
             if not cut.edge_in_transition and (abs(d_in) > 0.004 or abs(d_dur) > 0.004):
                 range_flags += 1
-                notes.append(
-                    f"{cut.clip_name}: Premiere and the XML disagree on the source "
-                    f"range (in {d_in:+.4f}s, length {d_dur:+.4f}s"
-                    + (f", after removing a {int(tc_base / 3600)}h timecode base"
-                       if tc_base else "")
-                    + f"). The XML's value was used — it is the verified path.")
+                if tc_base:
+                    tc_bases += 1
+                # ONE short line per clip. This used to repeat the whole explanation —
+                # "Premiere and the XML disagree on the source range (…). The XML's value
+                # was used — it is the verified path." — for every clip. On a real run of
+                # three, that was 544 characters of which 465 were the same sentence three
+                # times, carrying 79 characters of actual information. The explanation is
+                # said once, in the lead note below.
+                # The leading "· " marks this as a DETAIL of the lead note above rather than
+                # a note in its own right. The panel indents these into a table under their
+                # heading; on the command line it reads as the bullet it is.
+                notes.append(f"· {cut.clip_name}: in {d_in:+.3f}s, "
+                             f"length {d_dur:+.3f}s")
 
         p_speed = pc.get("speed")
         if isinstance(p_speed, (int, float)) and p_speed:
@@ -1754,7 +1761,12 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
         lead.append(f"read the real keyframes of {ramps} speed ramp(s) — "
                     f"in the manifest as ramp_keys")
     if range_flags:
-        lead.append(f"{range_flags} clip(s) disagree on the source range, listed below")
+        # The shared explanation, said ONCE. Everything after this in `notes` is one short
+        # line per clip.
+        lead.append(f"{range_flags} clip(s) disagree on the source range — the XML's value "
+                    f"was used, which is the verified path"
+                    + (f"; a whole-hour timecode base was removed from {tc_bases} of them"
+                       if tc_bases else ""))
     return lead + notes
 
 
@@ -2177,7 +2189,7 @@ def export_summary(tl: Timeline, args) -> dict:
     cut_state = ("cut list only — nothing encoded yet"
                  if all(c.status in ("pending", "dry_run") for c in tl.cuts)
                  else "cut")
-    return {
+    s = {
         "tool": f"{NAME} {VERSION}",
         "source_xml": str(tl.xml_path),
         "state": cut_state,
@@ -2223,6 +2235,11 @@ def export_summary(tl: Timeline, args) -> dict:
             "failed": sum(1 for c in tl.cuts if c.status == "failed"),
         },
     }
+    # Carried IN the summary so every front end reads the same sentence. The panel's report
+    # showed "25 of 27 matched" and "18 written" with nothing accounting for 25 → 18; this is
+    # the line that accounts for it, and it was being computed for clips.csv only.
+    s["completeness"] = completeness(s)
+    return s
 
 
 def completeness(s: dict) -> str:
@@ -2273,7 +2290,7 @@ def sheet_header_rows(tl: Timeline, args) -> list:
         # The one row that says whether this folder is the WHOLE timeline, and if not, what
         # took the rest away. Anyone reading the dataset later needs that before they need
         # anything else in here.
-        ["completeness", completeness(s)],
+        ["completeness", s["completeness"]],
         ["written", n["ok"]],
         ["failed", n["failed"]],
         ["missing source", n["missing_sources"]],

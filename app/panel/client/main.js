@@ -30,7 +30,9 @@
                "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn",
                "typehint", "typeall", "scripthelp",
                "readprog", "readfill", "readtext", "pickall", "checkupd", "outdest",
-               "gear", "gearmenu", "enginestat", "recheck"];
+               "gear", "gearmenu", "enginestat", "recheck",
+               "repcomplete", "repdestrow", "repdest", "mergedet", "mergesum",
+               "onlyproblab"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -634,17 +636,17 @@
     function setMode(busyText) {
         if (busyText) {
             el.mode.textContent = busyText;
-            el.mode.className = "mode busy";
+            el.mode.className = "note busy";
             show(el.mode, true);
             return;
         }
         if (state.xml) {
             el.mode.textContent = "XML + Premiere · nests resolved, ramp keyframes read";
-            el.mode.className = "mode good";
+            el.mode.className = "note good";
         } else {
             el.mode.textContent = "Premiere only · XML export unavailable, "
                 + "nested sequences will be skipped";
-            el.mode.className = "mode warnmode";
+            el.mode.className = "note warn";
         }
         show(el.mode, true);
     }
@@ -895,7 +897,8 @@
         if (el.typehint) {
             var h = typeHint();
             el.typehint.textContent = h;
-            el.typehint.className = "typehint" + (state.typesReset ? " fixed" : "");
+            // Neutral when the panel fixed it itself, amber when he has to act.
+            el.typehint.className = "note" + (state.typesReset ? "" : " warn");
             show(el.typehint, !!h);
         }
         // `!state.busy` is load-bearing, not belt-and-braces: setBusy() disables Read and
@@ -976,7 +979,7 @@
             return;
         }
         if (!state.info) {
-            el.outdest.className = "outdest";
+            el.outdest.className = "note";
             el.outdest.textContent = "A folder named after the sequence is created in "
                 + "here when you export.";
             el.outdest.title = "";
@@ -991,7 +994,7 @@
         // reproduces and leaves everything else, so a folder from a DIFFERENT version of
         // this timeline ends up holding a mix of both. Tick "skip clips already in that
         // folder" to add only what is missing, or empty it first.
-        el.outdest.className = "outdest" + (n > 0 ? " warnish" : "");
+        el.outdest.className = "note" + (n > 0 ? " warn" : "");
         el.outdest.title = d;
         show(el.outdest, true);
     }
@@ -1246,7 +1249,12 @@
                 group: cuttable ? 0 : 1,
                 tc: String(c.timeline_in_tc || ""),
                 clip: String(c.clip_name || ""),
-                speed: (Math.round(spd * 100) / 100) + "%" + (c.reversed ? " ⏪" : ""),
+                // Whole percent, and blank at native speed. 44px of column cannot hold
+                // "145.46%", and the exact figure is in clips.csv and the manifest — this
+                // column exists to say "this one is retimed", not to be arithmetic.
+                speedNum: spd,
+                speed: (Math.abs(spd - 100) > 0.01 || c.reversed)
+                    ? (Math.round(spd) + "%" + (c.reversed ? "⏪" : "")) : "",
                 timing: String(c.timing_source || ""),
                 frames: Number(c.source_consumed_frames || 0),
                 status: status,
@@ -1356,7 +1364,7 @@
                 var dr = document.createElement("tr");
                 dr.className = "divider";
                 var dc = document.createElement("td");
-                dc.setAttribute("colspan", "9");
+                dc.setAttribute("colspan", "6");
                 dc.textContent = "cannot be cut — fix these or untick their type";
                 dr.appendChild(dc);
                 body.appendChild(dr);
@@ -1387,28 +1395,32 @@
                 row.appendChild(td);
             })(v, tr);
 
+            /* SIX columns, sized to fit 320px. Timeline position, timing source and notes
+             * moved to the row's tooltip: nine columns meant the table scrolled sideways
+             * inside a page that scrolls down, and two axes fighting in one region is most
+             * of why this panel felt disorderly. Nothing was dropped — the manifest and
+             * clips.csv carry all of it, and the tooltip has it per row. */
+            tr.title = [v.clip, "at " + v.tc,
+                        v.timing ? "timing from " + v.timing : "",
+                        v.notes, v.source].filter(function (s) { return !!s; }).join(" · ");
             var cells = [
-                [v.n ? pad2(v.n) : "—", ""], [v.tc, ""], [v.clip, "clipname"], [v.speed, ""],
-                [v.timing, ""], [String(v.frames), "num"], [v.status, ""], [v.notes, ""]
+                [v.n ? pad2(v.n) : "—", "idx num"], [v.clip, "clipname"],
+                [v.speed, "spd"], [String(v.frames), "frm num"], [v.status, "sts"]
             ];
             for (var k = 0; k < cells.length; k++) {
                 var td = document.createElement("td");
                 if (cells[k][1]) td.className = cells[k][1];
                 td.textContent = cells[k][0];
-                if (k === 2) {
-                    td.title = v.source || v.clip;
-                    // The REAL extension, shown because the Clip column is Premiere's
-                    // clip NAME, not the filename. A clip called "shot.mov" can easily
-                    // be backed by an .mp4 after a transcode or a relink, and then the
-                    // type chips look wrong when they are in fact right. Showing both
-                    // makes that visible instead of confusing.
-                    var tag = document.createElement("span");
-                    tag.className = "exttag";
-                    tag.textContent = v.ext;
-                    tag.style.color = colorFor(v.ext);
-                    td.insertBefore(tag, td.firstChild);
+                if (k === 1) {
+                    // A coloured dot for the SOURCE type, which matters because this column
+                    // is Premiere's clip NAME, not the filename: a clip called "shot.mov"
+                    // can be backed by an .mp4 after a transcode, and then the type chips
+                    // look wrong when they are right. The three-letter tag that used to sit
+                    // beside it is gone — this column is now ~100px and the dot says the
+                    // same thing in 7. The exact path is on the row's tooltip.
                     var d = document.createElement("span");
                     d.className = "dot";
+                    d.title = "." + v.ext;
                     d.style.background = colorFor(v.ext);
                     td.insertBefore(d, td.firstChild);
                 }
@@ -1446,19 +1458,34 @@
 
     /* The merge's own explanations, promoted out of the Advanced log. These say why a
      * clip kept the XML's values, and which media paths were repaired. */
+    /* Folded away, and BELOW the results.
+     *
+     * This box used to sit above the clip list and take 747 characters doing it — notes about
+     * clips that were fine, pushing the list of what was actually written off screen. It is
+     * now a <details> under the rows, with a summary that says how many notes there are so it
+     * can be ignored without being opened.
+     *
+     * Lines the engine prefixes with "· " are details of the note above them, and are shown
+     * indented and monospaced so they read as a table rather than as three paragraphs. */
     function renderMerge() {
         el.mergebox.innerHTML = "";
         if (!state.merge.length) {
-            show(el.mergebox, false);
+            show(el.mergedet, false);
             return;
         }
+        var heads = 0;
         for (var i = 0; i < state.merge.length; i++) {
+            var raw = String(state.merge[i]);
+            var item = raw.indexOf("· ") === 0;
+            if (!item) heads++;
             var d = document.createElement("div");
-            d.className = "mergeline";
-            d.textContent = state.merge[i];
+            d.className = "mergeline" + (item ? " item" : "");
+            d.textContent = item ? raw.substring(2) : raw;
             el.mergebox.appendChild(d);
         }
-        show(el.mergebox, true);
+        el.mergesum.textContent = heads === 1 ? "1 merge note"
+                                             : (heads + " merge notes");
+        show(el.mergedet, true);
     }
 
     /* ------------------------------------------- recovering the cut script */
@@ -1587,7 +1614,7 @@
     }
 
     function setEngineStat(cls, text) {
-        el.enginestat.className = "enginestat" + (cls ? " " + cls : "");
+        el.enginestat.className = "note" + (cls ? " " + cls : "");
         el.enginestat.textContent = text;
     }
 
@@ -1777,7 +1804,8 @@
     }
 
     function setUpd(cls, text, btn) {
-        el.updbar.className = "updbar" + (cls ? " " + cls : "");
+        // "done" was a distinct blue box; it is the same news as "good".
+        el.updbar.className = "note row " + (cls === "done" ? "good" : (cls || "good"));
         el.updtext.textContent = text;
         el.updbtn.hidden = !btn;
         if (btn) el.updbtn.textContent = btn;
@@ -1935,25 +1963,26 @@
             // "already existed, kept".
             var warn = (kind === "warn" || c.speed_varies === true);
 
+            /* Facts for ONE line, sharing it with the filename.
+             *
+             * Dropped: the source length in seconds, which the filename already spells out
+             * as its (in-out) range; and "on the timeline", which repeated on every retimed
+             * row — eleven times in one real run. What is left is the frame count (the
+             * number to check a clip against) and the speed. */
             var facts = [];
-            var cut = Number(c.source_duration_seconds || 0);
             var tl = Number(c.duration_seconds || 0);
             var spd = Number(c.speed_percent || 100);
             var frames = Number(c.source_consumed_frames || 0);
-            if (cut > 0) facts.push(cut.toFixed(3) + "s");
             if (frames > 0) facts.push(frames + "f");
             if (Math.abs(spd - 100) > 0.01) {
-                facts.push(spd.toFixed(2) + "%");
-                if (tl > 0) facts.push("→ " + tl.toFixed(3) + "s on the timeline");
+                facts.push(Math.round(spd) + "%");
+                if (tl > 0) facts.push("→ " + tl.toFixed(2) + "s");
             }
             if (c.reversed) facts.push("reversed");
-            if (c.speed_varies) {
-                facts.push("ramp " + (c.speed_span || "varies")
-                           + ", cut at one speed");
-            }
+            if (c.speed_varies) facts.push("ramp " + (c.speed_span || "varies"));
             if (bad) facts.push(String(c.error || st).substring(0, 120));
-            else if (st === "unsupported") facts.push("not decodable media");
-            else if (st === "skipped_existing") facts.push("already existed, kept");
+            else if (st === "unsupported") facts.push("not decodable");
+            else if (st === "skipped_existing") facts.push("kept");
 
             state.report.push({
                 name: String(c.output_file || c.clip_name || "?"),
@@ -2000,12 +2029,34 @@
             d.textContent = pills[p].t;
             el.tally.appendChild(d);
         }
+
+        /* Where 25-matched became 18-written.
+         *
+         * The report showed the merge's "25 of 27 video clips matched" and the tally's
+         * "18 written" with nothing whatsoever accounting for the gap — a reader could not
+         * tell whether seven clips had failed silently. xmlcut computes exactly this
+         * sentence and was only writing it to clips.csv. */
+        var comp = String(data.completeness || "");
+        el.repcomplete.textContent = comp;
+        show(el.repcomplete, !!comp);
+
+        // And WHERE it wrote, which the report never said despite having a Show button.
+        setPathLabel(el.repdest, outDir(), 46);
+        show(el.repdestrow, !!outDir());
         return true;
     }
 
     function renderReport() {
         var only = el.onlyprob.checked;
         var shown = 0;
+        // Offering "only problems" when there are none is a control that can only produce
+        // "No problems." Hidden instead.
+        var anyProblem = false;
+        for (var q = 0; q < state.report.length; q++) {
+            if (state.report[q].problem) anyProblem = true;
+        }
+        if (!anyProblem && el.onlyprob.checked) el.onlyprob.checked = only = false;
+        show(el.onlyproblab, anyProblem);
         el.rows.innerHTML = "";
         for (var i = 0; i < state.report.length; i++) {
             var r = state.report[i];
@@ -2025,7 +2076,10 @@
             }
             el.rows.appendChild(div);
         }
-        el.repcount.textContent = shown + " of " + state.report.length + " shown";
+        // "18 of 18 shown" restated the "18 written" pill directly above it. Only says
+        // anything when the filter is actually hiding something.
+        el.repcount.textContent = (shown === state.report.length)
+            ? "" : (shown + " of " + state.report.length + " shown");
         if (!shown) {
             var e2 = document.createElement("div");
             e2.className = "row2";
@@ -2044,9 +2098,13 @@
                                                              : "Premiere only"));
         }
         out.push(el.tally.textContent.replace(/\s+/g, "  "));
+        // The two lines added to the report on screen belong in the pasted copy too — they
+        // are the ones that make a partial run legible to whoever receives it.
+        if (el.repcomplete.textContent) out.push(el.repcomplete.textContent);
+        if (outDir()) out.push(outDir());
         if (state.merge.length) {
             out.push("");
-            for (var m = 0; m < state.merge.length; m++) out.push("- " + state.merge[m]);
+            for (var m = 0; m < state.merge.length; m++) out.push("  " + state.merge[m]);
         }
         out.push("");
         for (var i = 0; i < state.report.length; i++) {

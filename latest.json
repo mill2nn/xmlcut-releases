@@ -1,6 +1,6 @@
 {
-  "version": "3.10",
-  "notes": "Renamed to auto bits. Per-sequence output folders, export info at the top of clips.csv, a gear menu, and the panel repairs its own engine.",
+  "version": "3.11",
+  "notes": "Report rewritten: what was written comes first, merge notes fold away, and it now says how complete the run is and where the clips went. Cleaner panel throughout.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

@@ -1,16 +1,35 @@
-/* Premiere's panel chrome is dark and the panel can be resized very narrow, so
- * everything here is single-column and flows. No external fonts or images — a CEP
- * panel loads from disk with no network. */
+/* auto bits — panel stylesheet.
+ *
+ * Premiere's panel chrome is dark and the panel can be dragged very narrow, so everything
+ * here is single-column and flows. No external fonts or images — a CEP panel loads from disk
+ * with no network.
+ *
+ * THREE font sizes and ONE notice component, deliberately. The previous version had five
+ * sizes (9/10/11/12/13px), sixteen text treatments and four different boxes that all meant
+ * "notice"; nothing said which to use, so each new message invented another. 9px was being
+ * used for information that mattered.
+ *
+ *   --fs-head  13px   the panel title
+ *   --fs-base  11px   body text, controls, table cells
+ *   --fs-small 10px   secondary text: hints, notes, meta
+ */
 :root {
     --bg: #232323;
     --card: #1c1c1c;
     --fg: #d8d8d8;
     --dim: #8f8f8f;
+    /* Disabled/absent, kept separate from --dim. They used to share it, so "you cannot use
+     * this" and "this is merely quieter" looked identical. */
+    --off: #5a5a5a;
     --line: #3a3a3a;
     --accent: #4a90d9;
     --ok: #6fbf73;
     --warn: #d9a441;
     --bad: #e06c6c;
+
+    --fs-head: 13px;
+    --fs-base: 11px;
+    --fs-small: 10px;
 }
 
 * { box-sizing: border-box; }
@@ -20,10 +39,15 @@ body {
     padding: 12px;
     background: var(--bg);
     color: var(--fg);
-    font: 12px/1.5 -apple-system, "Segoe UI", sans-serif;
+    font: var(--fs-base)/1.5 -apple-system, "Segoe UI", sans-serif;
     -webkit-user-select: none;
     user-select: none;
 }
+
+/* An author `display` rule beats the browser's [hidden]{display:none}, so anything that sets
+ * display must restate the hidden case. This trap shipped a dead button once already, so it
+ * is covered by element as well as by class. */
+section[hidden], div[hidden], details[hidden], p[hidden], label[hidden] { display: none; }
 
 header {
     display: flex;
@@ -32,19 +56,18 @@ header {
     margin-bottom: 10px;
 }
 
-h1 { margin: 0; font-size: 13px; font-weight: 600; }
-header .linkbtn { margin-left: auto; }
-.ver { color: var(--dim); font-size: 10px; }
+h1 { margin: 0; font-size: var(--fs-head); font-weight: 600; }
+.ver { color: var(--dim); font-size: var(--fs-small); }
 
-/* Everything about the TOOL rather than about this timeline lives behind the gear:
- * the cut script and the update check. Both were competing with step 1 for attention. */
+/* ---------------------------------------------------------------- the gear */
+
 .gearbtn {
     margin-left: auto;
     padding: 2px 5px;
     border-color: transparent;
     background: none;
     color: var(--dim);
-    font-size: 13px;
+    font-size: var(--fs-head);
     line-height: 1;
 }
 
@@ -62,57 +85,42 @@ header .linkbtn { margin-left: auto; }
 .gearmenu[hidden] { display: none; }
 .gearmenu .lbl { margin-top: 0; }
 
-/* What state the engine is in, in words. "Present" is not the same as "runnable", and a
- * path on its own said neither. */
-.enginestat {
-    margin-bottom: 6px;
-    font-size: 10px;
+/* ------------------------------------------------------------ THE notice */
+
+/* One component, five states. Replaces .warn, .typehint, .mergebox, .updbar, .err, .mode,
+ * .enginestat and .outdest — eight elements that were each styled separately while saying the
+ * same kind of thing. A left rule carries the severity; the text colour follows it. */
+.note {
+    margin-top: 6px;
+    padding: 5px 8px;
+    border-left: 2px solid var(--line);
+    border-radius: 2px;
+    background: var(--card);
+    color: var(--dim);
+    font-size: var(--fs-small);
     line-height: 1.45;
-    color: var(--dim);
+    word-break: break-word;
 }
 
-.enginestat.good { color: var(--ok); }
-.enginestat.busy { color: var(--accent); }
-.enginestat.bad { color: var(--bad); }
-
-h2 {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    margin: 14px 0 6px;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--dim);
-    text-transform: uppercase;
-    letter-spacing: .04em;
+.note[hidden] { display: none; }
+.note.good { border-left-color: var(--ok); color: var(--ok); }
+.note.warn { border-left-color: var(--warn); color: var(--warn); }
+.note.bad { border-left-color: var(--bad); color: var(--bad); }
+.note.busy { border-left-color: var(--accent); color: var(--dim); }
+/* A notice with a control in it — the update bar. */
+.note.row { display: flex; align-items: center; gap: 8px; }
+.note.row[hidden] { display: none; }
+.note.row > :first-child { flex: 1 1 auto; min-width: 0; }
+/* Roomier, for a message you have to read rather than glance at. */
+.note.pad {
+    padding: 9px 10px;
+    font-size: var(--fs-base);
+    white-space: pre-wrap;
+    -webkit-user-select: text;
+    user-select: text;
 }
 
-/* ------------------------------------------------------------ update bar */
-
-.updbar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 12px;
-    padding: 7px 9px;
-    border: 1px solid var(--ok);
-    border-left: 3px solid var(--ok);
-    border-radius: 4px;
-    background: #1e2a1f;
-}
-
-/* An author `display` rule beats the browser's [hidden]{display:none}. This exact
- * omission shipped a permanently-visible bar with a dead button in the browser GUI, so
- * the hidden case is restated deliberately. */
-.updbar[hidden] { display: none; }
-
-.updtext { flex: 1 1 auto; min-width: 0; color: var(--ok); font-size: 10px; }
-.updbar.busy { border-color: var(--line); border-left-color: var(--accent); background: var(--card); }
-.updbar.busy .updtext { color: var(--dim); }
-.updbar.done { border-color: var(--accent); border-left-color: var(--accent); background: #1c2733; }
-.updbar.done .updtext { color: var(--fg); }
-.updbar.bad { border-color: var(--bad); border-left-color: var(--bad); background: #2a1c1c; }
-.updbar.bad .updtext { color: var(--bad); }
+.updtext { min-width: 0; }
 
 /* ---------------------------------------------------------------- buttons */
 
@@ -126,10 +134,15 @@ button {
 }
 
 button:hover:not(:disabled) { background: #383838; }
-button:disabled { opacity: .5; cursor: default; }
+/* Its own colour rather than opacity, so a disabled control reads as unavailable instead of
+ * merely faint. */
+button:disabled { color: var(--off); border-color: #2c2c2c; cursor: default; }
 
+/* ONE primary per screen. Everything else is a mini, and secondary actions share a row —
+ * six full-width stacked buttons made "Show in Finder" and "Back" look equally important. */
 button.primary {
     width: 100%;
+    margin-top: 10px;
     padding: 9px 12px;
     background: var(--accent);
     border-color: transparent;
@@ -138,10 +151,28 @@ button.primary {
 }
 
 button.primary:hover:not(:disabled) { filter: brightness(1.12); }
-button.go { margin-top: 14px; }
+button.primary:disabled { background: #2e2e2e; border-color: var(--line); }
 
-button.mini { padding: 4px 9px; font-size: 11px; white-space: nowrap; }
-button.mini.wide { width: 100%; margin-top: 6px; }
+button.mini { padding: 4px 9px; font-size: var(--fs-small); white-space: nowrap; }
+button.mini.wide { width: 100%; margin-top: 8px; }
+
+.btnrow { display: flex; gap: 6px; margin-top: 8px; }
+.btnrow .mini { flex: 1 1 0; }
+
+/* A text button that reads as a link, for a secondary action inside a label. */
+.linkbtn {
+    margin-left: auto;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    font-size: var(--fs-small);
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.linkbtn:hover { background: none; filter: brightness(1.2); }
 
 /* ------------------------------------------------------------------ cards */
 
@@ -153,116 +184,14 @@ button.mini.wide { width: 100%; margin-top: 6px; }
     background: var(--card);
 }
 
-/* An author `display` rule beats the browser's [hidden]{display:none}, so every
- * rule that sets display must restate the hidden case. This exact trap shipped a
- * dead button in the browser GUI once already. */
-.card[hidden], .types[hidden], .pathrow[hidden], header[hidden] { display: none; }
-section[hidden], div[hidden], details[hidden] { display: none; }
+.card[hidden] { display: none; }
+.seqname { font-weight: 600; word-break: break-word; }
+.seqmeta { color: var(--dim); font-size: var(--fs-small); }
 
-.seqname {
-    font-weight: 600;
-    word-break: break-word;
-}
+.saved { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+.saved[hidden] { display: none; }
 
-.seqmeta { color: var(--dim); font-size: 11px; }
-
-.warn {
-    margin-top: 6px;
-    padding-top: 6px;
-    border-top: 1px solid var(--line);
-    color: var(--warn);
-    font-size: 11px;
-}
-
-/* -------------------------------------------------------- clip table */
-
-/* The panel is much narrower than the browser GUI, so the table scrolls sideways
- * rather than squeezing eight columns into 320px. Dragging the panel wider reveals
- * more of it. The header tooltips are body-level bubbles positioned by JS precisely
- * because this wrapper would clip them — that is what hid them in the browser GUI. */
-.tablewrap {
-    max-height: 320px;
-    overflow: auto;
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    background: var(--card);
-}
-
-.tablewrap[hidden] { display: none; }
-
-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 10px;
-}
-
-thead th {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    padding: 5px 6px;
-    background: #262626;
-    border-bottom: 1px solid var(--line);
-    color: var(--dim);
-    font-weight: 600;
-    text-align: left;
-    white-space: nowrap;
-}
-
-thead th .q { margin-left: 3px; }
-
-tbody td {
-    padding: 4px 6px;
-    border-bottom: 1px solid #262626;
-    color: var(--fg);
-    vertical-align: top;
-    white-space: nowrap;
-}
-
-tbody tr:last-child td { border-bottom: 0; }
-
-td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-
-/* The per-clip tick column. Narrow and fixed, so the clip name keeps the slack. */
-th.pick, td.pick { width: 22px; padding-right: 0; text-align: center; }
-th.pick input, td.pick input { margin: 0; accent-color: var(--accent); }
-
-/* An unticked clip stays legible but visibly out of the run. */
-tbody tr.unpicked td { opacity: .4; }
-tbody tr.unpicked td.pick { opacity: 1; }
-th.num, td.num { min-width: 46px; }
-
-/* The clip name is the one column allowed to be long; everything else is short and
- * fixed, so give this the slack and let the wrapper scroll. */
-td.clipname {
-    max-width: 190px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    -webkit-user-select: text;
-    user-select: text;
-}
-
-tbody tr.k-ok td { color: var(--fg); }
-tbody tr.k-ramp td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
-tbody tr.k-warn td { color: var(--warn); }
-tbody tr.k-bad td { color: var(--bad); }
-tbody tr.hidden-row { display: none; }
-
-/* A divider row before the clips that cannot be cut at all, so they are visibly
- * separate from the ones that are merely unusual. */
-tbody tr.divider td {
-    padding: 5px 6px;
-    background: #2a2020;
-    color: var(--bad);
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: .04em;
-    white-space: normal;
-}
-
-.listnote { margin-left: 4px; color: var(--dim); font-weight: 400; }
-
-/* ------------------------------------------------------------- steps */
+/* ------------------------------------------------------------- the steps */
 
 .step { margin-bottom: 18px; }
 .step[hidden] { display: none; }
@@ -272,203 +201,137 @@ tbody tr.divider td {
     align-items: center;
     gap: 6px;
     margin: 0 0 8px;
-    font-size: 11px;
+    font-size: var(--fs-base);
     font-weight: 600;
     color: var(--fg);
     text-transform: uppercase;
     letter-spacing: .04em;
 }
 
-/* The step badge. Named `stepnum`, NOT `num`: the table's numeric cells use
- * `class="num"`, and this rule turned every frame count into a 15px blue circle
- * stacked on top of the column header. */
+/* The step badge. Named `stepnum`, NOT `num`: the table's numeric cells use `class="num"`,
+ * and that collision turned every frame count into a blue circle on the column header. */
 .stepnum {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex: 0 0 auto;
-    width: 15px;
-    height: 15px;
+    width: 16px;
+    height: 16px;
     border-radius: 50%;
     background: var(--accent);
     color: #fff;
-    font-size: 9px;
+    font-size: var(--fs-small);
 }
 
-.hint { margin: 6px 0 0; color: var(--dim); font-size: 10px; }
-
-/* --------------------------------------------------------- the report */
-
-.tally {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    margin-bottom: 8px;
-}
-
-.pill {
-    padding: 3px 8px;
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    background: var(--card);
-    font-size: 10px;
-}
-
-.pill.good { border-color: var(--ok); color: var(--ok); }
-.pill.bad { border-color: var(--bad); color: var(--bad); }
-.pill.warnp { border-color: var(--warn); color: var(--warn); }
-
-/* What the merge decided, promoted out of the Advanced log. */
-.mergebox {
-    margin-bottom: 8px;
-    padding: 7px 8px;
-    border: 1px solid var(--line);
-    border-left: 2px solid var(--accent);
-    border-radius: 3px;
-    background: var(--card);
-}
-
-.mergebox[hidden] { display: none; }
-
-.mergeline {
-    color: var(--dim);
-    font-size: 10px;
-    line-height: 1.45;
-}
-
-.mergeline + .mergeline { margin-top: 3px; }
-
-.tick.spaced { margin-top: 7px; }
-
-
-.savednote { margin-top: 4px; color: var(--dim); font-size: 9px; }
-
-/* The subfolder an export will create inside the chosen root. Sits directly under the
- * path row so the two read as one destination. */
-.outdest {
-    margin-top: 4px;
-    color: var(--dim);
-    font: 10px/1.4 ui-monospace, Menlo, monospace;
-    word-break: break-all;
-}
-
-.outdest[hidden] { display: none; }
-/* Amber only when that folder already holds files — a re-export overwrites the names it
- * reproduces and leaves the rest, so a folder from an older cut of the same timeline ends
- * up holding a mixture. */
-.outdest.warnish { color: var(--warn); }
-
-.repbar {
+.lbl {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    margin-bottom: 6px;
+    gap: 5px;
+    margin: 10px 0 4px;
+    color: var(--dim);
+    font-size: var(--fs-small);
 }
+
+.hint { margin: 6px 0 0; color: var(--dim); font-size: var(--fs-small); }
+.listnote { margin-left: 4px; color: var(--dim); font-weight: 400; }
 
 .tick {
     display: flex;
     align-items: center;
     gap: 5px;
+    margin-top: 8px;
     color: var(--dim);
-    font-size: 10px;
+    font-size: var(--fs-small);
     cursor: pointer;
 }
 
 .tick input { margin: 0; accent-color: var(--accent); }
-.repcount { color: var(--dim); font-size: 10px; }
 
-.rows {
-    max-height: 300px;
+/* -------------------------------------------------------- the clip table */
+
+/* The table owns the ONE nested scroll region in this panel, and only vertically. It used to
+ * scroll sideways as well, inside a page that scrolls down — three axes competing in one
+ * place, which is what made the panel feel disorderly. The columns now fit 320px; timeline
+ * position, timing source and notes are on each row's tooltip. */
+.tablewrap {
+    max-height: 320px;
     overflow-y: auto;
+    overflow-x: hidden;
     border: 1px solid var(--line);
     border-radius: 4px;
     background: var(--card);
 }
 
-.rows[hidden] { display: none; }
+.tablewrap[hidden] { display: none; }
 
-.row2 {
-    padding: 6px 8px;
-    border-bottom: 1px solid #2a2a2a;
-    font-size: 10px;
+table {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: collapse;
+    font-size: var(--fs-small);
 }
 
-.row2:last-child { border-bottom: 0; }
+thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 5px 4px;
+    background: #262626;
+    border-bottom: 1px solid var(--line);
+    color: var(--dim);
+    font-weight: 600;
+    text-align: left;
+    white-space: nowrap;
+}
 
-.row2 .nm {
-    display: block;
+thead th .q { margin-left: 2px; }
+
+tbody td {
+    padding: 4px;
+    border-bottom: 1px solid #262626;
     color: var(--fg);
-    font: 10px/1.35 ui-monospace, Menlo, monospace;
-    word-break: break-all;
-    -webkit-user-select: text;
-    user-select: text;
+    vertical-align: top;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
-.row2 .facts { color: var(--dim); }
-.row2.isbad { background: #2a1c1c; }
-.row2.isbad .nm { color: var(--bad); }
-.row2.iswarn .facts { color: var(--warn); }
+tbody tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
-.foot {
-    margin: 8px 0 4px;
-    color: var(--dim);
-    font-size: 10px;
-    line-height: 1.45;
-}
+/* Fixed widths so the clip name gets every remaining pixel, and nothing overflows. */
+th.pick, td.pick { width: 20px; padding-right: 0; text-align: center; }
+th.pick input, td.pick input { margin: 0; accent-color: var(--accent); }
+th.idx, td.idx { width: 22px; }
+th.spd, td.spd { width: 44px; }
+th.frm, td.frm { width: 40px; }
+th.sts, td.sts { width: 62px; }
 
-.foot b { color: var(--fg); font-weight: 600; }
+.clipname { -webkit-user-select: text; user-select: text; }
+.clipname .dot { margin-right: 4px; vertical-align: 1px; }
 
-/* Where the read landed. Shown rather than left to be hunted for. */
-.saved {
-    margin-top: 6px;
-    padding-top: 6px;
-    border-top: 1px solid var(--line);
-}
+tbody tr.unpicked td { color: var(--off); }
+tbody tr.unpicked td.pick { color: var(--fg); }
+tbody tr.k-ramp td.idx { box-shadow: inset 2px 0 0 var(--accent); }
+tbody tr.k-warn td { color: var(--warn); }
+tbody tr.k-bad td { color: var(--bad); }
 
-.saved[hidden] { display: none; }
-
-.lbl2 {
-    display: block;
-    margin-bottom: 4px;
-    color: var(--dim);
-    font-size: 10px;
-}
-
-/* Which sources the next export will use. Stated rather than left to be inferred. */
-.mode {
-    margin-top: 6px;
-    padding-top: 6px;
-    border-top: 1px solid var(--line);
-    font-size: 10px;
-}
-
-.mode[hidden] { display: none; }
-.mode.good { color: var(--ok); }
-.mode.warnmode { color: var(--warn); }
-.mode.busy { color: var(--dim); }
-
-.err {
-    margin-top: 10px;
-    padding: 9px 10px;
-    border: 1px solid var(--bad);
-    border-radius: 4px;
-    background: var(--card);
+/* A divider before the clips that cannot be cut at all, so they read as separate from the
+ * ones that are merely unusual. */
+tbody tr.divider td {
+    padding: 5px 4px;
+    background: #2a2020;
     color: var(--bad);
-    font-size: 11px;
-    white-space: pre-wrap;
-    word-break: break-word;
-    -webkit-user-select: text;
-    user-select: text;
+    font-size: var(--fs-small);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    white-space: normal;
 }
 
 /* ------------------------------------------------------------ type chips */
 
-.types {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
-}
+.types { display: flex; flex-wrap: wrap; gap: 5px; }
+.types[hidden] { display: none; }
 
 .chip {
     display: flex;
@@ -479,51 +342,22 @@ tbody tr.divider td {
     border-radius: 12px;
     background: var(--card);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--fs-base);
 }
 
-/* `on` and `off` only carry the un-typed fallback; the per-type colour is set inline
- * from TYPE_COLORS, because a class per extension would mean editing CSS for every new
- * format someone drops on a timeline. */
+/* `on` and `off` carry only the un-typed fallback; the per-type colour is set inline from
+ * TYPE_COLORS, because a class per extension would mean editing CSS for every new format. */
 .chip.on { border-color: var(--accent); background: #26384a; }
+.chip.off, .chip.off .n { color: var(--dim); }
 .chip.off .dot { opacity: .35; }
 
-/* A type this timeline does not use. Listed so the set stays the same between
- * projects — a chip that appears and disappears reads as something breaking — but
- * visibly not part of this run. */
-.chip.absent { opacity: .45; border-style: dashed; }
-
-/* Why the export cannot run, said in words. A disabled button with no reason is the
- * thing that made ".mp4 0 ticked, .mov unticked" look like a broken panel. */
-.typehint {
-    margin-top: 6px;
-    padding: 6px 8px;
-    border-left: 2px solid var(--warn);
-    border-radius: 2px;
-    background: var(--card);
-    color: var(--warn);
-    font-size: 10px;
-    line-height: 1.45;
-}
-
-.typehint[hidden] { display: none; }
-.typehint.fixed { border-left-color: var(--accent); color: var(--dim); }
-
-/* A text button that reads as a link, for a secondary action inside a label. */
-.linkbtn {
-    margin-left: auto;
-    padding: 0;
-    border: 0;
-    background: none;
-    color: var(--accent);
-    font: inherit;
-    font-size: 10px;
-    text-decoration: underline;
-    cursor: pointer;
-}
-
-.linkbtn:hover { background: none; filter: brightness(1.2); }
-.chip.absent .n { opacity: .8; }
+/* A type this timeline does not use. Listed so the set stays the same between projects — a
+ * chip that appears and disappears reads as something breaking — but visibly not in this run,
+ * and in the disabled colour rather than a dimmer version of the live one. */
+.chip.absent { border-style: dashed; color: var(--off); }
+.chip.absent .n { color: var(--off); }
+.chip input { margin: 0; accent-color: var(--accent); }
+.chip .n { color: var(--dim); }
 
 .dot {
     display: inline-block;
@@ -534,28 +368,10 @@ tbody tr.divider td {
     background: var(--dim);
 }
 
-td.clipname .dot { margin-right: 4px; vertical-align: 1px; }
-
-/* The source file's real extension, next to Premiere's clip name. */
-.exttag {
-    display: inline-block;
-    margin-right: 6px;
-    font: 9px/1 ui-monospace, Menlo, monospace;
-    text-transform: uppercase;
-    letter-spacing: .03em;
-    opacity: .85;
-}
-.chip input { margin: 0; accent-color: var(--accent); }
-.chip .n { color: var(--dim); }
-.chip.off .n, .chip.off { color: var(--dim); }
-
 /* --------------------------------------------------------------- paths */
 
-.pathrow {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
+.pathrow { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.pathrow[hidden] { display: none; }
 
 .path {
     flex: 1 1 auto;
@@ -565,12 +381,10 @@ td.clipname .dot { margin-right: 4px; vertical-align: 1px; }
     border-radius: 4px;
     background: var(--card);
     color: var(--dim);
-    font: 10px/1.4 ui-monospace, Menlo, monospace;
+    font: var(--fs-small)/1.4 ui-monospace, Menlo, monospace;
     /* Long paths must not push the button off the panel. The middle is dropped in JS
-     * (shortPath) rather than with `direction: rtl`, which does clip from the left but
-     * also drags a path's leading "/" to the wrong end — bidi reorders the neutral
-     * characters. Truncating the text itself is predictable; the full path is on the
-     * title attribute. */
+     * (shortPath) rather than with `direction: rtl`, which clips from the left but also drags
+     * a path's leading "/" to the wrong end — bidi reorders the neutral characters. */
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -580,7 +394,7 @@ td.clipname .dot { margin-right: 4px; vertical-align: 1px; }
 
 .bar {
     height: 6px;
-    margin: 12px 0 8px;
+    margin: 10px 0 6px;
     border-radius: 3px;
     background: #2e2e2e;
     overflow: hidden;
@@ -593,33 +407,98 @@ td.clipname .dot { margin-right: 4px; vertical-align: 1px; }
     transition: width .15s linear;
 }
 
-.progtext, .donetext {
-    font-size: 11px;
-    color: var(--dim);
-    word-break: break-word;
+/* --------------------------------------------------------- the report */
+
+.tally { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+
+.pill {
+    padding: 3px 8px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card);
+    font-size: var(--fs-small);
 }
 
-.donetext { color: var(--fg); }
-.donetext.good { color: var(--ok); }
-.donetext.bad { color: var(--bad); }
+.pill.good { border-color: var(--ok); color: var(--ok); }
+.pill.bad { border-color: var(--bad); color: var(--bad); }
+.pill.warnp { border-color: var(--warn); color: var(--warn); }
+
+.repbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 8px 0 6px;
+}
+
+.repbar .tick { margin-top: 0; }
+.repcount { color: var(--dim); font-size: var(--fs-small); }
+
+.rows {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--card);
+}
+
+.rows[hidden] { display: none; }
+
+/* ONE line per clip: the name truncates, the facts sit right. It used to be two lines, with
+ * the source range restated in seconds when the filename already carries it and "on the
+ * timeline" repeated on every retimed row. */
+.row2 {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 4px 8px;
+    border-bottom: 1px solid #2a2a2a;
+    font-size: var(--fs-small);
+}
+
+.row2:last-child { border-bottom: 0; }
+
+.row2 .nm {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--fg);
+    font: var(--fs-small)/1.4 ui-monospace, Menlo, monospace;
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+.row2 .facts { flex: 0 0 auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+.row2.isbad { background: #2a1c1c; }
+.row2.isbad .nm { color: var(--bad); }
+.row2.iswarn .facts { color: var(--warn); }
+
+.mergeline { color: var(--dim); font-size: var(--fs-small); line-height: 1.45; }
+.mergeline + .mergeline { margin-top: 2px; }
+/* The per-clip lines under a lead note: short, and aligned so they read as a table. */
+.mergeline.item { font-family: ui-monospace, Menlo, monospace; padding-left: 8px; }
 
 /* -------------------------------------------------------------- advanced */
 
 details {
-    margin-top: 16px;
+    margin-top: 14px;
     border-top: 1px solid var(--line);
     padding-top: 8px;
 }
 
+details[hidden] { display: none; }
+
 summary {
     color: var(--dim);
-    font-size: 11px;
+    font-size: var(--fs-small);
     cursor: pointer;
     outline: none;
 }
 
-.lbl { display: flex; align-items: center; gap: 5px;
-       margin: 10px 0 4px; color: var(--dim); font-size: 10px; }
+/* Inside the report, the merge notes are a fold rather than a section of their own. */
+#mergedet { margin-top: 10px; border-top: 0; padding-top: 0; }
 
 code, .log {
     display: block;
@@ -629,7 +508,7 @@ code, .log {
     border-radius: 4px;
     background: var(--card);
     color: var(--dim);
-    font: 10px/1.4 ui-monospace, Menlo, monospace;
+    font: var(--fs-small)/1.4 ui-monospace, Menlo, monospace;
     white-space: pre-wrap;
     word-break: break-all;
     -webkit-user-select: text;
@@ -644,18 +523,19 @@ code, .log {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    flex: 0 0 auto;
     width: 13px;
     height: 13px;
     border: 1px solid var(--line);
     border-radius: 50%;
     color: var(--dim);
-    font-size: 9px;
+    font-size: var(--fs-small);
     cursor: help;
 }
 
-/* The bubble lives on the body, positioned by JS. Absolutely positioning it inside
- * a scrolling container gets it clipped — that is why the browser GUI's
- * table-header tooltips never appeared. */
+/* The bubble lives on the body, positioned by JS. Absolutely positioning it inside a
+ * scrolling container gets it clipped — that is why the browser GUI's table-header tooltips
+ * never appeared. */
 .tip {
     position: fixed;
     z-index: 99;
@@ -665,7 +545,7 @@ code, .log {
     border-radius: 4px;
     background: #111;
     color: var(--fg);
-    font-size: 11px;
+    font-size: var(--fs-base);
     line-height: 1.4;
     pointer-events: none;
     box-shadow: 0 3px 10px rgba(0, 0, 0, .5);
