@@ -1,6 +1,6 @@
 {
-  "version": "3.5",
-  "notes": "xmlcut.py lives inside the panel \u2014 v3.5",
+  "version": "3.6",
+  "notes": "Advanced was still presenting a solved problem \u2014 v3.6",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

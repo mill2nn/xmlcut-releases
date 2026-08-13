@@ -34,6 +34,13 @@ if [ -f "../xmlcut.py" ]; then
     mkdir -p "$DEST/lib"
     cp "../xmlcut.py" "$DEST/lib/xmlcut.py"
     echo "  bundled: lib/xmlcut.py"
+    # The diagnostics ride along as lib/tools/. They import xmlcut from parent.parent,
+    # which from lib/tools/ is lib/ — so they run from in here unchanged.
+    if [ -d "../tools" ]; then
+        mkdir -p "$DEST/lib/tools"
+        cp ../tools/*.py "$DEST/lib/tools/" 2>/dev/null || true
+        echo "  bundled: lib/tools"
+    fi
 else
     echo "  !! ../xmlcut.py not found — the panel will have to be pointed at it by hand"
 fi

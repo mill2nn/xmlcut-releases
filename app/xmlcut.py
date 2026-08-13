@@ -39,7 +39,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "3.5"
+VERSION = "3.6"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -211,6 +211,19 @@ def reinstall_panel(here: Path, progress=None) -> tuple[bool, str]:
         (lib / "xmlcut.py").write_bytes((here / "xmlcut.py").read_bytes())
         if progress:
             progress("panel: lib/xmlcut.py")
+        # The diagnostics come too, as lib/tools/. They do
+        # sys.path.insert(parent.parent), which from lib/tools/ resolves to lib/ — where
+        # xmlcut.py now is — so they run from inside the panel unchanged. Without them
+        # the compare command the panel prints points at a folder that does not exist.
+        tsrc = here / "tools"
+        if tsrc.is_dir():
+            tdst = lib / "tools"
+            shutil.rmtree(tdst, ignore_errors=True)
+            tdst.mkdir(parents=True, exist_ok=True)
+            for t in sorted(tsrc.glob("*.py")):
+                (tdst / t.name).write_bytes(t.read_bytes())
+            if progress:
+                progress("panel: lib/tools")
         for part in PANEL_PARTS:
             s = src / part
             if not s.exists():

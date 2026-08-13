@@ -28,7 +28,7 @@
                "readhint", "scanning", "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
                "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn",
-               "typehint", "typeall", "scripthelp"];
+               "typehint", "typeall", "scripthelp", "enginerow"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -342,11 +342,22 @@
     function setScript(p) {
         state.script = p || "";
         if (state.script) {
-            setPathLabel(el.scriptpath, state.script, 40);
-            el.scriptpath.title = state.script
-                + (state.bundled === state.script ? "  (bundled with this panel)" : "");
+            var isBundled = (state.bundled && state.bundled === state.script);
+            if (isBundled) {
+                // Nothing for him to do or supply, so say that rather than showing a
+                // path and a Find button — which read as "this still needs configuring"
+                // even when it had already been found.
+                el.scriptpath.textContent = "bundled with this panel";
+                el.scriptpath.title = state.script;
+                el.pickscript.hidden = true;
+            } else {
+                setPathLabel(el.scriptpath, state.script, 40);
+                el.scriptpath.title = state.script;
+                el.pickscript.hidden = false;
+            }
             show(el.scripthelp, false);
         } else {
+            el.pickscript.hidden = false;
             el.scriptpath.textContent = "not found — click Find";
             // A silent failure for a file that is visibly there is the worst outcome, so
             // name the likely cause and every path that was checked.
@@ -362,9 +373,17 @@
         }
         if (state.script) {
             try { window.localStorage.setItem("xmlcut.script", state.script); } catch (e) {}
+            // Point at the copy of tools/ that actually exists. Bundled installs have
+            // lib/tools/ beside lib/xmlcut.py; a source checkout has tools/ at its root.
+            // Printing a path with no tools/ in it gave a command that could not run.
             var dir = path.dirname(state.script);
-            el.cmd.textContent = 'cd "' + dir + '" && ' + state.python
-                + ' tools/compare_panel.py "MY_TIMELINE.xml"';
+            if (exists(path.join(dir, "tools", "compare_panel.py"))) {
+                el.cmd.textContent = 'cd "' + dir + '" && ' + state.python
+                    + ' tools/compare_panel.py "MY_TIMELINE.xml"';
+            } else {
+                el.cmd.textContent = "the diagnostics are not bundled in this install — "
+                    + "run tools/compare_panel.py from your xmlcut folder";
+            }
         }
         refreshExportEnabled();
     }
