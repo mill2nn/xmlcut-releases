@@ -29,7 +29,7 @@
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
                "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn",
                "typehint", "typeall", "scripthelp", "enginerow",
-               "readprog", "readfill", "readtext", "pickall"];
+               "readprog", "readfill", "readtext", "pickall", "checkupd"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -1261,12 +1261,42 @@
         show(el.updbar, true);
     }
 
-    function checkUpdate() {
+    /* `manual` is true when he pressed the button rather than the panel checking on
+     * open. The difference is what happens when there is nothing new: on boot, say
+     * nothing — an "up to date" banner every launch is noise. On a deliberate press,
+     * always answer, because a button that appears to do nothing is worse than no
+     * button. */
+    function checkUpdate(manual) {
+        if (manual) {
+            el.checkupd.disabled = true;
+            setUpd("busy", "Checking the release channel…", "");
+        }
         runJson(["--check-update-json"], function (r, e) {
-            if (!r) { log("update check failed: " + e); return; }
+            el.checkupd.disabled = false;
+            if (!r) {
+                log("update check failed: " + e);
+                if (manual) {
+                    setUpd("bad", "Could not reach the release channel. " + e, "");
+                } else {
+                    // A failed check on open says nothing: no network is not news, and a
+                    // red bar on every launch would be. Hidden explicitly rather than
+                    // relying on the markup's initial state.
+                    show(el.updbar, false);
+                }
+                return;
+            }
+            if (r.current) el.ver.textContent = "v" + r.current;
             log("update check: on " + r.current
                 + (r.update ? ", " + r.update.version + " available" : ", up to date"));
-            if (!r.update) return;
+            if (!r.update) {
+                if (manual) {
+                    setUpd("done", "Up to date — running " + r.current
+                           + ", nothing newer published.", "");
+                } else {
+                    show(el.updbar, false);
+                }
+                return;
+            }
             if (r.source_checkout) {
                 // This copy is a git checkout, so xmlcut.py refuses to overwrite it.
                 // Saying so beats offering a button that cannot work.
@@ -1512,7 +1542,7 @@
                     setBusy(true, "Reading…");
                     scanClips();
                 }
-                checkUpdate();
+                checkUpdate(false);
             }
         });
     });
@@ -1592,6 +1622,7 @@
     el.reveal.addEventListener("click", function () { reveal(state.out); });
     el.showsaved.addEventListener("click", function () { reveal(state.folder); });
     el.updbtn.addEventListener("click", applyUpdate);
+    el.checkupd.addEventListener("click", function () { checkUpdate(true); });
 
     /* --------------------------------------------------------------- boot */
 
@@ -1620,7 +1651,7 @@
                     log("host found xmlcut.py: " + r.found);
                     setScript(r.found);
                     if (state.dump && !state.busy) { setBusy(true, "Reading…"); scanClips(); }
-                    checkUpdate();
+                    checkUpdate(false);
                 } else {
                     // Re-run the panel-side search now that home is known for certain.
                     var again = findScript();
@@ -1643,7 +1674,7 @@
         el.resume.checked = state.resume;
         wireTips();
         // Off the critical path: a slow or absent network must never delay the panel.
-        if (state.script) checkUpdate();
+        if (state.script) checkUpdate(false);
         // Deliberately does NOT read on open. Reading exports an XML as a side effect,
         // and a panel that writes files the moment it appears is a panel you cannot
         // trust to sit open while you work. Step 1 is a button.

@@ -1,6 +1,6 @@
 {
-  "version": "3.7",
-  "notes": "Per-clip selection, and progress for both actions \u2014 v3.7",
+  "version": "3.8",
+  "notes": "A manual check-for-updates button, and the header version \u2014 v3.8",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
