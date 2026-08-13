@@ -1,8 +1,16 @@
-# xmlcut
+# auto bits
 
 Extract every cut of a Premiere Pro timeline as an individual video file, straight from the
 timeline's XML export. Built for assembling training datasets — every clip comes with a
 manifest row describing exactly where it came from.
+
+In Premiere it appears as **Window → Extensions → auto bits**.
+
+> The engine file is still called `xmlcut.py`, the extension's bundle ID is still
+> `com.bom.xmlcutreader`, and the release channel is still `xmlcut-releases`. Those are
+> identifiers, not names: renaming them would break every installed copy's updater, leave a
+> duplicate panel in Premiere's Extensions menu, or drop saved settings. Where you see
+> `xmlcut` below, it is a filename or an identifier.
 
 ---
 
@@ -196,15 +204,58 @@ say so.
 
 ### clips.csv — the sheet
 
-Six columns, made for opening in Sheets and looking things up:
+Two parts: **what this export is**, then **one row per clip**. Made for opening in Sheets.
 
-| file | clip name | timeline in | timeline out | original name | original path |
-|---|---|---|---|---|---|
-| 01_(00.00-02.00)_CAM_A.mp4 | Wide_establishing | 00:00:00:00 | 00:00:02:00 | CAM_A.mp4 | /Volumes/…/CAM_A.mp4 |
+The section on top describes the export itself, and it is there because the facts that decide
+whether a set of clips is usable as data — which source types were kept, whether clips were
+chosen by hand, which ones carry a flattened speed ramp — used to live only in
+`manifest.json`, and this is the file people actually open:
 
-`manifest.csv` holds all of this among its 46 columns, which is the wrong shape for reading.
-This is the short version, and it matters more now that the filename no longer spells out the
-full timecode. A scan writes it too, so you get the sheet without encoding anything.
+```
+# xmlcut 3.10
+sequence,PROMO_MASTER_v7
+fps,30
+timeline duration,00:00:31:28
+source,PROMO_MASTER_v7.xml
+state,cut
+encode,"libx264 crf 1 profile high, preset veryfast"
+speed,native
+source types kept,(all)
+cuts,19
+unique sources,6
+completeness,all 19 cuts on the timeline
+written,17
+failed,0
+missing source,1
+not decodable media,1
+warning,"Ramp_keyframed: keyframed speed ramp (100–220%) treated as a constant 150% — …"
+```
+
+**`completeness` is the row to read first.** It says whether the folder is the whole timeline
+and, if not, what took the rest away:
+
+```
+completeness,16 of 19 cuts on the timeline — limited to source types mp4; clips chosen by hand (pick.txt)
+```
+
+A folder of clips cannot say that about itself, and a dataset missing every still is a
+different dataset. `state` distinguishes a real cut from a cut list written by a scan, where
+`written` is legitimately 0.
+
+Then a blank line, then the table — ten columns:
+
+| file | clip name | timeline in | timeline out | speed % | cut length s | frames | timeline length s | original name | original path |
+|---|---|---|---|---|---|---|---|---|---|
+| 01_(00.00-02.00)_CAM_A.mp4 | Wide_establishing | 00:00:00:00 | 00:00:02:00 | 100.0 | 2.0 | 48 | 2.0 | CAM_A.mp4 | /Volumes/…/CAM_A.mp4 |
+
+The blank line is deliberate: it is still a well-formed CSV, so a script can find the table
+without knowing how tall the header is — everything after the first empty row. In pandas that
+is `skiprows` up to and including it, and `manifest.json` remains the clean machine-readable
+copy if you would rather not deal with it at all.
+
+`manifest.csv` holds every clip field among its 52 columns, which is the wrong shape for
+reading. This is the short version, and it matters more now that the filename no longer spells
+out the full timecode. A scan writes both, so you get the sheet without encoding anything.
 
 ---
 
@@ -509,10 +560,27 @@ Premiere already reads to load the panel at all.
 The repository still keeps exactly one `xmlcut.py` — the copy is made when you install, and refreshed
 on every update, so the two can't drift.
 
-**It updates itself.** Install once; after that the panel shows an **Update** button whenever a
-new version is published, and pressing it refreshes the engine, the panel files and the
-diagnostics, then copies the panel back into Premiere's extensions folder. Quit Premiere (⌘Q)
-and reopen to load it. Nobody re-downloads a zip.
+**It updates itself, cut logic included.** Install once; after that the panel shows an
+**Update** button whenever a new version is published, and pressing it refreshes the engine
+(`xmlcut.py` — the cutting logic itself), the panel files and the diagnostics, then copies the
+panel back into Premiere's extensions folder. Nobody re-downloads a zip.
+
+So a change to how clips are cut reaches everyone through that button. Traced end to end:
+change the encoder settings, publish, press Update on another machine, and a cut made there
+afterwards reports the new settings in its own manifest.
+
+**Whether a restart is needed depends on what changed**, and the panel now says which:
+
+| you changed | teammate has to |
+|---|---|
+| `xmlcut.py` only — cutting, timing, encoding | nothing. Their next export uses it |
+| anything under `panel/CSXS`, `client`, `jsx`, `.debug` | quit Premiere (⌘Q) and reopen |
+
+Premiere loads the panel's HTML, JS and JSX once at launch, so those need a reload. The engine
+is a subprocess started fresh for every export, so it does not. The update compares the bytes
+it downloaded against what is installed, and only asks for a restart when a file Premiere
+actually loads has changed — a message that appears every time is a message people learn to
+skip past.
 
 What it updates is the copy **inside the extension folder** — the one the panel runs — and
 nothing else. It used to fetch the browser GUI, its launcher and the README in there too,
@@ -524,6 +592,43 @@ installer from a fresh copy.
 Re-running the installer is safe in either direction: it **will not put an older engine back**
 over one the panel has updated itself to. That used to be a silent downgrade, and re-running
 the installer is exactly what you do when a panel is misbehaving.
+
+### The gear — and the panel repairing itself
+
+Everything about the *tool* rather than about your timeline sits behind the **⚙** in the header:
+the cut script, and **Check for updates**. It used to be a link competing with step 1, and the
+engine path was buried in Advanced.
+
+```
+CUT SCRIPT   bundled with this panel · v3.10 · runs
+             bundled with this panel                  [Find]
+             [ Re-check cut script ]
+             [ Check for updates ]
+```
+
+**Re-check cut script** does three things, in order:
+
+1. **Is it there?** The bundled copy first, then the saved path, then the usual folders.
+2. **Does it run?** It actually executes it. *Present* is not the same as *works* — a zero-byte
+   or half-copied `xmlcut.py` passes an existence check and then fails at export time, which is
+   the worst possible moment to find out.
+3. **If not, fetch it.** The panel downloads `xmlcut.py` from the release channel, writes it to
+   `lib/xmlcut.py` inside itself, and links it. No restart needed, and it happens automatically
+   on open if no engine could be found anywhere.
+
+A damaged **bundled** copy is replaced without being asked, because that file is only ever a
+copy and the panel is dead without it. A script anywhere else — your own checkout — is never
+overwritten; it is only reported.
+
+The download is validated *before* anything is written: it must be big enough, its `VERSION`
+must match what the channel promised, and it must contain the markers a real engine has and an
+error page does not. A download that fails any of those is refused and **nothing is written**,
+so a failed repair leaves the panel missing an engine and saying so, rather than holding a
+broken one.
+
+> This is the only thing the panel fetches for itself. Everything else still goes through
+> `xmlcut.py` — but it cannot ask `xmlcut.py` to download `xmlcut.py`. The same trust note
+> applies: whoever can push to the releases repo can put code on this machine.
 
 
 No XML export, no sequence picker. `panel/` reads the sequence you have open and cuts it.
@@ -560,12 +665,30 @@ XML + Premiere · nests resolved, ramp keyframes read
 
 FILE TYPES     [x] .mp4 24   [x] .mov 3   [ ] .aep 1
 SAVE TO        …/Desktop/xmlcut clips           [Change]
+               → MY_SEQUENCE/
 
               [ Export 27 clips ]
 ```
 
 Untick a type to skip it; project files like `.aep` start unticked because they can't be
 decoded.
+
+**Save to is a root you pick once.** Each export creates a folder named after the sequence
+inside it and writes there — `…/xmlcut clips/MY_SEQUENCE/`. That is not just tidiness: xmlcut
+numbers its output `01..N` **per run**, so cutting three sequences into one folder interleaved
+three sets of `01_`, `02_`, `03_` … and each run overwrote the previous one wherever a name
+collided. A folder per sequence means each run's numbering, `clips.csv` and manifest describe
+exactly one timeline.
+
+The line under the path shows the folder before it is created. If that folder already exists
+it says so in amber with a file count, because a re-export overwrites the names it reproduces
+and leaves the rest — so a folder from an older cut of the same timeline ends up holding a
+mixture. Tick **skip clips already in that folder** to add only what is missing, or empty it
+first.
+
+Illegal characters in a sequence name are replaced, not stripped: `v2.0: final/cut` becomes
+`v2.0- final-cut`. `:` is the one that matters — HFS accepts it but Finder renders it as `/`,
+so a folder would appear under a name you never chose.
 
 Step 2 also lists **every clip the export will make**, the same columns as the browser GUI:
 

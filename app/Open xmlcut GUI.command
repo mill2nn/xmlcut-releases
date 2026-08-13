@@ -14,7 +14,7 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
-echo "xmlcut — starting the GUI"
+echo "auto bits — starting the GUI"
 echo
 
 # ffmpeg is the only real prerequisite. Say so clearly here rather than letting

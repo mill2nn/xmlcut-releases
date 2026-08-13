@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install the xmlcut reader panel into Premiere.
+# Install the auto bits panel into Premiere.
 #
 # Copies this folder to Adobe's CEP extensions directory. The panel is read-only —
 # it never modifies your project — so reinstalling is always safe.
@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 
 DEST="$HOME/Library/Application Support/Adobe/CEP/extensions/com.bom.xmlcutreader"
 
-echo "Installing xmlcut reader..."
+echo "Installing auto bits..."
 echo
 
 # Unsigned panels only load when PlayerDebugMode is set. Premiere 2026 reads CSXS.12,
@@ -84,7 +84,7 @@ echo "  copied to: $DEST"
 echo
 echo "Installed. Now:"
 echo "  1. Quit Premiere Pro completely (Cmd-Q), then reopen it."
-echo "  2. Window > Extensions > xmlcut reader"
+echo "  2. Window > Extensions > auto bits"
 echo "  3. Open the timeline you want and click 'Read active sequence'."
 echo
 echo "Reads and XML exports land beside your Premiere project, in xmlcut/<sequence>/."

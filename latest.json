@@ -1,6 +1,6 @@
 {
-  "version": "3.9",
-  "notes": "Self-update fixes, Export can no longer run mid-read, and offline no longer reports 'up to date'.",
+  "version": "3.10",
+  "notes": "Renamed to auto bits. Per-sequence output folders, export info at the top of clips.csv, a gear menu, and the panel repairs its own engine.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

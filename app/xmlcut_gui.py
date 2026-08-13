@@ -573,7 +573,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>xmlcut</title>
+<title>auto bits</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   :root{
@@ -695,7 +695,7 @@ PAGE = r"""<!doctype html>
   #updbar.bad{border-color:var(--bad)}
 </style></head><body>
 <header>
-  <h1>xmlcut</h1><span class="v" id="ver"></span><span class="sp"></span>
+  <h1>auto bits</h1><span class="v" id="ver"></span><span class="sp"></span>
   <button id="quit">Quit server</button>
 </header>
 <main>
@@ -1093,7 +1093,7 @@ def main():
     srv = Server(("127.0.0.1", 0), Handler)
     port = srv.server_address[1]
     url = f"http://127.0.0.1:{port}/?t={TOKEN}"
-    print(f"xmlcut {xmlcut.VERSION} GUI running at\n  {url}\n"
+    print(f"{xmlcut.NAME} {xmlcut.VERSION} GUI running at\n  {url}\n"
           f"Opening your browser. Ctrl-C here (or Quit server on the page) to stop.")
     threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:

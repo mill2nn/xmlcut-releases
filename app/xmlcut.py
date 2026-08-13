@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-xmlcut - extract every cut of a Premiere Pro timeline as an individual video file.
+auto bits - extract every cut of a Premiere Pro timeline as an individual video file.
 
 Reads a Final Cut Pro 7 XML export (Premiere: File > Export > Final Cut Pro XML),
 resolves each clipitem back to its source media, and uses ffmpeg to cut the exact
@@ -39,7 +39,14 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "3.9"
+VERSION = "3.10"
+
+# The product name, for anything a person reads. Deliberately NOT applied to the
+# identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
+# GENERATOR string and the panel's localStorage keys are all load-bearing, and renaming
+# any of them would break every installed copy's updater, duplicate the panel in
+# Premiere's Extensions menu, or silently drop saved settings.
+NAME = "auto bits"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -389,7 +396,7 @@ def check_update() -> Optional[dict]:
     return newer_than_running(info)
 
 
-def apply_update(info: dict, progress=None) -> tuple[bool, str]:
+def apply_update(info: dict, progress=None, out: Optional[dict] = None) -> tuple[bool, str]:
     """Download the released files and swap them in, or change nothing at all.
 
     Every file is fetched and validated BEFORE anything on disk is touched, because a
@@ -460,6 +467,35 @@ def apply_update(info: dict, progress=None) -> tuple[bool, str]:
                                    f"{info.get('version')} — nothing was changed")
         got[rel] = data
 
+    # Which files this update actually CHANGES, as opposed to rewriting identically.
+    #
+    # latest.json always lists the whole set, so "panel files were in the release" is not the
+    # same as "the panel changed". A release that only touches the cut logic needs no
+    # Premiere restart at all — the engine is spawned fresh for every export — and saying
+    # "quit and reopen" every time trains people to ignore it on the one occasion it matters.
+    ext_dest = cep_extensions_dir() / PANEL_ID
+
+    def current_bytes(rel: str) -> Optional[bytes]:
+        """What is on disk now, at the place this file actually lives.
+
+        For a BUNDLED install the installed panel is in the extension ROOT — `here/panel/`
+        is only a staging directory, and it is deleted after every update. Comparing against
+        it made all nine panel files look changed on every release, so an engine-only
+        release still demanded a restart.
+        """
+        cands = [here / rel]
+        if bundled and rel.startswith("panel/"):
+            cands.insert(0, ext_dest / rel[len("panel/"):])
+        for p in cands:
+            try:
+                if p.is_file():
+                    return p.read_bytes()
+            except OSError:
+                pass
+        return None
+
+    changed = [rel for rel, data in got.items() if current_bytes(rel) != data]
+
     say("Backing up the current version")
     backup = here / ".backup"
     saved: list[str] = []
@@ -516,8 +552,17 @@ def apply_update(info: dict, progress=None) -> tuple[bool, str]:
         if ok and bundled:
             shutil.rmtree(here / "panel", ignore_errors=True)
 
+    # Reported through `out` rather than by widening the return: there are ten early
+    # `return False, msg` paths in here and changing their arity would be pure risk.
+    if out is not None:
+        # Premiere loads the panel's manifest, HTML, JS and JSX ONCE, at launch. Only a
+        # change to one of those needs a restart — not the installer scripts, and not the
+        # engine, which is a subprocess started fresh for every export.
+        loaded = tuple(f"panel/{p}" for p in PANEL_PARTS)
+        out["changed"] = sorted(changed)
+        out["restart_needed"] = any(r.startswith(loaded) for r in changed)
     return True, (f"updated {VERSION} → {info['version']}. The previous version is in "
-                  f".backup if you need it. Quit and reopen to run the new code." + tail)
+                  f".backup if you need it." + tail)
 
 
 # --------------------------------------------------------------------------
@@ -941,6 +986,25 @@ class Timeline:
         self.sequence_fps = parse_rate(seq.find("rate"), 25.0)
         self.sequence_duration_frames = int(num(seq, "duration", 0) or 0)
 
+        # Register every <file> in the DOCUMENT before walking the chosen sequence.
+        #
+        # FCP7 defines a <file> in full at its first appearance anywhere in the export and
+        # refers to it by id alone after that. Registering only as the chosen sequence was
+        # walked therefore lost any file whose full definition sits under a DIFFERENT
+        # sequence — its clipitems resolve to no path and are dropped, silently. The
+        # fixture demonstrates it: `--sequence OLD_v6_DO_NOT_USE` used to report
+        # "No cuts found" for a sequence that plainly has a clip in it.
+        #
+        # This matters for a project-level export, which holds every sequence — which is
+        # exactly what the panel falls back to when Premiere will not export a single
+        # sequence, and what anyone using --sequence has.
+        #
+        # After sequence_fps is known, because that is the fallback for a file with no rate
+        # of its own. Full definitions overwrite references, so order within the document
+        # does not matter.
+        for f in root.iter("file"):
+            self._register_file(f)
+
         for m in seq.findall("marker"):
             self.markers.append({
                 "name": txt(m, "name"),
@@ -1255,7 +1319,7 @@ class Timeline:
 # --------------------------------------------------------------------------
 
 class DumpTimeline:
-    """A Timeline built from the xmlcut reader panel's JSON instead of an XML.
+    """A Timeline built from the auto bits panel's JSON instead of an XML.
 
     Deliberately duck-types `Timeline`: same attribute names, same `Cut` objects, so
     every downstream stage — naming, probing, building the ffmpeg command, the
@@ -1272,6 +1336,9 @@ class DumpTimeline:
     that the XML path already does. Nests are reported and skipped, never guessed at.
     """
 
+    # A WIRE VALUE, not a display name. host.jsx stamps it into every dump and
+    # looks_like_dump() validates it, so renaming it would make every dump already on
+    # disk unreadable. The product name lives in NAME.
     GENERATOR = "xmlcut reader"
 
     def __init__(self, dump_path: Path):
@@ -1318,7 +1385,7 @@ class DumpTimeline:
             raise SystemExit(f"error: {path.name} is not readable JSON ({e})")
         if data.get("generator") != self.GENERATOR:
             raise SystemExit(
-                f"error: {path.name} was not written by the xmlcut reader panel.")
+                f"error: {path.name} was not written by the auto bits panel.")
 
         seq = data.get("sequence") or {}
         self.sequence_name = str(seq.get("name") or "Untitled Sequence")
@@ -1543,7 +1610,7 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
     except json.JSONDecodeError as e:
         return [f"panel dump is not readable JSON ({e}) — cut from the XML alone"]
     if data.get("generator") != DumpTimeline.GENERATOR:
-        return [f"{dump_path.name} was not written by the xmlcut reader panel "
+        return [f"{dump_path.name} was not written by the auto bits panel "
                 f"— cut from the XML alone"]
 
     notes: list[str] = []
@@ -2100,16 +2167,143 @@ SHEET_COLUMNS = [
 ]
 
 
-def write_sheet(tl: Timeline, outdir: Path) -> Path:
-    """A short, readable sheet: which file came from where.
+def export_summary(tl: Timeline, args) -> dict:
+    """The export-level facts: what was cut, from where, under what settings.
 
-    manifest.csv already holds all of this among 46 columns, which is the wrong shape for
-    opening in Sheets and eyeballing. This is the six columns you actually look things up
+    ONE definition, because it now appears twice — as the manifest's top-level block and as
+    the section at the top of clips.csv. A sheet and a manifest from the same run must not
+    be able to describe it differently, which is the same reason describe() exists.
+    """
+    cut_state = ("cut list only — nothing encoded yet"
+                 if all(c.status in ("pending", "dry_run") for c in tl.cuts)
+                 else "cut")
+    return {
+        "tool": f"{NAME} {VERSION}",
+        "source_xml": str(tl.xml_path),
+        "state": cut_state,
+        "sequence": {
+            "name": tl.sequence_name,
+            "fps": round(tl.sequence_fps, 6),
+            "duration_frames": tl.sequence_duration_frames,
+            "duration_tc": frames_to_tc(tl.sequence_duration_frames, tl.sequence_fps),
+        },
+        "settings": {
+            "encode": (f"libx264 crf {X264_CRF} profile {X264_PROFILE}, "
+                       f"preset {X264_PRESET}"),
+            "jobs": JOBS,
+            "speed": getattr(args, "speed", "native"),
+            # Which source types were left out, so the output can be read honestly
+            # later: a dataset missing every still is a different dataset, and
+            # nothing else in here would say so.
+            "types_kept": getattr(args, "types_kept", None),
+            "types_excluded": getattr(args, "types_excluded", None),
+            # A partial run has to say so. Without this the manifest describes a
+            # complete cut of the timeline, and a dataset built from it silently
+            # omits whatever was unticked — with nothing recording that it happened.
+            "picked_from": (str(getattr(args, "pick", "") or "") or None),
+            "picked_count": getattr(args, "picked", None),
+        },
+        "warnings": tl.warnings,
+        "counts": {
+            "cuts": len(tl.cuts),
+            # What the timeline held before --ext and --pick. Equal to `cuts` on a complete
+            # run; the pair is what makes a partial export legible.
+            "cuts_on_timeline": getattr(args, "cuts_before_filters", None) or len(tl.cuts),
+            "unique_sources": len({c.source_path for c in tl.cuts}),
+            # missing_sources means MEDIA THAT SHOULD BE THERE AND ISN'T. It used to be
+            # `not c.source_exists`, which also counted every .aep — a Dynamic Link comp
+            # was never a file on disk, and the fix for it is to render it, not to repair a
+            # path. Reported apart now that this tally is printed at the top of the sheet:
+            # a count that disagrees with the rows below it is worse than no count.
+            "missing_sources": sum(1 for c in tl.cuts
+                                   if not c.source_exists
+                                   and c.media_kind != "unsupported"),
+            "unsupported": sum(1 for c in tl.cuts if c.media_kind == "unsupported"),
+            "ok": sum(1 for c in tl.cuts if c.status == "ok"),
+            "failed": sum(1 for c in tl.cuts if c.status == "failed"),
+        },
+    }
+
+
+def completeness(s: dict) -> str:
+    """Whether this export is the whole timeline, and if not, what removed the rest.
+
+    A dataset missing every still, or missing whatever was unticked, is a different dataset,
+    and a folder of clips cannot say so by itself.
+    """
+    n, st = s["counts"], s["settings"]
+    total, kept = n["cuts_on_timeline"], n["cuts"]
+    if kept >= total:
+        return f"all {total} cuts on the timeline"
+    why = []
+    if st["types_kept"]:
+        why.append("limited to source types " + ", ".join(st["types_kept"]))
+    if st["picked_from"]:
+        why.append("clips chosen by hand (" + Path(st["picked_from"]).name + ")")
+    return (f"{kept} of {total} cuts on the timeline"
+            + (" — " + "; ".join(why) if why else ""))
+
+
+def sheet_header_rows(tl: Timeline, args) -> list:
+    """The export-info section that opens clips.csv, as CSV rows.
+
+    Written as `label,value` pairs and closed with a blank line, so the sheet is still a
+    well-formed CSV: a human sees the context first, and a reader that wants the table can
+    skip to the first row after the blank one. manifest.json stays the clean machine-
+    readable copy, which is why this can afford to be shaped for a person.
+    """
+    s = export_summary(tl, args)
+    seq, st, n = s["sequence"], s["settings"], s["counts"]
+
+    def listed(v):
+        return ", ".join(v) if isinstance(v, list) and v else "(all)"
+
+    rows = [
+        [f"# {s['tool']}"],
+        ["sequence", seq["name"]],
+        ["fps", f"{seq['fps']:g}"],
+        ["timeline duration", seq["duration_tc"]],
+        ["source", Path(s["source_xml"]).name],
+        ["state", s["state"]],
+        ["encode", st["encode"]],
+        ["speed", st["speed"]],
+        ["source types kept", listed(st["types_kept"])],
+        ["cuts", n["cuts"]],
+        ["unique sources", n["unique_sources"]],
+        # The one row that says whether this folder is the WHOLE timeline, and if not, what
+        # took the rest away. Anyone reading the dataset later needs that before they need
+        # anything else in here.
+        ["completeness", completeness(s)],
+        ["written", n["ok"]],
+        ["failed", n["failed"]],
+        ["missing source", n["missing_sources"]],
+        ["not decodable media", n["unsupported"]],
+    ]
+    # One row per warning. These are the places a clip's own label is knowingly
+    # approximate — a flattened speed ramp above all — so they belong where the labels are,
+    # not only in a JSON nobody opens.
+    for w in s["warnings"]:
+        rows.append(["warning", w])
+    rows.append([])
+    return rows
+
+
+def write_sheet(tl: Timeline, outdir: Path, args) -> Path:
+    """A short, readable sheet: what this export is, then which file came from where.
+
+    manifest.csv already holds all of this among 52 columns, which is the wrong shape for
+    opening in Sheets and eyeballing. This is the ten columns you actually look things up
     by — and it matters more now that the filename no longer spells out the full timecode.
+
+    The export-info section on top is here because the facts that decide whether a dataset
+    is usable — which types were kept, whether a selection was applied, which clips carry a
+    flattened ramp — lived only in manifest.json, and the file people actually open is this
+    one.
     """
     path = outdir / "clips.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
+        w.writerows(sheet_header_rows(tl, args))
         w.writerow([label for label, _ in SHEET_COLUMNS])
         for c in tl.cuts:
             row = []
@@ -2139,44 +2333,12 @@ def write_manifest(tl: Timeline, outdir: Path, args) -> tuple[Path, Path, Path]:
             w.writerows(rows)
 
     json_path = outdir / "manifest.json"
+    doc = export_summary(tl, args)
+    doc["markers"] = tl.markers
+    doc["clips"] = [readable(c) for c in tl.cuts]
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "tool": f"xmlcut {VERSION}",
-            "source_xml": str(tl.xml_path),
-            "sequence": {
-                "name": tl.sequence_name,
-                "fps": round(tl.sequence_fps, 6),
-                "duration_frames": tl.sequence_duration_frames,
-                "duration_tc": frames_to_tc(tl.sequence_duration_frames, tl.sequence_fps),
-            },
-            "settings": {
-                "encode": (f"libx264 crf {X264_CRF} profile {X264_PROFILE}, "
-                           f"preset {X264_PRESET}"),
-                "jobs": JOBS,
-                "speed": getattr(args, "speed", "native"),
-                # Which source types were left out, so the output can be read honestly
-                # later: a dataset missing every still is a different dataset, and
-                # nothing else in here would say so.
-                "types_kept": getattr(args, "types_kept", None),
-                "types_excluded": getattr(args, "types_excluded", None),
-                # A partial run has to say so. Without this the manifest describes a
-                # complete cut of the timeline, and a dataset built from it silently
-                # omits whatever was unticked — with nothing recording that it happened.
-                "picked_from": (str(getattr(args, "pick", "") or "") or None),
-                "picked_count": getattr(args, "picked", None),
-            },
-            "warnings": tl.warnings,
-            "counts": {
-                "cuts": len(tl.cuts),
-                "unique_sources": len({c.source_path for c in tl.cuts}),
-                "missing_sources": sum(1 for c in tl.cuts if not c.source_exists),
-                "ok": sum(1 for c in tl.cuts if c.status == "ok"),
-                "failed": sum(1 for c in tl.cuts if c.status == "failed"),
-            },
-            "markers": tl.markers,
-            "clips": [readable(c) for c in tl.cuts],
-        }, f, indent=2)
-    return csv_path, json_path, write_sheet(tl, outdir)
+        json.dump(doc, f, indent=2)
+    return csv_path, json_path, write_sheet(tl, outdir, args)
 
 
 # --------------------------------------------------------------------------
@@ -2195,7 +2357,7 @@ def clean_dropped_path(raw: str) -> str:
 def interactive_setup(args) -> None:
     """Walk the user through it when xmlcut is run with no arguments."""
     print("=" * 62)
-    print("  xmlcut — Premiere timeline into individual clips")
+    print(f"  {NAME} — Premiere timeline into individual clips")
     print("=" * 62)
     print("\nIn Premiere: File > Export > Final Cut Pro XML...")
     print("Then drag that XML file into this window and press return.\n")
@@ -2234,7 +2396,7 @@ def interactive_setup(args) -> None:
 
 
 def cli_update() -> int:
-    print(f"xmlcut {VERSION} — checking for an update ...")
+    print(f"{NAME} {VERSION} — checking for an update ...")
     latest, err = fetch_latest()
     if err:
         # Said plainly rather than folded into "you are on the newest release". A failed
@@ -2253,8 +2415,13 @@ def cli_update() -> int:
     if input("\nInstall it now? [Y/n]: ").strip().lower().startswith("n"):
         print("  Left alone.")
         return 0
-    ok, msg = apply_update(info)
+    detail: dict = {}
+    ok, msg = apply_update(info, out=detail)
     print(f"\n  {msg}")
+    if ok:
+        print("  Restart the tool to run the new code."
+              if detail.get("restart_needed", True)
+              else "  Nothing to restart — the next run uses the new code.")
     return 0 if ok else 1
 
 
@@ -2266,7 +2433,7 @@ def main():
     )
     ap.add_argument("xml", type=Path, nargs="?", metavar="XML_OR_DUMP",
                     help="Final Cut Pro 7 XML exported from Premiere, or a .json "
-                         "written by the xmlcut reader panel "
+                         "written by the auto bits panel "
                          "(omit it to be walked through step by step)")
     ap.add_argument("--pick", type=Path, metavar="FILE",
                     help="cut only the clips listed in FILE, one per line as "
@@ -2350,10 +2517,15 @@ def main():
                               "message": f"already on {VERSION}; nothing newer published"}))
             return
         steps: list[str] = []
-        ok, msg = apply_update(info, progress=steps.append)
+        detail: dict = {}
+        ok, msg = apply_update(info, progress=steps.append, out=detail)
         print(json.dumps({"ok": ok, "current": VERSION, "checked": True,
                           "version": info.get("version"),
-                          "message": msg, "steps": steps}))
+                          "message": msg, "steps": steps,
+                          # True only when a PANEL file actually changed. A cut-logic-only
+                          # release is live for the next export with no restart at all.
+                          "restart_needed": detail.get("restart_needed", True),
+                          "changed": detail.get("changed", [])}))
         return
 
     for tool in ("ffmpeg", "ffprobe"):
@@ -2421,6 +2593,10 @@ def main():
     if args.tracks != "all":
         tl.cuts = [c for c in tl.cuts if c.track_type == args.tracks]
     tl.cuts = [c for c in tl.cuts if c.duration_frames >= args.min_frames]
+    # How many cuts the timeline has, before --ext and --pick take any away. Recorded so
+    # the sheet can say what was LEFT OUT: `picked_count` on its own is always equal to the
+    # final count, which answered nothing.
+    args.cuts_before_filters = len(tl.cuts)
     if args.ext:
         # Filtered BEFORE the indices are assigned, so a run limited to one type gets a
         # clean 01..N rather than gaps where the other types used to be.
@@ -2457,7 +2633,7 @@ def main():
     # filenames without a single frame being encoded.
     assign_output_names(tl.cuts, args.container, tl.sequence_fps)
 
-    print(f"xmlcut {VERSION}")
+    print(f"{NAME} {VERSION}")
     print(f"  sequence : {tl.sequence_name}  @ {tl.sequence_fps:g} fps")
     print(f"  duration : {frames_to_tc(tl.sequence_duration_frames, tl.sequence_fps)}")
     print(f"  cuts     : {len(tl.cuts)}  across {len({c.source_path for c in tl.cuts})} source files")

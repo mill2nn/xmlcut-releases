@@ -36,6 +36,45 @@ h1 { margin: 0; font-size: 13px; font-weight: 600; }
 header .linkbtn { margin-left: auto; }
 .ver { color: var(--dim); font-size: 10px; }
 
+/* Everything about the TOOL rather than about this timeline lives behind the gear:
+ * the cut script and the update check. Both were competing with step 1 for attention. */
+.gearbtn {
+    margin-left: auto;
+    padding: 2px 5px;
+    border-color: transparent;
+    background: none;
+    color: var(--dim);
+    font-size: 13px;
+    line-height: 1;
+}
+
+.gearbtn:hover:not(:disabled) { background: #2e2e2e; color: var(--fg); }
+.gearbtn.on { background: #2e2e2e; color: var(--fg); border-color: var(--line); }
+
+.gearmenu {
+    margin: -4px 0 12px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--card);
+}
+
+.gearmenu[hidden] { display: none; }
+.gearmenu .lbl { margin-top: 0; }
+
+/* What state the engine is in, in words. "Present" is not the same as "runnable", and a
+ * path on its own said neither. */
+.enginestat {
+    margin-bottom: 6px;
+    font-size: 10px;
+    line-height: 1.45;
+    color: var(--dim);
+}
+
+.enginestat.good { color: var(--ok); }
+.enginestat.busy { color: var(--accent); }
+.enginestat.bad { color: var(--bad); }
+
 h2 {
     display: flex;
     align-items: center;
@@ -303,6 +342,21 @@ tbody tr.divider td {
 
 
 .savednote { margin-top: 4px; color: var(--dim); font-size: 9px; }
+
+/* The subfolder an export will create inside the chosen root. Sits directly under the
+ * path row so the two read as one destination. */
+.outdest {
+    margin-top: 4px;
+    color: var(--dim);
+    font: 10px/1.4 ui-monospace, Menlo, monospace;
+    word-break: break-all;
+}
+
+.outdest[hidden] { display: none; }
+/* Amber only when that folder already holds files — a re-export overwrites the names it
+ * reproduces and leaves the rest, so a folder from an older cut of the same timeline ends
+ * up holding a mixture. */
+.outdest.warnish { color: var(--warn); }
 
 .repbar {
     display: flex;

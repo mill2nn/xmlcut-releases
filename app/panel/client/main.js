@@ -1,4 +1,4 @@
-/* xmlcut panel — read the active sequence, then cut it.
+/* auto bits panel — read the active sequence, then cut it.
  *
  * The panel is a front end only. Reading is ExtendScript (host.jsx); cutting is
  * xmlcut.py, spawned as a child process. Nothing about timing, seeking or encoding
@@ -28,8 +28,9 @@
                "readhint", "scanning", "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
                "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn",
-               "typehint", "typeall", "scripthelp", "enginerow",
-               "readprog", "readfill", "readtext", "pickall", "checkupd"];
+               "typehint", "typeall", "scripthelp",
+               "readprog", "readfill", "readtext", "pickall", "checkupd", "outdest",
+               "gear", "gearmenu", "enginestat", "recheck"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -48,6 +49,8 @@
         report: [],      // rows built from the manifest after a run
         merge: [],       // the '++' lines xmlcut printed about the merge
         busy: false,
+        fetching: false,     // a cut-script recovery download is in flight
+        repaired: false,     // a damaged bundled engine has already been replaced once
         readTimer: null,     // watchdog on the two ExtendScript calls
         manifestBefore: 0,   // manifest mtime before an export, so a cancel reports nothing
         resume: false,
@@ -528,6 +531,10 @@
         show(el.mergebox, false);
         show(el.report, false);
         show(el.prog, false);
+        // The destination is named after the sequence, so it is unknown again until this
+        // read answers. Leaving the old sequence's folder on screen would name the wrong
+        // one — the same staleness as the clip table above.
+        setOutDest();
         setBusy(true, "Reading…");
         readStage(0);
         readTimer(true);
@@ -760,6 +767,8 @@
         // Types and the clip table are both built by the scan, which runs after the XML
         // export settles — so they can never disagree about what is being cut.
         show(el.readhint, false);
+        // The destination folder is named after this sequence, so it is only knowable now.
+        setOutDest();
         refreshExportEnabled();
     }
 
@@ -899,16 +908,99 @@
             : "Nothing selected";
         if (!state.script && state.dump) {
             el["export"].textContent = "Find xmlcut.py first";
-            el.adv.open = true;
+            // The gear, not Advanced: the engine row moved there, so opening Advanced
+            // would reveal a compare command and a log rather than the thing to fix.
+            show(el.gearmenu, true);
+            el.gear.className = "gearbtn on";
         }
     }
 
     /* ----------------------------------------------------------- exporting */
 
+    /* "Save to" is a ROOT you pick once. Each export creates <root>/<sequence>/ inside it
+     * and writes there.
+     *
+     * Why it matters beyond tidiness: xmlcut numbers its output 01..N per run, so cutting
+     * three sequences into one folder interleaved three sets of 01_, 02_, 03_ … and the
+     * later runs overwrote the earlier ones wherever a name collided. A folder per sequence
+     * keeps each run's numbering meaning what it says.
+     *
+     * The folder name comes from the HOST (`safe_name`), which already has to turn a
+     * sequence name into a legal folder name for the read folder. folderSafe() below is
+     * only reached by a panel newer than the host.jsx beside it, which reinstalling fixes;
+     * it can disagree about the name but never about what gets cut. */
+    function folderSafe(name) {
+        var s = String(name === null || name === undefined ? "" : name);
+        var out = "", ch, c;
+        for (var i = 0; i < s.length; i++) {
+            ch = s.charAt(i);
+            c = s.charCodeAt(i);
+            if (c < 32) continue;                                   // control characters
+            out += (ch === "/" || ch === ":" || ch === "\\") ? "-" : ch;
+        }
+        out = out.replace(/^[\s.]+/, "").replace(/[\s.]+$/, "");
+        if (!out) out = "Untitled Sequence";
+        return out.length > 80 ? out.substring(0, 80) : out;
+    }
+
+    function seqFolder() {
+        if (!state.info) return "";
+        return String(state.info.safe_name || folderSafe(state.info.sequence));
+    }
+
+    /* Where THIS export writes. Empty until a sequence has been read, since the folder is
+     * named after it. Everything that touches the output — the argv, the manifest the
+     * report is built from, Show in Finder — goes through here so they cannot disagree. */
+    function outDir() {
+        if (!state.out) return "";
+        var f = seqFolder();
+        return f ? path.join(state.out, f) : state.out;
+    }
+
+    function countIn(dir) {
+        try {
+            return fs.readdirSync(dir).filter(function (n) {
+                return n.charAt(0) !== ".";
+            }).length;
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    /* Show the folder that will actually be written, before it is written. A root plus an
+     * invisible rule about what gets appended to it is worse than no rule. */
+    function setOutDest() {
+        if (!el.outdest) return;
+        if (!state.out) {
+            show(el.outdest, false);
+            return;
+        }
+        if (!state.info) {
+            el.outdest.className = "outdest";
+            el.outdest.textContent = "A folder named after the sequence is created in "
+                + "here when you export.";
+            el.outdest.title = "";
+            show(el.outdest, true);
+            return;
+        }
+        var d = outDir();
+        var n = countIn(d);
+        el.outdest.textContent = "→ " + seqFolder() + "/"
+            + (n > 0 ? ("  · exists already, " + n + " file(s) in it") : "");
+        // Flagged rather than merely mentioned: a re-export overwrites the names it
+        // reproduces and leaves everything else, so a folder from a DIFFERENT version of
+        // this timeline ends up holding a mix of both. Tick "skip clips already in that
+        // folder" to add only what is missing, or empty it first.
+        el.outdest.className = "outdest" + (n > 0 ? " warnish" : "");
+        el.outdest.title = d;
+        show(el.outdest, true);
+    }
+
     function setOut(p) {
         state.out = p || "";
         setPathLabel(el.outpath, state.out, 40);
         try { window.localStorage.setItem("xmlcut.out", state.out); } catch (e) {}
+        setOutDest();
         refreshExportEnabled();
     }
 
@@ -917,7 +1009,9 @@
         // Reset so the report shows THIS run's notes. The scan already ran the same merge,
         // so keeping its lines would print every one of them twice.
         state.merge = [];
-        var args = argsFor(state.out, false);
+        // The sequence's own folder inside the chosen root. xmlcut mkdir -p's whatever it
+        // is given, so there is nothing to create here.
+        var args = argsFor(outDir(), false);
         if (state.resume) args.push("--resume");
         // Only when something is actually unticked; otherwise the flag is noise.
         var pickPath = writePickFile(workDir());
@@ -1367,6 +1461,287 @@
         show(el.mergebox, true);
     }
 
+    /* ------------------------------------------- recovering the cut script */
+
+    /* If xmlcut.py is missing, the panel cannot ask xmlcut.py to fetch it. So this is the
+     * one place the panel does its own downloading, and it is deliberately the ONLY one —
+     * every other network operation still shells out to the engine.
+     *
+     * These constants necessarily duplicate UPDATE_OWNER/REPO/BRANCH/DIR in xmlcut.py.
+     * They cannot be read from it: the whole point is bootstrapping when it is absent. They
+     * are pinned literals rather than anything configurable for the same reason they are
+     * there — whoever controls that repo can run code on this machine.
+     */
+    var UPDATE_OWNER = "mill2nn";
+    var UPDATE_REPO = "xmlcut-releases";
+    var UPDATE_BRANCH = "main";
+    var UPDATE_DIR = "app";
+    var MAX_FETCH = 8 * 1024 * 1024;
+    var FETCH_TIMEOUT = 20000;
+
+    var https = null;
+    try { https = node ? node.require("https") : null; } catch (e) { https = null; }
+
+    /* Contents API first, then raw — the same order and the same reason as xmlcut.py:
+     * raw.githubusercontent is CDN-cached for five minutes and can answer with a stale
+     * file, while the contents API answers from the repository immediately. */
+    function fetchUrls(rel) {
+        var safe = rel.split("/").map(encodeURIComponent).join("/");
+        return [
+            ["https://api.github.com/repos/" + UPDATE_OWNER + "/" + UPDATE_REPO
+             + "/contents/" + safe + "?ref=" + UPDATE_BRANCH,
+             { "User-Agent": "xmlcut-panel", "Accept": "application/vnd.github.raw" }],
+            ["https://raw.githubusercontent.com/" + UPDATE_OWNER + "/" + UPDATE_REPO + "/"
+             + UPDATE_BRANCH + "/" + safe,
+             { "User-Agent": "xmlcut-panel" }]
+        ];
+    }
+
+    function httpGet(url, headers, done, depth) {
+        if (!https) { done(null, "this panel has no https module"); return; }
+        depth = depth || 0;
+        if (depth > 4) { done(null, "too many redirects"); return; }
+        var req;
+        try {
+            req = https.get(url, { headers: headers }, function (res) {
+                if (res.statusCode > 299 && res.statusCode < 400 && res.headers.location) {
+                    res.resume();
+                    httpGet(res.headers.location, headers, done, depth + 1);
+                    return;
+                }
+                if (res.statusCode !== 200) {
+                    res.resume();
+                    done(null, "HTTP " + res.statusCode);
+                    return;
+                }
+                // Text, and decoded as UTF-8 by the stream: xmlcut.py contains em dashes,
+                // and a multi-byte character split across two chunks must not be mangled.
+                res.setEncoding("utf8");
+                var buf = "", over = false;
+                res.on("data", function (c) {
+                    if (over) return;
+                    buf += c;
+                    // A cap, so a wrong URL or a hostile repo cannot hand this an
+                    // arbitrarily large body.
+                    if (buf.length > MAX_FETCH) {
+                        over = true;
+                        try { res.destroy(); } catch (e) {}
+                    }
+                });
+                res.on("end", function () {
+                    done(over ? null : buf,
+                         over ? "the response exceeded the 8 MB cap" : null);
+                });
+                res.on("error", function (e) { done(null, String(e)); });
+            });
+        } catch (e) {
+            done(null, String(e));
+            return;
+        }
+        req.on("error", function (e) { done(null, String(e)); });
+        req.setTimeout(FETCH_TIMEOUT, function () {
+            try { req.destroy(); } catch (e) {}
+            done(null, "timed out after " + (FETCH_TIMEOUT / 1000) + "s");
+        });
+    }
+
+    /* Try each URL in turn; report the last failure if none answered. */
+    function fetchRel(rel, done) {
+        var urls = fetchUrls(rel), i = 0, lastErr = "no attempt made";
+        function attempt() {
+            if (i >= urls.length) { done(null, lastErr); return; }
+            var u = urls[i++];
+            httpGet(u[0], u[1], function (text, err) {
+                if (text) { done(text, null); return; }
+                lastErr = err;
+                log("fetch " + rel + " failed: " + err);
+                attempt();
+            });
+        }
+        attempt();
+    }
+
+    /* Is this actually xmlcut.py, or an error page / a truncated download?
+     *
+     * The panel writes an executable Python file, so it validates before writing rather
+     * than after — the same bargain apply_update() makes, for the same reason: a
+     * half-written engine is worse than a missing one, because a missing one says so. */
+    function engineComplaint(text, wantVersion) {
+        if (!text || text.length < 2000) {
+            return "the download is far too small to be xmlcut.py";
+        }
+        var m = text.match(/VERSION\s*=\s*"([^"]+)"/);
+        if (!m) return "the download has no VERSION line";
+        if (wantVersion && m[1] !== wantVersion) {
+            return "the download says " + m[1] + ", not the " + wantVersion
+                 + " the channel promised";
+        }
+        // Markers a real engine has and an error page, a redirect stub or a truncated
+        // body does not.
+        if (text.indexOf("PPRO_TICKS_PER_SECOND") < 0
+            || text.indexOf("def build_command") < 0
+            || text.indexOf("def run_cut") < 0) {
+            return "the download does not look like xmlcut.py";
+        }
+        return "";
+    }
+
+    function setEngineStat(cls, text) {
+        el.enginestat.className = "enginestat" + (cls ? " " + cls : "");
+        el.enginestat.textContent = text;
+    }
+
+    /* The useful line of a subprocess failure. A SyntaxError arrives as a four-line
+     * traceback whose last line is the only part worth showing in a 320px panel. */
+    function lastLine(s) {
+        var parts = String(s || "").split("\n").filter(function (l) {
+            return l.trim() !== "";
+        });
+        return parts.length ? parts[parts.length - 1].trim() : "no reply";
+    }
+
+    /* Is this path the copy the panel owns? Only that one is ever replaced automatically —
+     * a script somewhere else is his own checkout, and not ours to overwrite. */
+    function isOurCopy(p) {
+        var dir = extensionDir();
+        return !!(dir && p && String(p).indexOf(dir + "/lib/") === 0);
+    }
+
+    /* Prove the script RUNS, not merely that a file exists at that path. A zero-byte or
+     * half-copied xmlcut.py passes an existence check and then fails at export time, which
+     * is the worst moment to find out. */
+    function probeEngine(then) {
+        setEngineStat("busy", "Checking it runs…");
+        runJson(["--check-update-json"], function (r, e) {
+            if (r && r.current) {
+                el.ver.textContent = "v" + r.current;
+                setEngineStat("good",
+                    (state.bundled && state.bundled === state.script
+                        ? "bundled with this panel" : "found") + " · v" + r.current
+                    + " · runs");
+                if (then) then(true);
+                return;
+            }
+            setEngineStat("bad", "xmlcut.py is there but did not run — " + lastLine(e));
+            // A broken copy of OUR OWN file is worth replacing without being asked: it is
+            // only ever a copy, the panel cannot do anything without it, and "present" was
+            // never the same as "works". Once only, so a download that also fails to run
+            // cannot loop.
+            if (isOurCopy(state.script) && !state.repaired) {
+                state.repaired = true;
+                log("the bundled engine does not run; fetching a fresh copy");
+                setEngineStat("busy", "That copy is damaged — fetching a fresh one…");
+                downloadEngine(true);
+                return;
+            }
+            if (then) then(false);
+        });
+    }
+
+    /* The whole recovery, in order: is it there → does it run → if absent, download it,
+     * validate it, write it into the panel and link it.
+     *
+     * `auto` is true when this ran by itself on open. He asked for the download to happen
+     * without being asked, and it only ever happens when NO engine could be found —
+     * an existing one is never replaced from here. */
+    function recheckScript(auto) {
+        if (state.fetching) return;
+        clearError();
+        state.repaired = false;         // a deliberate re-check earns one repair attempt
+        var found = findScript();
+        if (found) {
+            setScript(found);
+            probeEngine();
+            return;
+        }
+        downloadEngine(auto);
+    }
+
+    /* Fetch, validate, write, link. Separate from recheckScript because probeEngine also
+     * needs it: a bundled copy that exists but will not run has to be replaced, and going
+     * back through the search would only rediscover the broken file. */
+    function downloadEngine(auto) {
+        if (state.fetching) return;
+        var dir = extensionDir();
+        if (!dir) {
+            setEngineStat("bad", "xmlcut.py is missing and this panel cannot work out "
+                          + "where it is installed, so it cannot repair itself. Press Find.");
+            return;
+        }
+        if (!https) {
+            setEngineStat("bad", "xmlcut.py is missing and this panel has no network "
+                          + "module to fetch it. Re-run the installer, or press Find.");
+            return;
+        }
+
+        state.fetching = true;
+        el.recheck.disabled = true;
+        show(el.gearmenu, true);           // whatever happens next, he should see it
+        setEngineStat("busy", "xmlcut.py is missing — asking the release channel…");
+        log("cut script missing; " + (auto ? "auto-" : "") + "recovering from "
+            + UPDATE_OWNER + "/" + UPDATE_REPO);
+
+        function stop(cls, msg) {
+            state.fetching = false;
+            el.recheck.disabled = false;
+            setEngineStat(cls, msg);
+            log("cut script recovery: " + msg);
+        }
+
+        fetchRel("latest.json", function (text, err) {
+            if (!text) {
+                stop("bad", "could not reach the release channel (" + err
+                     + "). Press Find and point at xmlcut.py, or re-run the installer.");
+                return;
+            }
+            var want = "";
+            try { want = String(JSON.parse(text).version || ""); } catch (e) {}
+            if (!want) {
+                stop("bad", "the release channel did not name a version.");
+                return;
+            }
+            setEngineStat("busy", "Downloading xmlcut.py " + want + "…");
+            fetchRel(UPDATE_DIR + "/xmlcut.py", function (body, err2) {
+                if (!body) {
+                    stop("bad", "the download failed (" + err2 + ").");
+                    return;
+                }
+                var bad = engineComplaint(body, want);
+                if (bad) {
+                    // Nothing is written. A rejected download leaves the panel exactly as
+                    // it was: missing an engine and saying so.
+                    stop("bad", "refused the download — " + bad + ". Nothing was written.");
+                    return;
+                }
+                var lib = dir + "/lib";
+                var target = lib + "/xmlcut.py";
+                try {
+                    fs.mkdirSync(lib, { recursive: true });
+                    fs.writeFileSync(target, body, "utf8");
+                } catch (e3) {
+                    stop("bad", "could not write " + target + " (" + e3 + ").");
+                    return;
+                }
+                state.fetching = false;
+                el.recheck.disabled = false;
+                log("cut script written: " + target + " (" + body.length + " bytes)");
+                // Link it, then prove it runs before calling this a success.
+                state.bundled = target;
+                setScript(target);
+                probeEngine(function (ok) {
+                    if (!ok) return;
+                    setEngineStat("good", "downloaded " + want
+                                  + " and linked · restart Premiere is not needed");
+                    // The cut list could not be produced without an engine. Now it can.
+                    if (state.dump && !state.busy) {
+                        setBusy(true, "Reading…");
+                        scanClips();
+                    }
+                });
+            });
+        });
+    }
+
     /* ------------------------------------------------------------ updates */
 
     /* The panel does not implement any of this — it shells out to xmlcut.py, which
@@ -1421,6 +1796,17 @@
         }
         runJson(["--check-update-json"], function (r, e) {
             el.checkupd.disabled = false;
+            // The same reply proves the engine runs, so the gear's status line is set from
+            // here too rather than costing a second subprocess.
+            if (r && r.current) {
+                setEngineStat("good",
+                    (state.bundled && state.bundled === state.script
+                        ? "bundled with this panel" : "found") + " · v" + r.current
+                    + " · runs");
+            } else if (state.script) {
+                setEngineStat("bad", "xmlcut.py is at that path but did not run: "
+                              + (e || "no reply") + ". Check python3 is installed.");
+            }
             if (!r) {
                 log("update check failed: " + e);
                 if (manual) {
@@ -1465,12 +1851,12 @@
             if (r.source_checkout) {
                 // This copy is a git checkout, so xmlcut.py refuses to overwrite it.
                 // Saying so beats offering a button that cannot work.
-                setUpd("busy", "xmlcut " + r.update.version
+                setUpd("busy", "auto bits " + r.update.version
                        + " is out — this copy is a git checkout, so use git pull", "");
                 return;
             }
             state.updateInfo = r.update;
-            setUpd("", "xmlcut " + r.update.version + " is available"
+            setUpd("", "auto bits " + r.update.version + " is available"
                    + (r.update.notes ? " — " + r.update.notes : ""), "Update");
         });
     }
@@ -1486,9 +1872,20 @@
             for (var i = 0; i < (r.steps || []).length; i++) log("update: " + r.steps[i]);
             log("update result: " + r.message);
             if (r.ok) {
-                setUpd("done", "Updated to " + r.version
-                       + ". Quit Premiere (Cmd-Q) and reopen it to load the new panel.",
-                       "");
+                // Only a PANEL file needs Premiere restarting — Premiere loads this HTML
+                // and JS once, at launch. The cut engine is a subprocess spawned fresh for
+                // every export, so a release that only changes the cutting logic is live
+                // immediately. Saying "quit and reopen" every time trains people to ignore
+                // it on the one occasion it matters.
+                var restart = (r.restart_needed !== false);
+                setUpd("done", restart
+                    ? ("Updated to " + r.version
+                       + ". Quit Premiere (Cmd-Q) and reopen it to load the new panel.")
+                    : ("Updated to " + r.version
+                       + " — cut engine only, so it is already live. No restart needed; "
+                       + "your next export uses it."), "");
+                log("update changed: " + ((r.changed || []).join(", ") || "nothing"));
+                readVersion();
             } else {
                 setUpd("bad", r.message, "");
             }
@@ -1503,7 +1900,7 @@
      * count, the native length, the speed, and the length it occupied on the timeline. */
     function manifestMtime() {
         try {
-            return fs.statSync(path.join(state.out, "manifest.json")).mtimeMs;
+            return fs.statSync(path.join(outDir(), "manifest.json")).mtimeMs;
         } catch (e) {
             return 0;
         }
@@ -1519,7 +1916,7 @@
         }
         var data;
         try {
-            data = JSON.parse(fs.readFileSync(path.join(state.out, "manifest.json"),
+            data = JSON.parse(fs.readFileSync(path.join(outDir(), "manifest.json"),
                                               "utf8"));
         } catch (e) {
             log("no manifest to report on: " + e);
@@ -1787,10 +2184,22 @@
         }
     }
 
-    el.reveal.addEventListener("click", function () { reveal(state.out); });
+    // The sequence's folder, which is where the clips are. Falls back to the root if the
+    // export never got as far as creating it.
+    el.reveal.addEventListener("click", function () {
+        var d = outDir();
+        reveal(exists(d) ? d : state.out);
+    });
     el.showsaved.addEventListener("click", function () { reveal(state.folder); });
     el.updbtn.addEventListener("click", applyUpdate);
     el.checkupd.addEventListener("click", function () { checkUpdate(true); });
+    el.recheck.addEventListener("click", function () { recheckScript(false); });
+
+    el.gear.addEventListener("click", function () {
+        var open = el.gearmenu.hidden;
+        show(el.gearmenu, open);
+        el.gear.className = "gearbtn" + (open ? " on" : "");
+    });
 
     /* --------------------------------------------------------------- boot */
 
@@ -1819,11 +2228,22 @@
                     log("host found xmlcut.py: " + r.found);
                     setScript(r.found);
                     if (state.dump && !state.busy) { setBusy(true, "Reading…"); scanClips(); }
+                    // checkUpdate also sets the engine status line, so this is one
+                    // subprocess rather than two saying overlapping things.
                     checkUpdate(false);
                 } else {
                     // Re-run the panel-side search now that home is known for certain.
                     var again = findScript();
-                    if (again) setScript(again);
+                    if (again) {
+                        setScript(again);
+                        checkUpdate(false);
+                    } else {
+                        // Every search has failed. Rather than sit there telling him to go
+                        // find a file, fetch it — this is exactly the state the panel got
+                        // stuck in before, with the engine sitting in plain sight in a
+                        // folder macOS would not let it stat.
+                        recheckScript(true);
+                    }
                 }
             });
         }

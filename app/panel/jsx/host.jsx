@@ -1,5 +1,5 @@
 /*
- * xmlcut reader — dump the ACTIVE Premiere sequence to JSON.
+ * auto bits — dump the ACTIVE Premiere sequence to JSON.
  *
  * Read-only. Nothing in the project is modified, nothing is rendered. The only
  * side effect is a timestamped .json written beside the Premiere project, under
@@ -671,6 +671,11 @@ function dumpActiveSequence() {
         result.pruned = pruneOldReads(dir);
         result.keep_reads = KEEP_READS;
         result.sequence = data.sequence.name;
+        // The sequence name made safe to be a folder. Returned so the panel can name the
+        // export's subfolder without a second copy of this rule — safeName() already has
+        // to exist here to name the read folder, and two implementations of "what is a
+        // legal folder name" would drift.
+        result.safe_name = safeName(data.sequence.name);
         result.fps = data.sequence.fps;
         result.clips = data.clips.length;
         result.video_clips = vids;

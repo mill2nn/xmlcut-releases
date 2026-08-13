@@ -2,16 +2,32 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>xmlcut</title>
+    <title>auto bits</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <header>
-    <h1>xmlcut</h1>
+    <h1>auto bits</h1>
     <span id="ver" class="ver"></span>
-    <button id="checkupd" class="linkbtn">check for updates</button>
+    <button id="gear" class="gearbtn" title="Settings &amp; maintenance">⚙</button>
 </header>
+
+<!-- Everything that is about the TOOL rather than about this timeline. It was competing
+     with step 1 for attention in the header and in Advanced. -->
+<section id="gearmenu" class="gearmenu" hidden>
+    <p class="lbl">Cut script
+        <span class="q" data-tip="xmlcut.py — the engine that does the cutting. It ships inside this panel, so normally there is nothing to do here. Re-check confirms it is present and runnable, and downloads it from the release channel if it has gone missing.">?</span>
+    </p>
+    <div id="enginestat" class="enginestat">checking…</div>
+    <div class="pathrow">
+        <span id="scriptpath" class="path">looking…</span>
+        <button id="pickscript" class="mini" hidden>Find</button>
+    </div>
+    <div id="scripthelp" class="typehint" hidden></div>
+    <button id="recheck" class="mini wide">Re-check cut script</button>
+    <button id="checkupd" class="mini wide">Check for updates</button>
+</section>
 
 <div id="updbar" class="updbar" hidden>
     <div class="updtext" id="updtext"></div>
@@ -60,12 +76,13 @@
     <div id="typehint" class="typehint" hidden></div>
 
     <p class="lbl">Save to
-        <span class="q" data-tip="Each cut becomes its own video file here, plus clips.csv with the speed, length and frame count of every one.">?</span>
+        <span class="q" data-tip="Pick this once. Every export makes a folder named after the sequence inside it and writes there — so cutting several sequences into one place keeps each set of clips separate, with its own 01..N numbering and its own clips.csv.">?</span>
     </p>
     <div class="pathrow">
         <span id="outpath" class="path">—</span>
         <button id="pickout" class="mini">Change</button>
     </div>
+    <div id="outdest" class="outdest" hidden></div>
     <label class="tick spaced"><input type="checkbox" id="resume">skip clips already
         in that folder
         <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. Useful after fixing offline media on a long timeline.">?</span>
@@ -136,12 +153,6 @@
 
 <details id="adv">
     <summary>Advanced</summary>
-    <p class="lbl">Engine</p>
-    <div id="enginerow" class="pathrow">
-        <span id="scriptpath" class="path">looking…</span>
-        <button id="pickscript" class="mini" hidden>Find</button>
-    </div>
-    <div id="scripthelp" class="typehint" hidden></div>
     <p class="lbl">Compare this sequence against its XML export</p>
     <code id="cmd"></code>
     <p class="lbl">Log</p>
