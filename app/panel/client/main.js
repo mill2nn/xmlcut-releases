@@ -32,7 +32,7 @@
                "readprog", "readfill", "readtext", "pickall", "checkupd", "outdest",
                "gear", "gearmenu", "enginestat", "recheck",
                "repcomplete", "repdestrow", "repdest", "repdestlbl", "mergedet", "mergesum",
-               "jobtally", "joblist", "stalled",
+               "jobtally", "joblist", "stalled", "copyout", "copydest",
                "onlyproblab"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
@@ -2244,6 +2244,26 @@
         }
     }
 
+    /* A CEP panel has no reliable navigator.clipboard, so everything goes through a
+     * textarea and execCommand, which does work in the embedded Chromium. One helper,
+     * because there are now three things worth copying. */
+    function copyText(text, btn, label) {
+        var ta = document.createElement("textarea");
+        ta.value = String(text || "");
+        ta.style.position = "fixed";
+        ta.style.top = "-1000px";
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = false;
+        try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+        document.body.removeChild(ta);
+        var was = btn.textContent;
+        btn.textContent = ok ? "Copied" : "Failed";
+        if (!ok) log("could not copy: " + text);
+        setTimeout(function () { btn.textContent = label || was; }, 1400);
+        return ok;
+    }
+
     /* Copies exactly what is on screen, so ticking "only problems" and pressing Copy
      * gives you the list of things to fix and nothing else. */
     function reportText() {
@@ -2372,21 +2392,15 @@
     });
 
     el.copyrep.addEventListener("click", function () {
-        var t = reportText();
-        // A CEP panel has no reliable navigator.clipboard, so go through a textarea
-        // and execCommand, which does work in the embedded Chromium.
-        var ta = document.createElement("textarea");
-        ta.value = t;
-        ta.style.position = "fixed";
-        ta.style.top = "-1000px";
-        document.body.appendChild(ta);
-        ta.select();
-        var ok = false;
-        try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
-        document.body.removeChild(ta);
-        el.copyrep.textContent = ok ? "Copied" : "Copy failed — see the log";
-        if (!ok) log(t);
-        setTimeout(function () { el.copyrep.textContent = "Copy report"; }, 1600);
+        copyText(reportText(), el.copyrep, "Copy report");
+    });
+
+    // The FULL path, not the shortened label on screen — what you paste to a teammate.
+    el.copyout.addEventListener("click", function () {
+        copyText(state.out, el.copyout, "Copy");
+    });
+    el.copydest.addEventListener("click", function () {
+        copyText(outDir(), el.copydest, "Copy");
     });
 
     function reveal(dir) {

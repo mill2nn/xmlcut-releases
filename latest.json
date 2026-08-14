@@ -1,6 +1,6 @@
 {
-  "version": "3.14",
-  "notes": "Renamed to Raw-cutter. Fixes clips under transitions being dropped, live per-clip progress while cutting, and a warning when a file type on your timeline is switched off.",
+  "version": "3.16",
+  "notes": "Copy-path buttons, and the audit implemented: the fixture now actually tests the transition fix, the panel dump path has a test, and clips that are skipped say why. Fixes a nested sequence between two transitions being dropped.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

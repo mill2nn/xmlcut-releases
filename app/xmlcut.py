@@ -40,7 +40,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "3.14"
+VERSION = "3.16"
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -880,6 +880,10 @@ class Timeline:
         self.sequence_fps = 25.0
         self.sequence_duration_frames = 0
         self.available_sequences: list[dict] = []
+        # Why clipitems did not become cuts. Counted rather than warned one-by-one: a real
+        # timeline had 31 title graphics with no media, and 31 identical warnings is a wall
+        # nobody reads. Summarised at the end of _parse().
+        self.skipped: dict = {}
         self._parse()
 
     @staticmethod
@@ -1033,7 +1037,8 @@ class Timeline:
                     # from the dataset with nothing to show they were missing.
                     if clip.find("sequence") is not None:
                         self.cuts.extend(
-                            self._parse_nested(clip, track_type, t_idx, depth=1))
+                            self._parse_nested(clip, track_type, t_idx,
+                                               depth=1, edges=edges))
                         continue
                     cut = self._parse_clipitem(clip, track_type, t_idx,
                                                transitions, edges=edges)
@@ -1041,6 +1046,16 @@ class Timeline:
                         self.cuts.append(cut)
 
         # order by timeline position, video first
+        # Everything that did not become a cut, said once per reason. This is what makes
+        # "the export has fewer clips than the timeline" self-diagnosing instead of a
+        # bug report.
+        for why, e in sorted(self.skipped.items()):
+            names = ", ".join(e["names"])
+            more = "" if e["count"] <= len(e["names"]) else ", …"
+            self.warnings.append(
+                f"{e['count']} clipitem(s) were not cut — {why}"
+                + (f": {names}{more}" if names else ""))
+
         self.cuts.sort(key=lambda c: (c.timeline_in_frames, c.track_type != "video", c.track_index))
         for i, c in enumerate(self.cuts, start=1):
             c.index = i
@@ -1069,24 +1084,33 @@ class Timeline:
 
         Returns {id(clipitem element): (start, end)} for the ones that needed resolving.
         """
+        # `num(x) or -1` would turn a legitimate ZERO into -1 — and a transition starting
+        # on frame 0 is perfectly ordinary. That bug was in this function until a nested
+        # sequence under a first-frame dissolve refused to resolve and the new fixture
+        # caught it. Read the value, then test it; never lean on truthiness for a number
+        # whose valid range includes 0.
+        def frame(node, field):
+            v = num(node, field, -1)
+            return -1 if v is None else int(v)
+
         kids = [k for k in track if k.tag in ("clipitem", "transitionitem")]
         fixed: dict = {}
         for i, node in enumerate(kids):
             if node.tag != "clipitem":
                 continue
-            start = int(num(node, "start", -1) or -1)
-            end = int(num(node, "end", -1) or -1)
+            start = frame(node, "start")
+            end = frame(node, "end")
             if start >= 0 and end >= 0:
                 continue
             if start < 0:
                 for j in range(i - 1, -1, -1):
                     if kids[j].tag == "transitionitem":
-                        start = int(num(kids[j], "start", -1) or -1)
+                        start = frame(kids[j], "start")
                         break
             if end < 0:
                 for j in range(i + 1, len(kids)):
                     if kids[j].tag == "transitionitem":
-                        end = int(num(kids[j], "end", -1) or -1)
+                        end = frame(kids[j], "end")
                         break
             # Only claim a fix when BOTH ends are now real and the span is positive.
             # A -1 with no transition beside it is something else, and guessing at it
@@ -1106,7 +1130,8 @@ class Timeline:
             })
         return out
 
-    def _parse_nested(self, clip, track_type, t_idx, depth: int) -> list[Cut]:
+    def _parse_nested(self, clip, track_type, t_idx, depth: int,
+                      edges: Optional[dict] = None) -> list[Cut]:
         """Resolve a clipitem that contains a <sequence> instead of a <file>.
 
         The cuts are inside the nest; what the parent timeline contributes is a window
@@ -1133,6 +1158,13 @@ class Timeline:
         clip_fps = parse_rate(clip.find("rate"), self.sequence_fps)
         nest_start = num(clip, "start", 0) or 0
         nest_end = num(clip, "end", 0) or 0
+        # A NEST can sit under a transition too, and then its own start/end are -1 like any
+        # other clipitem. Both -1 used to mean "skipped" — losing every clip inside it, on a
+        # timeline where the nest is plainly there. Same sentinel, same resolution.
+        if edges:
+            fixed = edges.get(id(clip))
+            if fixed:
+                nest_start, nest_end = fixed
         nest_in = num(clip, "in", 0) or 0
         nest_out = num(clip, "out", 0) or 0
         if nest_out <= nest_in:
@@ -1225,6 +1257,19 @@ class Timeline:
             self.warnings.append(f"{name}: nested sequence resolved to no visible cuts")
         return out
 
+    def _skip(self, why: str, name: str = "") -> None:
+        """Record a clipitem that did not become a cut.
+
+        Every one of these used to be a bare `return None`. Individually defensible;
+        collectively they meant "my export has fewer clips than my timeline" had eight
+        possible causes and only two of them said anything. The -1 transition bug hid here
+        for weeks.
+        """
+        e = self.skipped.setdefault(why, {"count": 0, "names": []})
+        e["count"] += 1
+        if name and len(e["names"]) < 4 and name not in e["names"]:
+            e["names"].append(name)
+
     def _parse_clipitem(self, clip, track_type, t_idx, transitions,
                         seq_fps: Optional[float] = None,
                         edges: Optional[dict] = None) -> Optional[Cut]:
@@ -1234,10 +1279,18 @@ class Timeline:
         seq_fps = self.sequence_fps if seq_fps is None else seq_fps
         file_node = clip.find("file")
         if file_node is None:
+            # Premiere's synthetic items — Black Video, Slug, colour mattes. There is no
+            # media to cut, which is correct, but it should not happen invisibly.
+            self._skip("no media behind them (synthetic items such as Black Video or Slug)",
+                       txt(clip, "name"))
             return None
         fid = self._register_file(file_node)
         finfo = self.files.get(fid, {})
         if not finfo.get("path"):
+            # An id-only <file> whose full definition is nowhere in the document. This is
+            # the same shape as the bug fixed in 3.10, where files defined under another
+            # sequence were never registered — so if it fires, say so loudly.
+            self._skip("a <file> reference the XML never defines", txt(clip, "name"))
             return None
 
         start = num(clip, "start", 0) or 0
@@ -1249,6 +1302,12 @@ class Timeline:
         # worked it out from the track's item order. Without this, a clip sitting between
         # two transitions has start = end = -1 and is discarded three lines below —
         # silently, on a timeline where it is plainly present.
+        #
+        # The RAW values are kept because they are what says "a transition defines this
+        # edge". Resolving them and then testing the resolved values lost that fact, and
+        # with it the `edge_in_transition` flag — which suppresses a false merge warning
+        # and tells the reader the clip carries handle frames under a dissolve.
+        raw_start, raw_end = start, end
         if edges:
             fixed = edges.get(id(clip))
             if fixed:
@@ -1276,16 +1335,25 @@ class Timeline:
         if dur_frames <= 0:
             dur_frames = int(round(c_out - c_in))
         if dur_frames <= 0:
+            self._skip("no usable length — neither start/end nor in/out give one",
+                       txt(clip, "name"))
             return None
 
         # Premiere writes start or end as -1 when that edge is buried under a
         # transition. Rebuild the real edge from the other side + duration,
         # otherwise the clip sorts to the top with a nonsense timecode.
-        edge = ""
+        # Which edge a transition defines — read from the RAW values, so it is still known
+        # after resolve_transition_edges() has filled them in.
+        edge = ("both" if (raw_start < 0 and raw_end < 0)
+                else "head" if raw_start < 0
+                else "tail" if raw_end < 0
+                else "")
+        # Still unresolved (no transition beside it): fall back to sizing from out-in, as
+        # before. The span is right even though the placement is inferred.
         if start < 0 and end >= 0:
-            start, edge = end - dur_frames, "head"
+            start = end - dur_frames
         elif end < 0 and start >= 0:
-            end, edge = start + dur_frames, "tail"
+            end = start + dur_frames
 
         ext = Path(finfo["path"]).suffix.lower()
         if ext in UNSUPPORTED_EXT:
