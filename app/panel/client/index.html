@@ -2,13 +2,13 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>auto bits</title>
+    <title>Raw-cutter</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <header>
-    <h1>auto bits</h1>
+    <h1>Raw-cutter</h1>
     <span id="ver" class="ver"></span>
     <button id="gear" class="gearbtn" title="Settings &amp; maintenance">⚙</button>
 </header>
@@ -121,9 +121,16 @@
 </section>
 
 <section id="prog" hidden>
-    <div class="stephead">Exporting</div>
+    <div class="stephead">Exporting
+        <span class="q" data-tip="Clips are encoded several at a time. A clip that has been running for a while is normal on large or network-stored media — what matters is that the elapsed times keep moving. If nothing changes for a long time the panel says so.">?</span>
+    </div>
     <div class="bar"><div id="barfill" class="fill"></div></div>
     <div id="progtext" class="hint">Starting…</div>
+    <!-- Per-clip state, live. The bar alone only moved when a clip FINISHED, and with
+         several encoding at once that could be minutes of nothing. -->
+    <div id="jobtally" class="hint"></div>
+    <div id="joblist" class="rows"></div>
+    <div id="stalled" class="note warn" hidden></div>
     <button id="cancel" class="mini wide">Cancel</button>
 </section>
 
@@ -138,7 +145,10 @@
     <div id="tally" class="tally"></div>
     <!-- Accounts for "25 matched" vs "18 written", which nothing used to. -->
     <div id="repcomplete" class="hint" hidden></div>
-    <!-- Where the clips actually went. The report had a Show button and never said. -->
+    <!-- Where the clips actually went, said in words as well as shown as a path.
+         Clips go into a folder named after the SEQUENCE, and someone used to the old
+         behaviour looks in the root, finds it empty, and reports files as missing. -->
+    <div id="repdestlbl" class="hint" hidden></div>
     <div class="pathrow" id="repdestrow" hidden>
         <span id="repdest" class="path">—</span>
     </div>

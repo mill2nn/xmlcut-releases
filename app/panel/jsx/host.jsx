@@ -1,5 +1,5 @@
 /*
- * auto bits — dump the ACTIVE Premiere sequence to JSON.
+ * Raw-cutter — dump the ACTIVE Premiere sequence to JSON.
  *
  * Read-only. Nothing in the project is modified, nothing is rendered. The only
  * side effect is a timestamped .json written beside the Premiere project, under

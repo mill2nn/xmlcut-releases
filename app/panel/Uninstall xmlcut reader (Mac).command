@@ -1,5 +1,5 @@
 #!/bin/bash
-# Remove the auto bits panel. Leaves PlayerDebugMode alone, because other
+# Remove the Raw-cutter panel. Leaves PlayerDebugMode alone, because other
 # unsigned panels on this machine (Omni Link) need it.
 set -euo pipefail
 

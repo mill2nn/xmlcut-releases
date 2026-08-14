@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-auto bits - extract every cut of a Premiere Pro timeline as an individual video file.
+Raw-cutter - extract every cut of a Premiere Pro timeline as an individual video file.
 
 Reads a Final Cut Pro 7 XML export (Premiere: File > Export > Final Cut Pro XML),
 resolves each clipitem back to its source media, and uses ffmpeg to cut the exact
@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import urllib.parse
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -39,14 +40,14 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
-VERSION = "3.11"
+VERSION = "3.14"
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
 # GENERATOR string and the panel's localStorage keys are all load-bearing, and renaming
 # any of them would break every installed copy's updater, duplicate the panel in
 # Premiere's Extensions menu, or silently drop saved settings.
-NAME = "auto bits"
+NAME = "Raw-cutter"
 
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
@@ -1024,6 +1025,7 @@ class Timeline:
                 continue
             for t_idx, track in enumerate(section.findall("track"), start=1):
                 transitions = self._collect_transitions(track)
+                edges = self.resolve_transition_edges(track)
                 for clip in track.findall("clipitem"):
                     # A clipitem holds EITHER a <file> or a nested <sequence>. Skipping
                     # the latter silently drops every cut inside the nest — real
@@ -1033,7 +1035,8 @@ class Timeline:
                         self.cuts.extend(
                             self._parse_nested(clip, track_type, t_idx, depth=1))
                         continue
-                    cut = self._parse_clipitem(clip, track_type, t_idx, transitions)
+                    cut = self._parse_clipitem(clip, track_type, t_idx,
+                                               transitions, edges=edges)
                     if cut:
                         self.cuts.append(cut)
 
@@ -1041,6 +1044,56 @@ class Timeline:
         self.cuts.sort(key=lambda c: (c.timeline_in_frames, c.track_type != "video", c.track_index))
         for i, c in enumerate(self.cuts, start=1):
             c.index = i
+
+    @staticmethod
+    def resolve_transition_edges(track: ET.Element) -> dict:
+        """Timeline bounds for clipitems whose <start>/<end> is -1.
+
+        FCP7 writes -1 for a clipitem boundary that an ADJACENT TRANSITION defines. The
+        items of a track are in timeline order, so a -1 start is the preceding
+        transitionitem's start and a -1 end is the following transitionitem's end:
+
+            [20] clipitem  IMG_0283   start= 775  end=  -1   in= 217 out= 279
+            [21] transitionitem       start= 807  end= 837
+            [22] clipitem  scene3.2   start=  -1  end=  -1   in= 949 out=1130
+            [23] transitionitem       start= 970  end= 988
+            [24] clipitem  scene1-1   start=  -1  end=1063   in= 205 out= 298
+
+        Clip 22 therefore spans 807→988 = 181 frames, exactly its out-in. Clip 24 spans
+        970→1063 = 93, clip 20 spans 775→837 = 62 — all three match out-in exactly.
+
+        Until this existed, `duration_frames = end - start` came out zero or negative for
+        every such clip and the `--min-frames` filter dropped them WITHOUT A WORD. On one
+        real timeline that was 46 clipitems, 3 of them cuttable video and 12 stills: the
+        clips were on the timeline, in the XML, and simply absent from the output.
+
+        Returns {id(clipitem element): (start, end)} for the ones that needed resolving.
+        """
+        kids = [k for k in track if k.tag in ("clipitem", "transitionitem")]
+        fixed: dict = {}
+        for i, node in enumerate(kids):
+            if node.tag != "clipitem":
+                continue
+            start = int(num(node, "start", -1) or -1)
+            end = int(num(node, "end", -1) or -1)
+            if start >= 0 and end >= 0:
+                continue
+            if start < 0:
+                for j in range(i - 1, -1, -1):
+                    if kids[j].tag == "transitionitem":
+                        start = int(num(kids[j], "start", -1) or -1)
+                        break
+            if end < 0:
+                for j in range(i + 1, len(kids)):
+                    if kids[j].tag == "transitionitem":
+                        end = int(num(kids[j], "end", -1) or -1)
+                        break
+            # Only claim a fix when BOTH ends are now real and the span is positive.
+            # A -1 with no transition beside it is something else, and guessing at it
+            # would be worse than reporting it.
+            if start >= 0 and end > start:
+                fixed[id(node)] = (start, end)
+        return fixed
 
     def _collect_transitions(self, track: ET.Element) -> list[dict]:
         out = []
@@ -1114,12 +1167,13 @@ class Timeline:
         out: list[Cut] = []
         for track in section.findall("track"):
             transitions = self._collect_transitions(track)
+            edges = self.resolve_transition_edges(track)
             for inner in track.findall("clipitem"):
                 if inner.find("sequence") is not None:
                     out.extend(self._parse_nested(inner, track_type, t_idx, depth + 1))
                     continue
                 c = self._parse_clipitem(inner, track_type, t_idx, transitions,
-                                         seq_fps=nest_fps)
+                                         seq_fps=nest_fps, edges=edges)
                 if c is None:
                     continue
 
@@ -1172,7 +1226,8 @@ class Timeline:
         return out
 
     def _parse_clipitem(self, clip, track_type, t_idx, transitions,
-                        seq_fps: Optional[float] = None) -> Optional[Cut]:
+                        seq_fps: Optional[float] = None,
+                        edges: Optional[dict] = None) -> Optional[Cut]:
         # seq_fps overrides the sequence rate when this clipitem lives inside a nested
         # sequence — its timeline positions are counted in the NEST's rate, not the
         # parent's, and conflating the two shifts every nested cut.
@@ -1190,7 +1245,23 @@ class Timeline:
         c_in = num(clip, "in", 0) or 0
         c_out = num(clip, "out", 0) or 0
 
+        # A -1 boundary is one the adjacent TRANSITION defines; resolve_transition_edges()
+        # worked it out from the track's item order. Without this, a clip sitting between
+        # two transitions has start = end = -1 and is discarded three lines below —
+        # silently, on a timeline where it is plainly present.
+        if edges:
+            fixed = edges.get(id(clip))
+            if fixed:
+                start, end = fixed
+
         if start < 0 and end < 0:
+            # Still unresolved: no transition beside it to take the boundary from. Guessing
+            # would be worse, but vanishing without a word is worst of all — this is exactly
+            # the failure that had clips missing from an export with nothing to explain it.
+            self.warnings.append(
+                f"{txt(clip, 'name') or 'a clip'} on {track_type} track {t_idx} has no "
+                f"timeline position in the XML (start and end are both -1) and no "
+                f"transition beside it to take one from — it was NOT cut")
             return None
 
         # CRITICAL: <in>/<out> are expressed in the CLIPITEM's rate — which Premiere
@@ -1319,7 +1390,7 @@ class Timeline:
 # --------------------------------------------------------------------------
 
 class DumpTimeline:
-    """A Timeline built from the auto bits panel's JSON instead of an XML.
+    """A Timeline built from the Raw-cutter panel's JSON instead of an XML.
 
     Deliberately duck-types `Timeline`: same attribute names, same `Cut` objects, so
     every downstream stage — naming, probing, building the ffmpeg command, the
@@ -1385,7 +1456,7 @@ class DumpTimeline:
             raise SystemExit(f"error: {path.name} is not readable JSON ({e})")
         if data.get("generator") != self.GENERATOR:
             raise SystemExit(
-                f"error: {path.name} was not written by the auto bits panel.")
+                f"error: {path.name} was not written by the Raw-cutter panel.")
 
         seq = data.get("sequence") or {}
         self.sequence_name = str(seq.get("name") or "Untitled Sequence")
@@ -1610,7 +1681,7 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
     except json.JSONDecodeError as e:
         return [f"panel dump is not readable JSON ({e}) — cut from the XML alone"]
     if data.get("generator") != DumpTimeline.GENERATOR:
-        return [f"{dump_path.name} was not written by the auto bits panel "
+        return [f"{dump_path.name} was not written by the Raw-cutter panel "
                 f"— cut from the XML alone"]
 
     notes: list[str] = []
@@ -1990,6 +2061,15 @@ def assign_output_names(cuts: list[Cut], container: str, seq_fps: float) -> None
                          f"_{sanitize(stem, 40)}{ext}")
 
 
+_SAY_LOCK = threading.Lock()
+
+
+def say(line: str) -> None:
+    """Print one line atomically from a worker thread."""
+    with _SAY_LOCK:
+        print(line, flush=True)
+
+
 def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
     if cut.media_kind == "unsupported":
         cut.status = "unsupported"
@@ -2025,6 +2105,10 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
         return cut
 
     cmd = build_command(cut, out_path, args, seq_fps)
+    # Announced BEFORE the encode, not after. With JOBS clips running at once, reporting
+    # only on completion means nothing is said for the entire length of the first encode —
+    # and a single long clip on network media can hold that silence for minutes.
+    say(f"  >> {cut.output_file}")
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=args.timeout)
         if r.returncode != 0:
@@ -2443,6 +2527,17 @@ def cli_update() -> int:
 
 
 def main():
+    # LINE-buffer stdout. Python block-buffers into a pipe, which is exactly what the
+    # Premiere panel gives this process — so every progress line sat in an 8 KB buffer and
+    # arrived in one burst when the run ENDED. Measured on the fixture: the first per-clip
+    # line reached the reader at 0.63s, the same instant the process exited. On a real
+    # timeline that is minutes of a panel showing "Starting…" with no way to tell a slow
+    # encode from a hung one, which is precisely how it was reported.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:      # noqa: BLE001 - older interpreter, or stdout replaced
+        pass
+
     ap = argparse.ArgumentParser(
         description="Extract every cut of a Premiere Pro timeline from its FCP7 XML export.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

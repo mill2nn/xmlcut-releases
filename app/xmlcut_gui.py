@@ -573,7 +573,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>auto bits</title>
+<title>Raw-cutter</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   :root{
@@ -695,7 +695,7 @@ PAGE = r"""<!doctype html>
   #updbar.bad{border-color:var(--bad)}
 </style></head><body>
 <header>
-  <h1>auto bits</h1><span class="v" id="ver"></span><span class="sp"></span>
+  <h1>Raw-cutter</h1><span class="v" id="ver"></span><span class="sp"></span>
   <button id="quit">Quit server</button>
 </header>
 <main>

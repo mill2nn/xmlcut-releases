@@ -1,6 +1,6 @@
 {
-  "version": "3.11",
-  "notes": "Report rewritten: what was written comes first, merge notes fold away, and it now says how complete the run is and where the clips went. Cleaner panel throughout.",
+  "version": "3.14",
+  "notes": "Renamed to Raw-cutter. Fixes clips under transitions being dropped, live per-clip progress while cutting, and a warning when a file type on your timeline is switched off.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

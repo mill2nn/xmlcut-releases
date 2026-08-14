@@ -1,4 +1,4 @@
-/* auto bits panel — read the active sequence, then cut it.
+/* Raw-cutter panel — read the active sequence, then cut it.
  *
  * The panel is a front end only. Reading is ExtendScript (host.jsx); cutting is
  * xmlcut.py, spawned as a child process. Nothing about timing, seeking or encoding
@@ -31,7 +31,8 @@
                "typehint", "typeall", "scripthelp",
                "readprog", "readfill", "readtext", "pickall", "checkupd", "outdest",
                "gear", "gearmenu", "enginestat", "recheck",
-               "repcomplete", "repdestrow", "repdest", "mergedet", "mergesum",
+               "repcomplete", "repdestrow", "repdest", "repdestlbl", "mergedet", "mergesum",
+               "jobtally", "joblist", "stalled",
                "onlyproblab"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
@@ -51,6 +52,9 @@
         report: [],      // rows built from the manifest after a run
         merge: [],       // the '++' lines xmlcut printed about the merge
         busy: false,
+        jobs: {},            // output_file -> {status, t0, t1} while cutting
+        jobOrder: [],
+        jobTimer: null,      // 1s tick so elapsed times move even when quiet
         fetching: false,     // a cut-script recovery download is in flight
         repaired: false,     // a damaged bundled engine has already been replaced once
         readTimer: null,     // watchdog on the two ExtendScript calls
@@ -185,7 +189,11 @@
                 PATH: PATH,
                 HOME: homeDir(),
                 LANG: "en_US.UTF-8",
-                PYTHONIOENCODING: "utf-8"
+                PYTHONIOENCODING: "utf-8",
+                // Belt and braces with the engine's own line buffering: an
+                // older xmlcut.py block-buffers into this pipe and the panel
+                // then sees nothing until the run ends.
+                PYTHONUNBUFFERED: "1"
             }
         };
     }
@@ -879,8 +887,27 @@
                  + " — the types on this timeline — were switched back on.";
         }
         var n = selectedCount();
-        if (n > 0) return "";
         var present = presentCuttable();
+        if (n > 0) {
+            /* Types this timeline HAS, that are switched off.
+             *
+             * Choices are remembered across projects, so a type unticked once stays
+             * unticked on every timeline after it. On a real job that meant five .png
+             * clips were never cut and nothing on screen said why — the export simply
+             * contained eight fewer files than the timeline had, and it read as clips
+             * going missing. An exclusion the user is not currently looking at has to
+             * announce itself. */
+            var off = [];
+            for (var j = 0; j < present.length; j++) {
+                if (!state.types[present[j]].on) {
+                    off.push("." + present[j] + " (" + state.types[present[j]].count + ")");
+                }
+            }
+            return off.length
+                ? ("Not selected: " + off.join(", ")
+                   + " — clips of those types are on this timeline and will NOT be cut.")
+                : "";
+        }
         if (!present.length) {
             return "This timeline has no media that can be cut.";
         }
@@ -915,6 +942,117 @@
             // would reveal a compare command and a log rather than the thing to fix.
             show(el.gearmenu, true);
             el.gear.className = "gearbtn on";
+        }
+    }
+
+    /* -------------------------------------------------- live per-clip state */
+
+    /* What each clip is doing right now, built from the engine's own output.
+     *
+     * xmlcut announces a clip when it STARTS ("  >> name.mp4") and again when it finishes
+     * ("  [7/18] OK  name.mp4"). Both matter: JOBS clips encode at once, so reporting only
+     * on completion left the panel silent for the whole of the first encode — and a single
+     * long clip on Drive-backed media can hold that silence for minutes, which is
+     * indistinguishable from a hang. */
+    var STALL_AFTER = 25000;
+
+    function jobsReset(total) {
+        state.jobs = {};
+        state.jobOrder = [];
+        state.jobTotal = total || 0;
+        state.jobDone = 0;
+        state.lastEvent = nowMs();
+        if (state.jobTimer) clearInterval(state.jobTimer);
+        // Ticks whether or not the engine says anything, so the elapsed times keep moving.
+        // A number that advances is the difference between "slow" and "dead".
+        state.jobTimer = setInterval(renderJobs, 1000);
+        el.joblist.innerHTML = "";
+        el.jobtally.textContent = "";
+        show(el.stalled, false);
+    }
+
+    function jobsStop() {
+        if (state.jobTimer) {
+            clearInterval(state.jobTimer);
+            state.jobTimer = null;
+        }
+    }
+
+    function nowMs() {
+        // Date.now() via a constructor-free path; CEP's Chromium has both, this is just
+        // the one place a clock is read.
+        return (new Date()).getTime();
+    }
+
+    function jobStart(name) {
+        if (!state.jobs[name]) state.jobOrder.push(name);
+        state.jobs[name] = { status: "run", t0: nowMs() };
+        state.lastEvent = nowMs();
+        renderJobs();
+    }
+
+    function jobDone(name, flag) {
+        var j = state.jobs[name];
+        if (!j) { state.jobOrder.push(name); j = state.jobs[name] = { t0: nowMs() }; }
+        j.status = (flag === "OK" || flag === "HAVE") ? "ok" : "bad";
+        j.flag = flag;
+        j.t1 = nowMs();
+        state.jobDone++;
+        state.lastEvent = nowMs();
+        renderJobs();
+    }
+
+    function secs(ms) {
+        var s = Math.max(0, Math.round(ms / 1000));
+        return s < 60 ? (s + "s") : (Math.floor(s / 60) + "m " + (s % 60) + "s");
+    }
+
+    function renderJobs() {
+        var now = nowMs(), running = [], finished = [];
+        for (var i = 0; i < state.jobOrder.length; i++) {
+            var nm = state.jobOrder[i], j = state.jobs[nm];
+            (j.status === "run" ? running : finished).push({ nm: nm, j: j });
+        }
+        var queued = Math.max(0, state.jobTotal - running.length - finished.length);
+        el.jobtally.textContent = running.length + " encoding · " + finished.length
+            + " done" + (queued ? (" · " + queued + " queued") : "");
+
+        // Running first — those are the ones you are waiting on. Then the most recently
+        // finished, capped: a 94-clip run does not need 94 rows of "done".
+        var rows = running.concat(finished.slice(-8).reverse());
+        el.joblist.innerHTML = "";
+        for (var k = 0; k < rows.length; k++) {
+            var r = rows[k], d = document.createElement("div");
+            d.className = "row2" + (r.j.status === "bad" ? " isbad" : "");
+            var nm2 = document.createElement("span");
+            nm2.className = "nm";
+            nm2.textContent = r.nm;
+            d.appendChild(nm2);
+            var f = document.createElement("span");
+            f.className = "facts";
+            f.textContent = r.j.status === "run"
+                ? secs(now - r.j.t0)
+                : (r.j.flag || "done") + " " + secs((r.j.t1 || now) - r.j.t0);
+            d.appendChild(f);
+            el.joblist.appendChild(d);
+        }
+
+        /* Said out loud rather than left to be inferred from a still bar. Not called
+         * "frozen": several clips encoding at once on network media legitimately go quiet
+         * for a while, and crying wolf would make the message worthless. */
+        var quiet = now - (state.lastEvent || now);
+        if (quiet > STALL_AFTER && running.length) {
+            var longest = 0;
+            for (var q = 0; q < running.length; q++) {
+                longest = Math.max(longest, now - running[q].j.t0);
+            }
+            el.stalled.textContent = "No clip has finished for " + secs(quiet)
+                + ". Still working — the longest running clip has been going "
+                + secs(longest) + ". Large or Drive-backed media takes this long; "
+                + "the times above keep moving while it is alive.";
+            show(el.stalled, true);
+        } else {
+            show(el.stalled, false);
         }
     }
 
@@ -1034,6 +1172,7 @@
         show(el.prog, true);
         el.barfill.style.width = "0";
         el.progtext.textContent = "Starting…";
+        jobsReset(selectedCount());
         setBusy(true, "Exporting…");
 
         log("$ " + state.python + " " + args.join(" "));
@@ -1073,12 +1212,20 @@
                 state.merge.push("⚠ " + mw[1]);
                 return;
             }
+            // "  >> name.mp4" — a clip has STARTED encoding.
+            var ms = line.match(/^\s*>>\s+(.+)$/);
+            if (ms) {
+                jobStart(ms[1]);
+                return;
+            }
             // xmlcut prints "  [7/18] OK  name.mp4" per clip.
             var m = line.match(/\[(\d+)\/(\d+)\]\s+(\S+)\s*(.*)$/);
             if (m) {
                 var done = parseInt(m[1], 10), all = parseInt(m[2], 10);
+                state.jobTotal = all;
                 el.barfill.style.width = Math.round(done / all * 100) + "%";
                 el.progtext.textContent = "[" + done + "/" + all + "] " + (m[4] || m[3]);
+                if (m[4]) jobDone(m[4], m[3]);
                 return;
             }
             if (line.indexOf("Cutting with") === 0 || line.indexOf("  Cutting") === 0) {
@@ -1098,6 +1245,7 @@
         });
 
         proc.on("error", function (e) {
+            jobsStop();
             show(el.prog, false);
             show(el.opts, true);
             show(el.step3, true);
@@ -1108,6 +1256,7 @@
         proc.on("close", function (code) {
             state.proc = null;
             if (tail) onLine(tail);
+            jobsStop();
             setBusy(false);
             show(el.prog, false);
 
@@ -1879,12 +2028,12 @@
             if (r.source_checkout) {
                 // This copy is a git checkout, so xmlcut.py refuses to overwrite it.
                 // Saying so beats offering a button that cannot work.
-                setUpd("busy", "auto bits " + r.update.version
+                setUpd("busy", "Raw-cutter " + r.update.version
                        + " is out — this copy is a git checkout, so use git pull", "");
                 return;
             }
             state.updateInfo = r.update;
-            setUpd("", "auto bits " + r.update.version + " is available"
+            setUpd("", "Raw-cutter " + r.update.version + " is available"
                    + (r.update.notes ? " — " + r.update.notes : ""), "Update");
         });
     }
@@ -2041,7 +2190,14 @@
         show(el.repcomplete, !!comp);
 
         // And WHERE it wrote, which the report never said despite having a Show button.
-        setPathLabel(el.repdest, outDir(), 46);
+        // Named in words too: the clips are in a folder called after the sequence, and
+        // anyone expecting the root folder finds it empty and calls the files missing.
+        var f = seqFolder();
+        el.repdestlbl.textContent = f
+            ? ("Clips are in a folder named after the sequence — " + f + "/")
+            : "Clips are in:";
+        show(el.repdestlbl, !!outDir());
+        setPathLabel(el.repdest, outDir(), 60);
         show(el.repdestrow, !!outDir());
         return true;
     }

@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ExtensionManifest Version="7.0"
     ExtensionBundleId="com.bom.xmlcutreader"
-    ExtensionBundleVersion="3.11"
-    ExtensionBundleName="auto bits"
+    ExtensionBundleVersion="3.14"
+    ExtensionBundleName="Raw-cutter"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 
     <ExtensionList>
-        <Extension Id="com.bom.xmlcutreader.panel" Version="3.11" />
+        <Extension Id="com.bom.xmlcutreader.panel" Version="3.14" />
     </ExtensionList>
 
     <ExecutionEnvironment>
@@ -39,7 +39,7 @@
                 </Lifecycle>
                 <UI>
                     <Type>Panel</Type>
-                    <Menu>auto bits</Menu>
+                    <Menu>Raw-cutter</Menu>
                     <Geometry>
                         <Size>
                             <Height>360</Height>

@@ -1,10 +1,10 @@
-# auto bits
+# Raw-cutter
 
 Extract every cut of a Premiere Pro timeline as an individual video file, straight from the
 timeline's XML export. Built for assembling training datasets — every clip comes with a
 manifest row describing exactly where it came from.
 
-In Premiere it appears as **Window → Extensions → auto bits**.
+In Premiere it appears as **Window → Extensions → Raw-cutter**.
 
 > The engine file is still called `xmlcut.py`, the extension's bundle ID is still
 > `com.bom.xmlcutreader`, and the release channel is still `xmlcut-releases`. Those are
