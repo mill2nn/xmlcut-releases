@@ -3,44 +3,57 @@
 Every cut of an Adobe Premiere Pro timeline, as its own video file — read straight from the
 sequence you have open, with a manifest row per clip describing exactly where it came from.
 
-## Install — one line
+## Install
 
-Open **Terminal** and paste this:
+Two commands, in this order. Both are one-time.
+
+### 1. Install ffmpeg
+
+ffmpeg is what does the actual cutting. Paste this in **Terminal**:
+
+```bash
+brew install ffmpeg
+```
+
+Already have it? Skip to step 2 — `ffmpeg -version` tells you.
+
+<details>
+<summary>No Homebrew? (that is what <code>brew</code> is)</summary>
+
+Install it first from **[brew.sh](https://brew.sh)** — one line on that page, and it will ask
+for your Mac password. Then come back and run `brew install ffmpeg`.
+
+</details>
+
+### 2. Install Raw-cutter
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mill2nn/xmlcut-releases/main/install.sh | bash
 ```
 
-That is the whole thing. Nothing to download, nothing to unzip, and macOS does not question
-it — a script you run from a Terminal you opened yourself is not treated as a downloaded
-file, so there is no "unidentified developer" block to click through.
+Nothing to download, nothing to unzip, and macOS does not question it — a script you run from
+a Terminal you opened yourself is not treated as a downloaded file, so there is no
+"unidentified developer" block to click through.
 
-It fetches the current version, installs the Premiere panel, and tells you what to do next.
+If you skipped step 1 and have Homebrew, this offers to install ffmpeg for you. If you have
+neither it stops and tells you what to do, without changing anything.
 
-### Then
+### 3. Restart Premiere
 
-1. **Quit Premiere completely** — Cmd-Q, not just closing the window. Reopen it.
-   A panel that was already open will not see the install until Premiere restarts; that is
-   the usual reason it looks like nothing happened.
-2. **Window → Extensions → Raw-cutter**
-3. Open the sequence you want and click **Read timeline**.
+**Quit it completely** — Cmd-Q, not just closing the window — then reopen. A panel that was
+already open will not see the install until Premiere restarts; that is the usual reason it
+looks like nothing happened.
+
+Then **Window → Extensions → Raw-cutter**, open the sequence you want, and click
+**Read timeline**.
 
 The line under the panel's title always says what to do next. Hover any **?** for what a
 control does.
 
 ## What you need
 
-Two things, and the installer checks for both before touching anything — it prints the exact
-command for whichever is missing and changes nothing.
-
 - **macOS** with `python3`. Usually already there; if not, `xcode-select --install`.
-- **ffmpeg**, which does the actual cutting:
-
-  ```bash
-  brew install ffmpeg
-  ```
-
-  No Homebrew? [brew.sh](https://brew.sh) first.
+- **ffmpeg**, from step 1 above.
 
 No Python packages. The tool imports nothing outside the standard library.
 
