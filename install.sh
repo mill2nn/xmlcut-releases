@@ -38,17 +38,58 @@ for tool in curl python3; do
   }
 done
 
-# ffmpeg is what actually does the cutting. Reported, never installed: it is a Homebrew
-# package and pulling one in behind someone's back is not this script's business.
+# ffmpeg is what actually does the cutting, and on a fresh Mac it is not there. Offering to
+# install it is the difference between "one line" and "one line, after two other things".
+#
+# ⚠️ READ FROM /dev/tty, NOT STDIN. This script is normally delivered by `curl | bash`, which
+# means bash is READING THE SCRIPT from stdin — a plain `read` would swallow the rest of the
+# script instead of waiting for the user. /dev/tty is the terminal itself. If there is no
+# terminal at all (a CI runner, a nested pipe) the prompt is skipped rather than hung on.
+#
+# HOMEBREW ITSELF IS NOT INSTALLED HERE, and that is deliberate. It wants an admin password,
+# writes outside the home directory, edits the shell profile and pulls down the Xcode command
+# line tools. A script somebody pasted from a README should not be making that decision for
+# them; a link is the honest answer.
 if command -v ffmpeg >/dev/null 2>&1; then
   say "ffmpeg   : $(ffmpeg -version 2>/dev/null | head -1 | cut -d' ' -f3)"
+elif command -v brew >/dev/null 2>&1; then
+  say "ffmpeg   : NOT FOUND — it is what does the actual cutting."
+  say ""
+  if [ -r /dev/tty ]; then
+    printf '  Install it now with Homebrew? This runs "brew install ffmpeg"\n'
+    printf '  and takes a few minutes. [y/N] '
+    read -r ANSWER < /dev/tty 2>/dev/null || ANSWER=""
+  else
+    ANSWER=""
+  fi
+  case "$ANSWER" in
+    [yY]*)
+      printf '\n'
+      say "installing ffmpeg — this is Homebrew's output, not ours"
+      printf '\n'
+      brew install ffmpeg || { say "!! brew install ffmpeg failed — nothing else was changed."; exit 1; }
+      printf '\n'
+      command -v ffmpeg >/dev/null 2>&1 || { say "!! ffmpeg still not on PATH — stopping."; exit 1; }
+      say "ffmpeg   : $(ffmpeg -version 2>/dev/null | head -1 | cut -d' ' -f3)"
+      ;;
+    *)
+      say "Nothing was changed. Install it, then run this line again:"
+      say ""
+      say "    brew install ffmpeg"
+      say ""
+      exit 1
+      ;;
+  esac
 else
-  say "ffmpeg   : NOT FOUND — Raw-cutter cannot cut anything without it."
-  say "           Install it, then run this line again:"
+  say "ffmpeg   : NOT FOUND — it is what does the actual cutting, and Homebrew"
+  say "           is not installed either, which is the usual way to get it."
   say ""
-  say "               brew install ffmpeg"
+  say "           1. Install Homebrew:  https://brew.sh"
+  say "              (one line on that page; it will ask for your Mac password)"
+  say "           2. Then:              brew install ffmpeg"
+  say "           3. Then run this line again."
   say ""
-  say "           No Homebrew? https://brew.sh"
+  say "Nothing has been changed."
   exit 1
 fi
 
