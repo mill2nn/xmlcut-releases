@@ -31,16 +31,17 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 import threading
 import urllib.parse
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
-VERSION = "3.16"
+VERSION = "3.25"
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -107,6 +108,272 @@ X264_PROFILE = "high"
 # parallelism does pay — so this sits in the middle and is capped so it stays sane on
 # an 8-core laptop as well as a 14-core desktop.
 JOBS = min(8, os.cpu_count() or 4)
+
+# --------------------------------------------------------------------------
+# export settings
+# --------------------------------------------------------------------------
+#
+# These used to be pinned constants with a note saying they were "decided once rather
+# than exposed as knobs". They are now adjustable, and the note still matters — the
+# DEFAULTS are the measured ones, and moving off them has consequences the tool states
+# rather than leaves to be discovered:
+#
+#   crf        1 is the default because crf 0 emits High 4:4:4 Predictive, which will
+#              not play on a Mac. Raising crf costs quality and saves a lot of space.
+#              Fractional values are real, not rounded away — see crf_of().
+#   bitrate    an alternative to crf, not an addition. Target-rate mode makes file size
+#              predictable, which is the reason to want it.
+#   fps        ⚠️ CHANGING THIS BREAKS FRAME EXACTNESS. Resampling to another rate
+#              drops or duplicates frames, so the file no longer holds the frames the
+#              timeline used. Recorded per clip as frame_exact=false, and said out loud.
+
+# Output bitrate relative to the SOURCE's, measured per crf on the fixture media:
+#     crf  1 -> 2.77x    crf 14 -> 1.26x    crf 18 -> 0.94x
+#     crf 23 -> 0.62x    crf 28 -> 0.37x
+# Content-dependent — detailed footage lands higher, flat footage lower — so anything
+# derived from it is presented as an estimate and never as a promise.
+CRF_SIZE_RATIO = {1: 2.77, 14: 1.26, 18: 0.94, 23: 0.62, 28: 0.37}
+
+# --------------------------------------------------------------------------
+# THE SIZE MODEL — metadata only, so it costs nothing and follows a slider live.
+# --------------------------------------------------------------------------
+#
+# CALIBRATED by encoding real clips at six crf values and measuring what came out. That
+# calibration ran ONCE, offline; nothing here encodes anything. The measurements are in
+# CLAUDE.md; these are the tables they produced.
+#
+# The unit is OUTPUT BITS PER PIXEL PER FRAME, which is the thing that clusters. Two facts
+# came out of the calibration and both are load-bearing:
+#
+#   1. CODEC CLASS separates it. Intraframe sources in this workflow are camera or studio
+#      originals and encode to roughly a third of the bits an already-compressed source of
+#      the same size does, because a re-encode has to reproduce the first encoder's
+#      artefacts as well as the picture. Output bpp at crf 14: h264 0.15-0.30, ProRes
+#      0.068-0.087.
+#
+#   2. A SOURCE'S OWN BITRATE IS A CEILING, NOT A PREDICTOR. Scaling it — which is what
+#      this used to do — is right in kind only for inter-frame footage at ordinary rates,
+#      and was 186x wrong on a 632 Mbps ProRes. It is kept only as an upper bound for the
+#      inter-frame path, where a genuinely low-bitrate source really does encode small.
+#
+# Accuracy, against the 40 real measurements it was fitted to: median 1.00x, 37/40 within
+# 1.5x, 38/40 within 2x, worst 5.7x on a 4K clip at crf 28 where output collapses faster
+# than any table follows. It is an ESTIMATE and the wording everywhere says so.
+INTRAFRAME_CODECS = {
+    "prores", "dnxhd", "dnxhr", "mjpeg", "cineform", "v210", "v410", "rawvideo",
+    "ffv1", "huffyuv", "dvvideo", "hq_hqa", "hqx", "cfhd", "prores_ks",
+}
+
+BPP_INTER = {6: 0.759, 14: 0.290, 18: 0.144, 23: 0.066, 28: 0.032}
+BPP_INTRA = {6: 0.261, 14: 0.069, 18: 0.030, 23: 0.013, 28: 0.006}
+SRC_SHARE = {6: 2.806, 14: 1.074, 18: 0.598, 23: 0.288, 28: 0.144}
+
+
+def _interp(table: dict, crf: float) -> float:
+    keys = sorted(table)
+    if crf <= keys[0]:
+        return table[keys[0]]
+    if crf >= keys[-1]:
+        return table[keys[-1]]
+    for a, b in zip(keys, keys[1:]):
+        if a <= crf <= b:
+            f = (crf - a) / (b - a)
+            return table[a] + f * (table[b] - table[a])
+    return table[keys[-1]]
+
+
+# A STILL is not a rate. Almost all of its file is the one keyframe; every frame after that
+# is a few bytes of "nothing changed", so its cost barely moves with duration. Modelling it
+# per-second over-predicted an 18x — a 1.5s still that weighs 2859 bytes was estimated at
+# 52 kB. So it is priced as this many frames' worth of picture, whatever its length.
+#
+# 1.5 is fitted to one file (321x241, crf 18, 2859 bytes actual -> 0.91x), so it is a rough
+# number honestly labelled rather than a calibrated one. Stills are a rounding error in any
+# export that also contains video, which is why it has not been measured harder.
+STILL_FRAMES = 1.5
+
+
+def estimate_bytes_for(cut: Cut, crf: float, pct: float, secs: float) -> float:
+    """Expected output size in BYTES. Stills and video price differently, so the one
+    function that callers use returns bytes rather than a rate."""
+    if cut.media_kind == "still":
+        w, h = scaled_dims(cut.width, cut.height, pct)
+        if not w or not h:
+            return 0.0
+        return _interp(BPP_INTER, crf) * w * h * STILL_FRAMES / 8 + CONTAINER_FIXED
+    bps = estimate_bps(cut, crf, pct)
+    return (bps * secs / 8 + CONTAINER_FIXED) if bps > 0 else 0.0
+
+
+def estimate_bps(cut: Cut, crf: float, pct: float) -> float:
+    """Expected OUTPUT bits per second for this cut, from metadata alone.
+
+    Needs width, height and a frame rate; without them there is nothing to scale and the
+    caller falls back or shows nothing rather than inventing a figure.
+    """
+    w, h = scaled_dims(cut.width, cut.height, pct)
+    fps = cut.source_fps or 0.0
+    if not w or not h or fps <= 0:
+        return 0.0
+    px = w * h * fps
+    intra = (cut.codec or "").lower() in INTRAFRAME_CODECS
+    bpp = _interp(BPP_INTRA if intra else BPP_INTER, crf)
+    if not intra and cut.bitrate:
+        # The source's own bits per pixel, as a CEILING. A downscale reduces the pixels but
+        # not the source's detail per pixel, so the ceiling is computed at the SOURCE's
+        # dimensions and then applied to the output's.
+        spx = (cut.width or 1) * (cut.height or 1) * fps
+        if spx > 0:
+            src_bpp = float(cut.bitrate) / spx
+            bpp = min(bpp, src_bpp * _interp(SRC_SHARE, crf))
+    return bpp * px
+
+
+def size_ratio_for_crf(crf: float) -> float:
+    """Linear interpolation between the measured points, clamped outside them."""
+    keys = sorted(CRF_SIZE_RATIO)
+    if crf <= keys[0]:
+        return CRF_SIZE_RATIO[keys[0]]
+    if crf >= keys[-1]:
+        return CRF_SIZE_RATIO[keys[-1]]
+    for a, b in zip(keys, keys[1:]):
+        if a <= crf <= b:
+            f = (crf - a) / (b - a)
+            return CRF_SIZE_RATIO[a] + f * (CRF_SIZE_RATIO[b] - CRF_SIZE_RATIO[a])
+    return CRF_SIZE_RATIO[keys[-1]]
+
+
+def crf_of(args) -> Union[int, float]:
+    """ONE reading of --crf. It is consulted by the encoder flags, the size estimate, the
+    printed summary and the manifest, and four separate `int(getattr(...))` expressions
+    meant four chances for the panel to show one setting while ffmpeg was given another.
+
+    Fractional is deliberate and was measured, not assumed: x264 takes a float, and 18.5
+    really does encode differently from 18 (10627 vs 10829 bytes on a one-second test
+    clip). An integer-only crf gave the slider 35 positions over its whole range.
+
+    Whole values come back as an int, which is what puts `"crf": 1` rather than
+    `"crf": 1.0` in the manifest. That file gets diffed between runs, and a value
+    changing shape on the day crf became a float would read as a setting that moved when
+    nothing did.
+
+    0 keeps falling back to the default, as it always has — crf 0 emits High 4:4:4
+    Predictive, which will not play on a Mac.
+    """
+    v = float(getattr(args, "crf", None) or X264_CRF)
+    return int(v) if v == int(v) else v
+
+
+def crf_text(v: Union[int, float]) -> str:
+    """The same value as ffmpeg is given it and as the summary prints it: 18, or 18.5."""
+    f = float(v)
+    return str(int(f)) if f == int(f) else str(round(f, 2))
+
+
+# Output resolution, as a percentage of each source's own. 100 = untouched.
+#
+# ⚠️ This changes what the PIXELS are, not how many frames there are. Frame count is
+# unaffected — measured: a 79-frame cut is still 79 frames at 50% — so `frame_exact`
+# stays true and verify.py still grades the export. `--fps` resamples TIME and breaks
+# that; this resamples SPACE and does not.
+#
+# For a dataset it is the largest single size lever there is, and a much bigger one than
+# crf. Measured on real 1080x1920 and 2160x3840 cuts at crf 14, bytes as a percentage of
+# the same clip at 100%:
+#
+#     scale    pixels    BR_2     K8_after   BR_1_Back_hook
+#     75%      56.3%     39.6%      55.7%       56.5%
+#     50%      25.0%     12.2%      27.5%       24.9%
+#     33%      10.9%      3.9%      14.2%       11.4%
+#
+# So bytes track PIXEL COUNT — scale squared — within about a third either way, and fall
+# well below it on detailed footage where downscaling averages the fine detail away.
+# Scale-squared is the estimate; it is not a bound in either direction.
+SCALE_DEFAULT = 100.0
+
+
+def scale_of(args) -> float:
+    """ONE reading of --scale, in percent. Same reason as crf_of()."""
+    v = getattr(args, "scale", None)
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return SCALE_DEFAULT
+    return SCALE_DEFAULT if v <= 0 else max(1.0, min(100.0, v))
+
+
+def scaled_dims(w: Optional[int], h: Optional[int], pct: float):
+    """The dimensions ffmpeg will actually produce, computed the SAME way it computes
+    them, so the manifest and the panel cannot promise a size the file does not have.
+
+    Both axes are truncated to an even number because H.264 in yuv420p subsamples chroma
+    2x2 and an odd dimension is not encodable at all — the encode fails outright rather
+    than rounding for you. `trunc(x/2)*2` here mirrors `trunc(iw*S/2)*2` in the filter,
+    and the two were checked against each other on real clips (1080x1920 at 33% gives
+    356x632 in both).
+    """
+    if not w or not h:
+        return (None, None)
+    f = pct / 100.0
+    return (max(2, int(w * f / 2) * 2), max(2, int(h * f / 2) * 2))
+
+
+def scale_filter(args) -> Optional[str]:
+    """The scale step of the video filter chain, or None when nothing is being resized.
+
+    build_command has three video exits — stills, retimed, plain — and each would
+    otherwise grow its own copy of this. That is precisely the mistake codec_flags() was
+    written to stop, and a scale applied to two of three would only show up on a timeline
+    containing the third.
+
+    `bicubic` is pinned rather than left to ffmpeg's default so that the same clip run
+    through two different ffmpeg builds produces the same pixels. A dataset that changes
+    when the toolchain updates is not a fixed dataset.
+    """
+    pct = scale_of(args)
+    if pct >= 100.0:
+        return None
+    f = pct / 100.0
+    return (f"scale=trunc(iw*{f:.6f}/2)*2:trunc(ih*{f:.6f}/2)*2:flags=bicubic")
+
+
+def parse_bitrate(s: str) -> Optional[int]:
+    """'8M', '8000k', '8000000' -> bits per second. None if it is not a rate."""
+    if not s:
+        return None
+    m = re.fullmatch(r"\s*([0-9]*\.?[0-9]+)\s*([kKmM]?)\s*", str(s))
+    if not m:
+        return None
+    v = float(m.group(1))
+    return int(v * {"": 1, "k": 1e3, "K": 1e3, "m": 1e6, "M": 1e6}[m.group(2)])
+
+
+def presets_path() -> Path:
+    return (Path.home() / "Library" / "Application Support" / "Raw-cutter"
+            / "presets.json")
+
+
+def load_presets() -> dict:
+    """Named export settings. Shared by the CLI, the panel and the browser GUI — a file
+    rather than the panel's localStorage, so a preset can be inspected, edited and used
+    from a terminal, and so the panel is not the only thing that knows about it."""
+    try:
+        d = json.loads(presets_path().read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+PRESET_FIELDS = ("container", "crf", "bitrate", "x264_preset", "fps", "scale")
+
+
+def save_preset(name: str, settings: dict) -> None:
+    p = presets_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    all_ = load_presets()
+    all_[name] = {k: settings.get(k) for k in PRESET_FIELDS}
+    p.write_text(json.dumps(all_, indent=2, sort_keys=True), encoding="utf-8")
+
 
 # What libx264 can encode directly. Anything outside this has to be converted, which is
 # a real loss, so it gets recorded rather than done quietly.
@@ -732,6 +999,14 @@ def read_timeremap(clip: ET.Element) -> tuple[float, bool, bool, str, list]:
     return (speed or 100.0), reverse, varies, span, others
 
 
+def human_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(n) < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} GB"
+
+
 def fmt_secs(total: float) -> str:
     """Seconds and hundredths, zero-padded: 2.5 -> "02.50".
 
@@ -826,6 +1101,14 @@ class Cut:
     transition_in: str = ""
     transition_out: str = ""
     edge_in_transition: str = ""   # "head", "tail" or "both" — edge reconstructed
+    estimated_bytes: int = 0       # what this cut is expected to weigh, before encoding
+    output_bytes: int = 0          # what it actually weighed, once written
+    # MEASURED bits per second, from a real short encode of this clip at probe_crf. The
+    # only honest basis for an estimate — see size_probe() for why the source's own
+    # bitrate is not one. 0 means the probe did not run or could not.
+    probe_bps: float = 0.0
+    probe_crf: float = 0.0
+    frame_exact: bool = True       # false once --fps resamples it
     media_kind: str = "video"      # video | still | unsupported
     nested_from: str = ""          # name of the nested sequence this came out of
     nested_trimmed: str = ""       # "head", "tail" or "both" — clipped by the nest's in/out
@@ -835,6 +1118,12 @@ class Cut:
     codec: str = ""
     width: Optional[int] = None
     height: Optional[int] = None
+    # What this cut was actually WRITTEN at. Equal to width/height unless --scale moved
+    # it. Recorded per clip rather than only as a percentage in `settings`, because a
+    # timeline mixes 1080x1920 and 2160x3840 sources and one percentage does not tell a
+    # dataset reader what any individual file contains.
+    output_width: Optional[int] = None
+    output_height: Optional[int] = None
     source_fps: float = 0.0
     # Premiere's INTERPRETED rate, only ever set from a panel dump. Recorded rather
     # than used: it is the rate the edit was built against, but ffmpeg seeks the file
@@ -1762,7 +2051,7 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
     # Bucket the dump by timeline start ticks — but as a LIST per tick, not one clip.
     # A real timeline stacks graphics, titles and adjustment layers over the footage,
     # so many clips share a start tick; keeping only the first silently matched a cut
-    # against whatever happened to be on top. On his own timeline that mismatched most
+    # against whatever happened to be on top. On real timeline that mismatched most
     # of the list, and since the merge can repoint a cut's media, a wrong match could
     # have pointed a cut at the wrong file.
     buckets: dict[int, list] = {}
@@ -1981,17 +2270,43 @@ def pix_fmt_for(cut: Cut) -> str:
     return "yuv420p"
 
 
+def codec_flags(cut: Cut, args) -> list[str]:
+    """The encoder settings, in ONE place.
+
+    build_command has three exits — stills, audio, video — and each used to repeat the
+    codec flags. Adding crf/bitrate to two of three would have been a silent inconsistency
+    that only showed up on a timeline containing stills.
+    """
+    crf = crf_of(args)
+    preset = getattr(args, "x264_preset", None) or X264_PRESET
+    rate = parse_bitrate(getattr(args, "bitrate", None) or "")
+    out = ["-c:v", args.vcodec]
+    if rate:
+        # Target-rate mode: the point of it is a predictable file size, so cap the peak
+        # and give it a buffer rather than letting the average drift.
+        out += ["-b:v", str(rate), "-maxrate", str(int(rate * 1.5)),
+                "-bufsize", str(int(rate * 2))]
+    else:
+        out += ["-crf", crf_text(crf)]
+    out += ["-preset", preset, "-profile:v", X264_PROFILE,
+            "-pix_fmt", cut.pix_fmt_out]
+    return out
+
+
 def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
 
     if cut.media_kind == "still":
         # A still has no timeline to seek into — loop it for the on-screen duration.
+        # The even-rounding scale that has always been here IS scale_filter at 100%, so
+        # the two are one expression rather than a special case bolted beside a general
+        # one. A still with an odd dimension still cannot be encoded, scaled or not.
         cmd += ["-loop", "1", "-framerate", f"{seq_fps:.6f}", "-i", cut.source_path,
                 "-t", f"{cut.source_duration_seconds:.6f}",
-                "-c:v", args.vcodec, "-crf", X264_CRF, "-preset", X264_PRESET,
-                "-profile:v", X264_PROFILE, "-pix_fmt", cut.pix_fmt_out,
+                *codec_flags(cut, args),
                 "-movflags", "+faststart",
-                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-an", str(out_path)]
+                "-vf", scale_filter(args) or "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-an", str(out_path)]
         return cmd
 
     # ffmpeg's -ss takes the first frame whose PTS is >= the seek time, so aim HALF
@@ -2071,6 +2386,11 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         elif cut.reversed:
             # reverse hands on the buffered timestamps; restamp for a clean CFR mux
             vf.append("setpts=N/FRAME_RATE/TB")
+        # LAST in the chain, after select/reverse/setpts. Scaling first would resize every
+        # frame `reverse` buffers, including the ones `select` is about to throw away.
+        sf = scale_filter(args)
+        if sf:
+            vf.append(sf)
 
         cmd += ["-ss", f"{ss:.6f}", "-t", f"{t:.6f}", "-i", cut.source_path]
         if vf:
@@ -2080,8 +2400,7 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         else:
             cmd += ["-frames:v", str(max(1, n_frames))]
 
-        cmd += ["-c:v", args.vcodec, "-crf", X264_CRF, "-preset", X264_PRESET,
-                "-profile:v", X264_PROFILE, "-pix_fmt", cut.pix_fmt_out,
+        cmd += [*codec_flags(cut, args),
                 "-movflags", "+faststart", "-an"]
         cmd += [str(out_path)]
         return cmd
@@ -2093,14 +2412,25 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     if n_frames:
         cmd += ["-frames:v", str(n_frames)]
 
+    # ⚠️ An explicit output rate RESAMPLES: ffmpeg drops or duplicates frames to hit it.
+    # The file then no longer holds the frames the timeline used, which is the property
+    # every check in tests/verify.py rests on. Recorded per clip as frame_exact=false.
+    out_fps = getattr(args, "fps", None)
+    if out_fps:
+        cmd += ["-r", f"{float(out_fps):.6f}"]
+
+    # Added only when it does something. At 100% this branch had no -filter:v at all and
+    # still should not: an identity scale is a full decode-filter-encode pass that changes
+    # nothing, and it would silently become the norm for every export.
+    sf = scale_filter(args)
+    if sf:
+        cmd += ["-filter:v", sf]
+
     cmd += [
-        "-c:v", args.vcodec,
-        "-crf", X264_CRF,
-        "-preset", X264_PRESET,
-        # Pinned, so lossless mode can never quietly reintroduce High 4:4:4 Predictive —
-        # a profile no Mac decoder will open.
-        "-profile:v", X264_PROFILE,
-        "-pix_fmt", cut.pix_fmt_out,
+        # crf/bitrate/preset come from codec_flags; the PROFILE stays pinned inside it, so
+        # lossless mode can never quietly reintroduce High 4:4:4 Predictive — a profile no
+        # Mac decoder will open.
+        *codec_flags(cut, args),
         "-movflags", "+faststart",       # so it starts playing without reading the tail
         # NO AUDIO, always — see the note on the constants. An AAC track made every
         # container declare a duration one frame longer than its own video stream.
@@ -2108,6 +2438,176 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     ]
     cmd += [str(out_path)]
     return cmd
+
+
+PROBE_SECONDS = 1.0
+PROBE_SLICES = 3
+PROBE_TIMEOUT = 25
+
+# The mp4 container's own fixed cost, MEASURED rather than guessed: encoding the same source
+# for 0.2/0.5/1/2/4 seconds and fitting size against duration gives 135633 bytes per second
+# plus a 458-byte intercept. So it is ~460 bytes, not the 8192 the first version subtracted —
+# which was 18x too much and made every short clip under-estimate by about 7%.
+#
+# It matters because it does NOT scale with duration. Stripped from each probe slice, then
+# added back ONCE to the estimate; multiplying it up with the content rate is what produced
+# the error.
+CONTAINER_FIXED = 512
+
+# A still is probed whole rather than sampled (see size_probe). Bounded only so a
+# pathologically long one cannot stall a scan; its frames after the first are nearly
+# free, so this is generous rather than tight.
+PROBE_STILL_MAX = 30.0
+
+
+def size_probe(cut: Cut, args, seq_fps: float) -> None:
+    """ENCODE one second of this clip and record what it cost per second.
+
+    ⚠️ THE SOURCE'S OWN BITRATE IS NOT A BASIS FOR AN ESTIMATE, and the version of this
+    function that used it was wrong by up to 200x on real footage. Measured on a 19-clip
+    production timeline at crf 15.5, output rate as a multiple of the source's:
+
+        h264   1080x1920, src 10-20 Mbps    0.55-1.09x    model said 1.16x   ~1.6x high
+        h264   3840x2160, src 260 Mbps      0.30x         model said 1.16x   ~4x high
+        prores 2000x2000, src 632-728 Mbps  0.006-0.008x  model said 1.16x   ~180x high
+
+    An intraframe codec spends hundreds of megabits on a shot that x264 encodes in four,
+    so its bitrate says nothing whatever about what H.264 will cost. Nor does resolution:
+    bits per pixel at one crf ranged 0.065 to 0.308 across those same clips, a 5x spread,
+    because that number IS content complexity and cannot be inferred from a container.
+
+    So this measures. One second of the real clip, through the real build_command, at the
+    real settings — the same encoder, filters and flags the export will use, which is why
+    it is right rather than merely closer.
+
+    ⚠️ SAMPLED IN SEVERAL PLACES, not just at the head. The first version took one second
+    from the start and was out by 2.19x on a 9.4-second clip whose opening move is busier
+    than the rest of it — a 10% sample of the least representative part. Up to three slices
+    spread through the clip, so the estimate sees the quiet middle as well as the entrance.
+    On the same 19 clips that took the worst case from 2.19x to within a fifth.
+
+    Bounded on purpose: at most PROBE_SLICES short reads, each with a timeout. Media can
+    live on a network share and a 728 Mbps ProRes read can stall; a probe that hangs
+    would turn a scan into a wait with no explanation, so a timeout leaves probe_bps at 0
+    and the caller falls back rather than blocking.
+    """
+    if cut.media_kind == "unsupported" or not cut.source_exists:
+        return
+    secs = cut.source_duration_seconds or 0.0
+    if secs <= 0:
+        return
+    # ⚠️ pix_fmt_out is normally set by run_cut, which has not run yet — codec_flags reads
+    # it and ffmpeg answers "Unknown pixel format requested: ." with exit 234. That failure
+    # is SILENT by design here (a failed probe just falls back to the model), so the first
+    # version of this shipped doing nothing at all while the fixture's estimates still
+    # looked right, because the fixture is ordinary h264 where the model happens to work.
+    # Set it the same way run_cut does, from the same function.
+    if not cut.pix_fmt_out:
+        cut.pix_fmt_out = pix_fmt_for(cut)
+    # One slice for a short clip, up to three for a long one. A 2s clip IS its own sample;
+    # a 10s clip is not.
+    n = min(PROBE_SLICES, max(1, round(secs / 3.0)))
+    span = min(PROBE_SECONDS, secs / n)
+    # A STILL is measured in FULL, however long it is.
+    #
+    # Almost all of a still's file is its one keyframe; every frame after that is a few
+    # bytes of "no change". So its cost is overwhelmingly FIXED, and sampling a second of
+    # it and multiplying by the duration multiplies that keyframe up — a 1.5s still came out
+    # 1.20x high and a 10s one would be far worse. Encoding the whole thing is affordable
+    # precisely because the frames after the first are nearly free.
+    if cut.media_kind == "still":
+        n, span = 1, min(secs, PROBE_STILL_MAX)
+    fps = cut.source_fps or seq_fps
+    bits = 0.0
+    sampled = 0.0
+    for i in range(n):
+        # Centre each slice in its own nth of the clip, so the slices are spread rather
+        # than adjacent, and clamp so the last one cannot run off the end.
+        at = cut.source_in_seconds + max(0.0, min(secs - span,
+                                                  secs * (i + 0.5) / n - span / 2))
+        stub = replace(cut, source_in_seconds=at, source_duration_seconds=span,
+                       source_consumed_frames=max(1, int(span * fps)),
+                       duration_frames=max(1, int(span * seq_fps)))
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / f"probe.{getattr(args, 'container', None) or 'mp4'}"
+            try:
+                r = subprocess.run(build_command(stub, out, args, seq_fps),
+                                   capture_output=True, timeout=PROBE_TIMEOUT)
+            except (subprocess.TimeoutExpired, OSError):
+                return
+            if r.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+                return
+            # Strip the container's fixed cost so probe_bps is CONTENT only. It is added
+            # back once, in estimate_sizes — it does not scale with duration, and treating
+            # it as if it did is what made short clips under-estimate.
+            size = out.stat().st_size
+            bits += max(0.0, size - CONTAINER_FIXED) * 8
+            sampled += span
+    if sampled <= 0:
+        return
+    cut.probe_bps = bits / sampled
+    cut.probe_crf = float(crf_of(args))
+
+
+def probe_sizes(cuts: list[Cut], args, seq_fps: float) -> None:
+    """Every cuttable clip, probed in parallel — the same pool width as the export."""
+    todo = [c for c in cuts
+            if c.media_kind != "unsupported" and c.source_exists
+            and (c.source_duration_seconds or 0) > 0]
+    if not todo:
+        return
+    with ThreadPoolExecutor(max_workers=JOBS) as ex:
+        for fut in as_completed([ex.submit(size_probe, c, args, seq_fps) for c in todo]):
+            fut.result()
+
+
+def estimate_sizes(cuts: list[Cut], args) -> None:
+    """What each cut is expected to weigh, before the whole thing is encoded.
+
+    Uses size_probe()'s MEASURED rate when there is one — that is the accurate path and
+    the only one worth trusting. The source-bitrate model below is the fallback for
+    --no-size-probe and for a clip whose probe failed, and it is kept only because a wrong
+    number with a warning beats no number at all when someone is deciding whether to press
+    Export. It is documented as unreliable in size_probe(); do not promote it.
+
+      target bitrate   a CEILING, not an estimate. rate x seconds is what the encoder is
+                       allowed to spend, and on short clips it routinely spends less
+                       because the content does not need it:
+                           4M  ~17.2 MB allowed, 10.7 MB actual  (62%)
+                           1M   ~4.3 MB allowed,  3.5 MB actual  (81%)
+                       Reported as "at most", since the shortfall depends on the footage
+                       and there is no honest constant to calibrate it with.
+    """
+    rate = parse_bitrate(getattr(args, "bitrate", None) or "")
+    ratio = size_ratio_for_crf(crf_of(args))
+    pct = scale_of(args)
+    # Bytes track PIXEL COUNT, so the factor is the scale SQUARED — measured across three
+    # real cuts at 75/50/33%, where it held to within about a third and undershot on
+    # detailed footage. Applied to the target-rate path too: -b:v is a rate the encoder
+    # aims at whatever the frame size, so a downscaled clip does NOT get smaller in that
+    # mode, and multiplying there would promise a saving the mode does not give.
+    area = (pct / 100.0) ** 2
+    for c in cuts:
+        secs = c.source_duration_seconds or 0.0
+        c.output_width, c.output_height = scaled_dims(c.width, c.height, pct)
+        if secs <= 0 or c.media_kind == "unsupported" or not c.source_exists:
+            continue
+        if rate:
+            c.estimated_bytes = int(rate * secs / 8)
+        elif c.probe_bps > 0:
+            # MEASURED, when --size-probe asked for it. The probe ran at THESE settings,
+            # resolution filter included, so the area factor is already in the number and
+            # must not be applied twice. The container's fixed cost is added once, not
+            # scaled — see CONTAINER_FIXED.
+            c.estimated_bytes = int(c.probe_bps * secs / 8 + CONTAINER_FIXED)
+        else:
+            # The default: metadata only, so it costs nothing and a slider can follow it.
+            modelled = estimate_bytes_for(c, crf_of(args), pct, secs)
+            if modelled > 0:
+                c.estimated_bytes = int(modelled)
+            elif c.bitrate:
+                # No dimensions to work from — the last resort, and the unreliable one.
+                c.estimated_bytes = int(float(c.bitrate) * ratio * area * secs / 8)
 
 
 def assign_output_names(cuts: list[Cut], container: str, seq_fps: float) -> None:
@@ -2187,6 +2687,9 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
             cut.error = "ffmpeg produced an empty file"
         else:
             cut.status = "ok"
+            # The real number, so the report shows what was written rather than what was
+            # predicted. The estimate is for deciding; this is for checking.
+            cut.output_bytes = out_path.stat().st_size
     except subprocess.TimeoutExpired:
         cut.status = "failed"
         cut.error = f"ffmpeg timed out after {args.timeout}s"
@@ -2331,6 +2834,20 @@ SHEET_COLUMNS = [
 ]
 
 
+def describe_encode(args) -> str:
+    """One line naming what was actually used, for the manifest and the sheet."""
+    rate = getattr(args, "bitrate", None)
+    q = f"bitrate {rate}" if parse_bitrate(rate or "") else f"crf {crf_text(crf_of(args))}"
+    bits = [f"libx264 {q}", f"profile {X264_PROFILE}",
+            f"preset {getattr(args, 'x264_preset', None) or X264_PRESET}"]
+    pct = scale_of(args)
+    if pct < 100.0:
+        bits.append(f"scaled to {pct:g}% of source resolution")
+    if getattr(args, "fps", None):
+        bits.append(f"RESAMPLED to {float(args.fps):g} fps — not frame exact")
+    return ", ".join(bits)
+
+
 def export_summary(tl: Timeline, args) -> dict:
     """The export-level facts: what was cut, from where, under what settings.
 
@@ -2352,8 +2869,26 @@ def export_summary(tl: Timeline, args) -> dict:
             "duration_tc": frames_to_tc(tl.sequence_duration_frames, tl.sequence_fps),
         },
         "settings": {
-            "encode": (f"libx264 crf {X264_CRF} profile {X264_PROFILE}, "
-                       f"preset {X264_PRESET}"),
+            "encode": describe_encode(args),
+            "crf": (None if parse_bitrate(getattr(args, "bitrate", None) or "")
+                    else crf_of(args)),
+            "bitrate": (getattr(args, "bitrate", None) or None),
+            "x264_preset": getattr(args, "x264_preset", None) or X264_PRESET,
+            # ⚠️ Present and non-null means the clips were RESAMPLED and are no longer
+            # frame-exact. A dataset built from them is a different dataset.
+            "output_fps": (float(args.fps) if getattr(args, "fps", None) else None),
+            "frame_exact": not bool(getattr(args, "fps", None)),
+            # Percent of each source's own resolution. Unlike output_fps this does NOT
+            # touch frame_exact: the cuts still hold exactly the frames the timeline used,
+            # at fewer pixels each. Per-clip dimensions are on the clips themselves,
+            # because one percentage cannot describe a timeline of mixed sources.
+            "scale_percent": scale_of(args),
+            "export_preset": getattr(args, "export_preset", None),
+            "estimated_bytes": sum(c.estimated_bytes for c in tl.cuts),
+            # "ceiling" with a target bitrate, "estimate" with a crf — they are not the
+            # same kind of number and a reader should not have to guess which.
+            "estimated_bytes_kind": ("ceiling" if parse_bitrate(
+                getattr(args, "bitrate", None) or "") else "estimate"),
             "jobs": JOBS,
             "speed": getattr(args, "speed", "native"),
             # Which source types were left out, so the output can be read honestly
@@ -2640,6 +3175,49 @@ def main():
                          "in both — H.264 High, 4:2:0, no audio; only the wrapper "
                          "changes. Avoid mkv: its muxer declares one frame more than "
                          "the file holds, and an NLE reads the container's duration.")
+    # --- export settings ------------------------------------------------------------
+    ap.add_argument("--crf", type=float, metavar="N",
+                    help="quality, 0-51, lower is bigger and better (default 1). "
+                         "Fractional works — x264 takes a float, so 18.5 is a real "
+                         "setting between 18 and 19. Do NOT use 0: x264 then emits "
+                         "High 4:4:4 Predictive, which will not play on a Mac.")
+    ap.add_argument("--bitrate", metavar="RATE",
+                    help="target an average bitrate instead of a quality (e.g. 8M, "
+                         "5000k). Makes file size predictable; ignores --crf.")
+    ap.add_argument("--size-probe", dest="size_probe", action="store_true",
+                    help="MEASURE the size estimate instead of modelling it, by encoding "
+                         "about a second of each clip at the chosen settings. Accurate to "
+                         "a few percent and much slower — it encodes. Without it the "
+                         "estimate comes from metadata alone: median 1.0x and usually "
+                         "within 1.5x, at no cost.")
+    ap.add_argument("--scale", type=float, metavar="PCT",
+                    help="output resolution as a percentage of each source's own "
+                         "(default 100). 50 turns 1080x1920 into 540x960. Frame count "
+                         "is untouched, so the cuts stay frame exact; only the pixels "
+                         "are fewer. Both dimensions round down to even — H.264 4:2:0 "
+                         "cannot encode an odd one.")
+    ap.add_argument("--x264-preset", dest="x264_preset", metavar="NAME",
+                    help="libx264 speed/compression preset (default veryfast). Only "
+                         "changes how hard it works to compress; never moves a frame.")
+    ap.add_argument("--fps", type=float, metavar="N",
+                    help="force an output frame rate. ⚠️ This RESAMPLES — frames are "
+                         "dropped or duplicated — so the clips no longer hold the frames "
+                         "the timeline used. Every affected cut is recorded with "
+                         "frame_exact=false.")
+    ap.add_argument("--export-preset", metavar="NAME",
+                    help="load saved export settings by name (see --list-presets)")
+    ap.add_argument("--save-preset", metavar="NAME",
+                    help="save the settings used by this run under NAME")
+    ap.add_argument("--list-presets", action="store_true",
+                    help="list saved export presets and exit")
+    # Machine-readable variants, for the panel. Same reason as --check-update-json: it
+    # cannot import this module, so it shells out and reads JSON, which keeps ONE
+    # implementation of where presets live and what they contain.
+    ap.add_argument("--list-presets-json", action="store_true",
+                    help="print saved export presets as JSON and exit")
+    ap.add_argument("--delete-preset", metavar="NAME", help="remove a saved preset")
+    ap.add_argument("--presets-only", action="store_true",
+                    help="manage presets and exit, without needing an XML")
     ap.add_argument("--speed", choices=["native", "timeline"], default="native",
                     help="for speed-ramped clips: 'native' keeps the real source frames "
                          "(default, best for training data); 'timeline' retimes the clip so "
@@ -2665,6 +3243,70 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="show what would happen")
     ap.add_argument("--timeout", type=int, default=1800, help="per-clip ffmpeg timeout (s)")
     args = ap.parse_args()
+
+    if args.list_presets_json:
+        print(json.dumps({"presets": load_presets(), "path": str(presets_path())}))
+        return
+
+    if args.delete_preset:
+        saved = load_presets()
+        removed = saved.pop(args.delete_preset, None) is not None
+        if removed:
+            presets_path().parent.mkdir(parents=True, exist_ok=True)
+            presets_path().write_text(json.dumps(saved, indent=2, sort_keys=True),
+                                      encoding="utf-8")
+        if args.presets_only:
+            print(json.dumps({"ok": removed, "deleted": args.delete_preset,
+                              "presets": saved}))
+            return
+        print(("removed" if removed else "no such preset:") + f" {args.delete_preset}")
+
+    # Saving a preset does not need a timeline. Without this, making one from the panel
+    # would mean reading a sequence first, which is a strange thing to have to do to
+    # record four numbers.
+    if args.presets_only:
+        if args.save_preset:
+            save_preset(args.save_preset, {
+                "container": args.container,
+                "crf": (None if parse_bitrate(args.bitrate or "") else args.crf),
+                "bitrate": args.bitrate or None,
+                "x264_preset": args.x264_preset,
+                "fps": args.fps,
+                "scale": args.scale,
+            })
+        print(json.dumps({"ok": True, "saved": args.save_preset,
+                          "presets": load_presets()}))
+        return
+
+    if args.list_presets:
+        saved = load_presets()
+        if not saved:
+            print(f"No export presets yet. Make one with --save-preset NAME.")
+            print(f"They live in {presets_path()}")
+            return
+        print(f"{len(saved)} export preset(s) in {presets_path()}:\n")
+        for nm in sorted(saved):
+            s = saved[nm]
+            bits = [f"{k} {v}" for k, v in s.items() if v not in (None, "")]
+            print(f"  {nm:22} {', '.join(bits) or '(defaults)'}")
+        return
+
+    # A preset supplies only what was NOT given explicitly, so a flag on the command line
+    # always wins over the stored value — otherwise a preset would silently override the
+    # thing you just typed.
+    if args.export_preset:
+        saved = load_presets()
+        if args.export_preset not in saved:
+            sys.exit(f"error: no export preset named {args.export_preset!r}. "
+                     f"Try --list-presets.")
+        for k, v in saved[args.export_preset].items():
+            if v in (None, ""):
+                continue
+            if k == "container" and args.container != "mp4":
+                continue          # an explicit --container wins
+            if getattr(args, k, None) in (None, ""):
+                setattr(args, k, v)
+        print(f"  export preset: {args.export_preset}")
 
     if args.update:
         return cli_update()
@@ -2809,6 +3451,8 @@ def main():
 
     for i, c in enumerate(tl.cuts, start=1):
         c.index = i
+        if getattr(args, "fps", None):
+            c.frame_exact = False
     # Named now, while the list is final — so --manifest-only and the sheet can show the
     # filenames without a single frame being encoded.
     assign_output_names(tl.cuts, args.container, tl.sequence_fps)
@@ -2827,8 +3471,15 @@ def main():
         print(f"  reversed : {reversed_n} cut(s) play backwards")
     if tl.markers:
         print(f"  markers  : {len(tl.markers)}")
+    print(f"  encode   : {describe_encode(args)}")
     for w in tl.warnings:
         print(f"  !! {w}")
+    if getattr(args, "fps", None):
+        # Loud, and not buried among the other warnings: this is the one setting that
+        # changes what the files CONTAIN rather than how big they are.
+        print(f"\n  !! OUTPUT RESAMPLED to {float(args.fps):g} fps. Frames are dropped or "
+              f"duplicated to hit that rate, so these clips no longer hold the frames the "
+              f"timeline used. Every cut is recorded with frame_exact=false.")
     for n in merge_notes:
         print(f"  ++ {n}")
 
@@ -2839,6 +3490,25 @@ def main():
         cache: dict = {}
         for c in tl.cuts:
             apply_probe(c, cache)
+        # OPT-IN. Encoding a second of every clip is the accurate way to size an export and
+        # it is the slow way: on the fixture a scan goes 0.21s -> 0.99s, and on media behind
+        # Google Drive it is far worse. The default is estimate_bps(), which reads metadata,
+        # costs nothing and lets a slider update live. --size-probe buys accuracy when the
+        # export is big enough to be worth a wait.
+        if getattr(args, "size_probe", False):
+            probe_sizes(tl.cuts, args, tl.sequence_fps)
+        # After probing, because the crf estimate scales the SOURCE's own bitrate. The
+        # print lives here rather than in the header block above for the same reason —
+        # up there the estimate is always zero, which is how the first version shipped.
+        estimate_sizes(tl.cuts, args)
+        est = sum(c.estimated_bytes for c in tl.cuts)
+        if est:
+            capped = parse_bitrate(getattr(args, "bitrate", None) or "")
+            print(f"  size     : "
+                  + (f"at most ~{human_bytes(est)} total (a ceiling — short clips "
+                     f"usually use less)" if capped
+                     else f"~{human_bytes(est)} total (estimate — depends on the "
+                          f"footage)"))
 
     # Only a panel dump carries Premiere's interpreted rate, and only after probing can
     # it be compared with the file's own. A disagreement means the edit was built on a
@@ -2902,6 +3572,17 @@ def main():
             return
         args.manifest_only = False
         print()
+
+    if args.save_preset:
+        save_preset(args.save_preset, {
+            "container": args.container,
+            "crf": (None if parse_bitrate(args.bitrate or "") else args.crf),
+            "bitrate": args.bitrate or None,
+            "x264_preset": args.x264_preset,
+            "fps": args.fps,
+            "scale": args.scale,
+        })
+        print(f"  saved export preset {args.save_preset!r} to {presets_path()}")
 
     print(f"\nCutting with {JOBS} parallel job(s) ...")
     done = 0

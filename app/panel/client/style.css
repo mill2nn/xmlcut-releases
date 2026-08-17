@@ -13,19 +13,62 @@
  *   --fs-base  11px   body text, controls, table cells
  *   --fs-small 10px   secondary text: hints, notes, meta
  */
+/* NEON ON NEAR-BLACK. EVERY RATIO BELOW WAS COMPUTED, NONE WAS ESTIMATED.
+ *
+ * That warning is here because the comment has now been wrong twice. Both times the values
+ * were written from what they were expected to be and were out by a few tenths. Compute,
+ * then write. Never adjust the number to match the expectation.
+ *
+ * The ground went #232323 → #16181d → #0a0c10 over two passes, and the accent #4a90d9 →
+ * #35c8ff → #00b4ff. The old accent measured 3.9:1 against the old ground: under the 4.5:1
+ * anyone would ask for, and it looked it.
+ *
+ * The greys are not neutral. They carry a blue bias toward the accent, so the panel reads as
+ * one deliberate surface rather than grey with colours dropped on it.
+ */
 :root {
-    --bg: #232323;
-    --card: #1c1c1c;
-    --fg: #d8d8d8;
-    --dim: #8f8f8f;
+    --bg: #0a0c10;        /* near-black, blue-biased. 40% the luminance of #16181d */
+    /* ⚠️ CARDS RAISE, they do not sink. Against #232323 a well could be darker than its
+     * surroundings; against #0a0c10 there is nothing below — the first attempt at this used
+     * #13161c and measured 1.08:1 against the ground, which is not a surface, it is a
+     * rounding error. #1d222c lifts by 1.23:1, which reads. Do not "restore"
+     * a darker value without measuring that it is visible. */
+    --card: #1d222c;
+    --fg: #f2f5f8;        /* 17.89:1 on the ground, 14.57:1 on a card */
+    --dim: #98a2b3;       /*  7.60:1 / 6.19:1 — secondary, still readable on both */
     /* Disabled/absent, kept separate from --dim. They used to share it, so "you cannot use
-     * this" and "this is merely quieter" looked identical. */
-    --off: #5a5a5a;
-    --line: #3a3a3a;
-    --accent: #4a90d9;
-    --ok: #6fbf73;
-    --warn: #d9a441;
-    --bad: #e06c6c;
+     * this" and "this is merely quieter" looked identical.
+     *
+     * The only two tokens deliberately below the readable threshold — 2.49:1 and
+     * 1.54:1 — because neither is readable text: --off means "unavailable", --line is
+     * a hairline. Both gained contrast for free when the ground darkened, which is why the
+     * edges read more clearly now without being lightened. */
+    --off: #4a5262;
+    --line: #2c3340;
+    /* 100% saturated in HSL at every value it has had, so "more saturated" meant dropping
+     * LIGHTNESS from 60% to 50% — that is what raises chroma and makes it read electric
+     * rather than pale. */
+    --accent: #00b4ff;    /*  8.36:1 / 6.81:1 — was #4a90d9 at 3.9:1 */
+    --ok: #3ff08a;        /* 13.09:1 / 10.66:1 */
+    --warn: #ffc233;      /* 12.13:1 / 9.88:1 */
+    --bad: #ff5470;       /*  6.29:1 /  5.13:1 */
+
+    /* THE SURFACE LADDER. Four steps, each measured against the ground, and everything
+     * opaque in this file uses one of them rather than a grey mixed by eye. Eleven such
+     * greys had accumulated and half of them ended up DARKER than the card they sat on
+     * after the ground moved — a button reading as recessed and a sticky table header
+     * reading as a hole.
+     *
+     *   ground  #0a0c10   1.00:1   the page
+     *   sunken  #14171d   1.09:1   a well INSIDE a card: #setbox, the log
+     *   card    #1d222c   1.23:1   notices, cards, chips, the table body
+     *   raised  #262e39   1.43:1   buttons, sticky table head, tally pills
+     *   hover   #2f3845   1.65:1   a raised thing under the pointer
+     */
+
+    /* The glow. One variable so every lit thing glows by the same amount, and turning it
+     * off is one edit rather than fifteen. */
+    --glow: 0 0 10px;
 
     --fs-head: 13px;
     --fs-base: 11px;
@@ -34,14 +77,98 @@
 
 * { box-sizing: border-box; }
 
+/* ONE COLUMN, CAPPED — then two columns when there is room for two.
+ *
+ * Everything below this line was designed against a 320px docked panel and assumed it
+ * would stay near that. Undocked to a 1848px window it fell apart in ways narrow testing
+ * could never show: the clip name column absorbed 1400px of slack while Size stayed at
+ * its 50px and truncated the size flag to "▲ 41…", the CRF slider became a 1750px track
+ * for a 35-step range, "Save as preset" became a 900px button, and the "8 of 19 over"
+ * note sat 1600px from the field it describes.
+ *
+ * A max-width is the fix for all of them at once, because none of this content gets
+ * better past a readable measure. It does not bite at 320px, so the docked panel is
+ * untouched. */
 body {
     margin: 0;
     padding: 12px;
+    max-width: 780px;
     background: var(--bg);
     color: var(--fg);
     font: var(--fs-base)/1.5 -apple-system, "Segoe UI", sans-serif;
     -webkit-user-select: none;
     user-select: none;
+}
+
+/* Two columns once there is room: the cut list on the left where it can use the width,
+ * the export controls in a fixed column beside it. The whole block stays left-aligned
+ * rather than centred — it is a panel, and a centred island reads as a web page.
+ *
+ * Only #step3 moves. Progress and the report stay full width because they replace the
+ * chooser rather than sitting beside it, and the report is a long list. */
+@media (min-width: 920px) {
+    body {
+        max-width: 1200px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+        gap: 0 26px;
+        align-items: start;
+        align-content: start;
+    }
+
+    header, .nextline, .gearmenu, #updbar, #prog, #report, #err, #adv {
+        grid-column: 1 / -1;
+    }
+
+    .step { grid-column: 1; }
+    #step3 { grid-column: 2; }
+}
+
+/* ---------------------------------------------------------- scrollbars */
+
+/* Chromium's default scrollbar is a wide light-grey bar, and against a #0a0c10 ground it is
+ * the brightest thing on screen — brighter than the primary button, which is the one thing
+ * that is supposed to catch the eye. There are FOUR scroll regions (the page, the clip
+ * table, the report rows, the log), so this is written once for all of them.
+ *
+ * The thumb sits on the ladder's `raised` rung at rest and lifts to `hover` under the
+ * pointer, then picks up the accent while being dragged — interactive things respond, and
+ * the colour arrives only when you are actually holding it. The track is transparent rather
+ * than a rung of its own: a drawn trough on a near-black panel is a stripe of nothing.
+ *
+ * ⚠️ `::-webkit-scrollbar` is the load-bearing half. CEP 11 is Chromium 88, which does not
+ * know `scrollbar-color`; that pair is here for the browser GUI, which runs in whatever
+ * Chrome the machine has. Neither is a fallback for the other — they are two engines. */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    background: transparent;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    /* The border is transparent and the background is clipped inside it, which is what
+     * insets the thumb from the edge without a wrapper element. */
+    border: 2px solid transparent;
+    border-radius: 6px;
+    background-clip: content-box;
+    background-color: #262e39;
+}
+
+::-webkit-scrollbar-thumb:hover { background-color: #2f3845; }
+::-webkit-scrollbar-thumb:active { background-color: var(--accent); }
+
+/* Where two scrollbars meet. Left at the default it is a small light-grey square in the
+ * corner of the clip table, which is exactly the kind of thing that looks like a bug. */
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* Standard properties, for the browser GUI rather than the panel. */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: #262e39 transparent;
 }
 
 /* An author `display` rule beats the browser's [hidden]{display:none}, so anything that sets
@@ -71,8 +198,8 @@ h1 { margin: 0; font-size: var(--fs-head); font-weight: 600; }
     line-height: 1;
 }
 
-.gearbtn:hover:not(:disabled) { background: #2e2e2e; color: var(--fg); }
-.gearbtn.on { background: #2e2e2e; color: var(--fg); border-color: var(--line); }
+.gearbtn:hover:not(:disabled) { background: #262e39; color: var(--fg); }
+.gearbtn.on { background: #262e39; color: var(--accent); border-color: var(--accent); }
 
 .gearmenu {
     margin: -4px 0 12px;
@@ -84,6 +211,38 @@ h1 { margin: 0; font-size: var(--fs-head); font-weight: 600; }
 
 .gearmenu[hidden] { display: none; }
 .gearmenu .lbl { margin-top: 0; }
+
+/* -------------------------------------------------- what to do next */
+
+/* ONE sentence, directly under the title, never blank. It is the answer to the question
+ * this panel got asked most — "what do I press now" — which previously had to be assembled
+ * from a disabled button, the hint under it, a warning box and a note beside the folder.
+ *
+ * Full width in the wide layout, so it is read before either column. */
+.nextline {
+    margin: -2px 0 12px;
+    padding: 6px 9px;
+    border-left: 2px solid var(--accent);
+    border-radius: 2px;
+    background: var(--card);
+    color: var(--fg);
+    font-size: var(--fs-base);
+    line-height: 1.45;
+}
+
+.nextline { box-shadow: -1px 0 10px -2px rgba(0, 180, 255, .45); }
+.nextline.good { border-left-color: var(--ok);
+                 box-shadow: -1px 0 10px -2px rgba(63, 240, 138, .5); }
+.nextline.warn { border-left-color: var(--warn); color: var(--warn);
+                 box-shadow: -1px 0 10px -2px rgba(255, 194, 51, .5); }
+.nextline.bad { border-left-color: var(--bad); color: var(--bad);
+                box-shadow: -1px 0 10px -2px rgba(255, 84, 112, .5); }
+.nextline.busy { color: var(--dim); }
+
+/* The collapsible settings box that used to live here is gone — he asked for the settings
+ * to be permanently visible, so there is nothing left to summarise or to toggle. Its one
+ * survivor is `button.mini.on`, which the Re-measure button uses to say it wants pressing. */
+button.mini.on { background: var(--line); color: var(--fg); }
 
 /* ------------------------------------------------------------ THE notice */
 
@@ -103,10 +262,16 @@ h1 { margin: 0; font-size: var(--fs-head); font-weight: 600; }
 }
 
 .note[hidden] { display: none; }
-.note.good { border-left-color: var(--ok); color: var(--ok); }
-.note.warn { border-left-color: var(--warn); color: var(--warn); }
-.note.bad { border-left-color: var(--bad); color: var(--bad); }
-.note.busy { border-left-color: var(--accent); color: var(--dim); }
+/* A lit rail rather than a flat 2px line. The glow is inset from the left edge so it reads
+ * as the rail emitting rather than as a drop shadow under the box. */
+.note.good { border-left-color: var(--ok); color: var(--ok);
+             box-shadow: -1px 0 8px -2px rgba(63, 240, 138, .45); }
+.note.warn { border-left-color: var(--warn); color: var(--warn);
+             box-shadow: -1px 0 8px -2px rgba(255, 194, 51, .45); }
+.note.bad { border-left-color: var(--bad); color: var(--bad);
+            box-shadow: -1px 0 8px -2px rgba(255, 84, 112, .45); }
+.note.busy { border-left-color: var(--accent); color: var(--dim);
+             box-shadow: -1px 0 8px -2px rgba(0, 180, 255, .45); }
 /* A notice with a control in it — the update bar. */
 .note.row { display: flex; align-items: center; gap: 8px; }
 .note.row[hidden] { display: none; }
@@ -127,31 +292,46 @@ h1 { margin: 0; font-size: var(--fs-head); font-weight: 600; }
 button {
     border: 1px solid var(--line);
     border-radius: 4px;
-    background: #2e2e2e;
+    background: #262e39;
     color: var(--fg);
     font: inherit;
     cursor: pointer;
 }
 
-button:hover:not(:disabled) { background: #383838; }
+button:hover:not(:disabled) { background: #262e39; border-color: #39424f; }
 /* Its own colour rather than opacity, so a disabled control reads as unavailable instead of
  * merely faint. */
-button:disabled { color: var(--off); border-color: #2c2c2c; cursor: default; }
+button:disabled { color: var(--off); border-color: #1a1f27; cursor: default; }
 
 /* ONE primary per screen. Everything else is a mini, and secondary actions share a row —
  * six full-width stacked buttons made "Show in Finder" and "Back" look equally important. */
+/* The one filled button on screen, and it GLOWS — that is what makes it findable at a
+ * glance rather than found by reading. Dark text on the neon, not white: #00b4ff is bright
+ * enough that white on it is barely 2:1 while near-black is 9:1. */
 button.primary {
     width: 100%;
     margin-top: 10px;
     padding: 9px 12px;
     background: var(--accent);
     border-color: transparent;
-    color: #fff;
-    font-weight: 600;
+    color: #07121a;
+    font-weight: 700;
+    box-shadow: var(--glow) rgba(0, 180, 255, .38);
 }
 
-button.primary:hover:not(:disabled) { filter: brightness(1.12); }
-button.primary:disabled { background: #2e2e2e; border-color: var(--line); }
+button.primary:hover:not(:disabled) {
+    filter: brightness(1.1);
+    box-shadow: 0 0 16px rgba(0, 180, 255, .5);
+}
+
+/* Disabled loses the glow entirely, which is most of the signal — a lit button you cannot
+ * click is the worst of both. */
+button.primary:disabled {
+    background: #262e39;
+    border-color: var(--line);
+    color: var(--off);
+    box-shadow: none;
+}
 
 button.mini { padding: 4px 9px; font-size: var(--fs-small); white-space: nowrap; }
 button.mini.wide { width: 100%; margin-top: 8px; }
@@ -196,6 +376,26 @@ button.mini.wide { width: 100%; margin-top: 8px; }
 .step { margin-bottom: 18px; }
 .step[hidden] { display: none; }
 
+/* A step that is finished says so, and stops taking a step's worth of room. The tick is
+ * added to the heading rather than replacing anything — the same rule as the sliders: mark
+ * the state by ADDING, never by degrading what is already there. */
+.step.done { margin-bottom: 12px; }
+.step.done .stepnum {
+    background: var(--ok);
+    box-shadow: var(--glow) rgba(63, 240, 138, .32);
+}
+.step.done .stephead::after {
+    content: "✓";
+    color: var(--ok);
+    font-weight: 700;
+}
+
+#step1body[hidden] { display: none; }
+
+/* The sequence name and the way back to re-reading it, on one line. */
+.seqrow { display: flex; align-items: baseline; gap: 8px; }
+.seqrow .seqname { flex: 1 1 auto; min-width: 0; }
+
 .stephead {
     display: flex;
     align-items: center;
@@ -219,8 +419,10 @@ button.mini.wide { width: 100%; margin-top: 8px; }
     height: 16px;
     border-radius: 50%;
     background: var(--accent);
-    color: #fff;
+    color: #07121a;
+    font-weight: 700;
     font-size: var(--fs-small);
+    box-shadow: var(--glow) rgba(0, 180, 255, .3);
 }
 
 .lbl {
@@ -233,7 +435,16 @@ button.mini.wide { width: 100%; margin-top: 8px; }
 }
 
 .hint { margin: 6px 0 0; color: var(--dim); font-size: var(--fs-small); }
-.listnote { margin-left: 4px; color: var(--dim); font-weight: 400; }
+/* Pushed right, in the step heading — it is a count OF the step, so it belongs on the
+ * step's own line rather than on a label below it. */
+.listnote {
+    margin-left: auto;
+    color: var(--dim);
+    font-weight: 400;
+    font-size: var(--fs-small);
+    text-transform: none;
+    letter-spacing: 0;
+}
 
 .tick {
     display: flex;
@@ -254,7 +465,10 @@ button.mini.wide { width: 100%; margin-top: 8px; }
  * place, which is what made the panel feel disorderly. The columns now fit 320px; timeline
  * position, timing source and notes are on each row's tooltip. */
 .tablewrap {
+    /* Plain value first: if an engine does not understand clamp() it keeps the 320px this
+     * shipped with rather than losing the scroll region altogether. */
     max-height: 320px;
+    max-height: clamp(320px, 52vh, 660px);
     overflow-y: auto;
     overflow-x: hidden;
     border: 1px solid var(--line);
@@ -276,7 +490,7 @@ thead th {
     top: 0;
     z-index: 1;
     padding: 5px 4px;
-    background: #262626;
+    background: #262e39;
     border-bottom: 1px solid var(--line);
     color: var(--dim);
     font-weight: 600;
@@ -288,7 +502,7 @@ thead th .q { margin-left: 2px; }
 
 tbody td {
     padding: 4px;
-    border-bottom: 1px solid #262626;
+    border-bottom: 1px solid #242b36;
     color: var(--fg);
     vertical-align: top;
     white-space: nowrap;
@@ -299,13 +513,39 @@ tbody td {
 tbody tr:last-child td { border-bottom: 0; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
-/* Fixed widths so the clip name gets every remaining pixel, and nothing overflows. */
+/* Fixed widths so the clip name gets every remaining pixel, and nothing overflows.
+ *
+ * ⚠️ THE SUM OF THESE HAS A HARD CEILING. A 320px docked panel leaves 296px of content and
+ * 294px inside the table's own border, so the six fixed columns plus a readable clip name
+ * must fit that. These six total 224px, leaving ~70px for the name — tight, and the reason
+ * timeline position and notes live on the row tooltip instead of in columns.
+ *
+ * tests/check_panel.js sums these out of this file and fails if they stop fitting. That
+ * check exists because the first attempt at the wide layout simply widened them to 302px,
+ * which does not fit 294px: the name column would have collapsed to nothing and the
+ * overflow been hidden by .tablewrap's own overflow-x, so a docked panel would have shown
+ * a table of numbers with no clip names and nothing would have said why. */
 th.pick, td.pick { width: 20px; padding-right: 0; text-align: center; }
 th.pick input, td.pick input { margin: 0; accent-color: var(--accent); }
 th.idx, td.idx { width: 22px; }
-th.spd, td.spd { width: 44px; }
-th.frm, td.frm { width: 40px; }
-th.sts, td.sts { width: 62px; }
+th.spd, td.spd { width: 40px; }
+th.frm, td.frm { width: 38px; }
+th.siz, td.siz { width: 50px; }
+th.sts, td.sts { width: 54px; }
+
+/* Past ~460px there is room to give the cramped columns their actual contents, and three
+ * of them were a pixel or two short even at 320: the "Frames" heading was clipped,
+ * "missing source" truncated, and once the size flag prefixed a "▲ " the Size column
+ * started showing "▲ 41…" — the one column whose entire job is to be read.
+ *
+ * 460px is where the widened set (302px) still leaves the name over 130px. */
+@media (min-width: 460px) {
+    th.idx, td.idx { width: 24px; }
+    th.spd, td.spd { width: 44px; }
+    th.frm, td.frm { width: 52px; }     /* the heading is 40px before its ? */
+    th.siz, td.siz { width: 78px; }     /* "▲ 41.2 MB" */
+    th.sts, td.sts { width: 84px; }     /* "missing source" */
+}
 
 .clipname { -webkit-user-select: text; user-select: text; }
 .clipname .dot { margin-right: 4px; vertical-align: 1px; }
@@ -320,7 +560,7 @@ tbody tr.k-bad td { color: var(--bad); }
  * ones that are merely unusual. */
 tbody tr.divider td {
     padding: 5px 4px;
-    background: #2a2020;
+    background: #2a1218;
     color: var(--bad);
     font-size: var(--fs-small);
     text-transform: uppercase;
@@ -347,7 +587,17 @@ tbody tr.divider td {
 
 /* `on` and `off` carry only the un-typed fallback; the per-type colour is set inline from
  * TYPE_COLORS, because a class per extension would mean editing CSS for every new format. */
-.chip.on { border-color: var(--accent); background: #26384a; }
+/* `on` carries only the un-typed fallback; the per-type colour and its tint are set
+ * INLINE from TYPE_COLORS, because a class per extension would mean editing CSS for every
+ * new format. The glow is the same idea one level up: a chip that is on is lit by its own
+ * hue, so the colour you are looking for on a chip is the colour of the dots in the rows. */
+.chip.on {
+    border-color: var(--accent);
+    background: #262e39;
+    color: var(--fg);
+}
+
+.chip.on .dot { box-shadow: 0 0 7px currentColor; }
 .chip.off, .chip.off .n { color: var(--dim); }
 .chip.off .dot { opacity: .35; }
 
@@ -359,14 +609,243 @@ tbody tr.divider td {
 .chip input { margin: 0; accent-color: var(--accent); }
 .chip .n { color: var(--dim); }
 
+/* Bigger than it was — 7px of a saturated hue is a smudge, 8px reads as a colour. */
 .dot {
     display: inline-block;
     flex: 0 0 auto;
-    width: 7px;
-    height: 7px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     background: var(--dim);
 }
+
+/* ------------------------------------------------------ export settings */
+
+/* The sliders are ALWAYS live. Nothing here is disabled and nothing is greyed.
+ *
+ * The inactive block used to be dimmed and desaturated, which was a mistake: a greyed
+ * control reads as one you must switch on before it will respond, so the obvious move is
+ * to tick the radio first — which is exactly the friction the dimming was meant to
+ * explain away. Drag either slider at any time; the one you touch becomes the one that
+ * applies.
+ *
+ * The ACTIVE one is marked by something added — an accent rule and a brighter readout —
+ * never by degrading the other. */
+.qblock {
+    margin-top: 8px;
+    padding-left: 8px;
+    border-left: 2px solid transparent;
+}
+
+.qblock.on { border-left-color: var(--accent); }
+.qblock.on .crfread { color: var(--fg); }
+.qblock .crfread { color: var(--dim); }
+
+.qrow { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.qrow .tick { margin-top: 0; white-space: nowrap; }
+.qrow .num { flex: 1 1 auto; }
+
+/* The live readout: the CRF value and what it costs, together, because the number on
+ * its own means nothing to anyone who has not memorised the curve. */
+.crfread {
+    margin-left: auto;
+    color: var(--fg);
+    font: var(--fs-small)/1.4 ui-monospace, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+}
+
+/* The slider, with the measured sweet spot drawn behind it. 14-18 is where the
+ * quality-per-megabyte curve bends on real 1080x1920 footage — before it, a step is
+ * nearly free; after it, every step costs more quality than it saves space. */
+.slidewrap { position: relative; margin-top: 6px; height: 20px; }
+
+/* The track is painted BEHIND the input, not by it. A styled runnable-track cannot carry a
+ * gradient and an accent-coloured fill at once, and the fill was the less useful of the
+ * two: the position of the thumb already says where you are, while the colour can say what
+ * that position COSTS.
+ *
+ * Blue = safe, red = degraded, and that meaning is kept on both sliders rather than the
+ * direction. CRF runs 1 (near-lossless) to 35 (lossy), so blue is on the left. Bitrate runs
+ * 1 Mbps (lossy) to 40 (near-lossless), so it is reversed — colour tracks quality, not
+ * which way the number happens to count. */
+.track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 7px;
+    height: 6px;
+    border-radius: 3px;
+    pointer-events: none;
+}
+
+/* The stops are placed FROM the band, not from a generic ramp. Blue = safe, red =
+ * degraded: 1 is near-lossless, so blue on the left, green at 14-18 (38-50%), red at 35.
+ *
+ * There was a second gradient here for the bitrate slider, removed with it. The lesson it
+ * left is worth keeping: the first attempt reversed THIS one and put the green band
+ * squarely on top of red. Colour that disagrees with the band is worse than no colour. */
+.track.crf {
+    background: linear-gradient(to right, #00b4ff 0%, #00b4ff 28%, #3fe0b0 38%,
+                                #ffc233 64%, #ff5470 100%);
+}
+
+/* Resolution has no measured knee, so it gets no gradient and no band — a neutral track,
+ * because colour on this one would be decoration dressed as evidence. */
+.track.plain { background: var(--line); }
+
+.qname { color: var(--fg); font-size: var(--fs-base); }
+
+/* Solid green over the gradient, so the band it marks is unmistakable rather than a tint. */
+.sweet {
+    position: absolute;
+    top: 7px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--ok);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, .5), 0 0 8px rgba(63, 240, 138, .55);
+    pointer-events: none;
+}
+
+.slidewrap input[type="range"] {
+    position: relative;
+    width: 100%;
+    height: 20px;
+    margin: 0;
+    -webkit-appearance: none;
+    appearance: none;
+    background: none;
+}
+
+.slidewrap input[type="range"]::-webkit-slider-runnable-track {
+    height: 6px;
+    background: transparent;
+}
+
+.slidewrap input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -4px;
+    border: 2px solid var(--bg);
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, .7), 0 0 8px rgba(255, 255, 255, .45);
+    cursor: pointer;
+}
+
+.scale {
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+    margin-top: 2px;
+    color: var(--dim);
+    font-size: var(--fs-small);
+}
+
+.scale .band { color: var(--ok); }
+
+/* The size flag. One row: "over [ 12 ] MB   4 over · 03 07 19". No checkbox — an empty
+ * field is already off, and a box to tick before the field would do anything is the exact
+ * friction that had to be taken off the two sliders. */
+.caprow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.capfix { color: var(--dim); font-size: var(--fs-small); }
+
+.numin {
+    width: 62px;
+    padding: 3px 5px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--card);
+    color: var(--fg);
+    font: var(--fs-small)/1.4 ui-monospace, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Drag sideways to change it, as Premiere's numeric fields do. The cursor is the only
+ * thing that advertises this, so it is set on the field itself rather than on hover — a
+ * control you have to discover by accident may as well not have the behaviour.
+ *
+ * The dotted underline says "this number is a handle" without adding a widget: the row is
+ * three items wide inside 320px and there is no space for a spinner or a grip. */
+.numin.scrub {
+    cursor: ew-resize;
+    border-bottom-style: dotted;
+    border-bottom-color: var(--dim);
+}
+
+.numin.scrub:focus { cursor: text; border-bottom-style: solid; }
+
+/* While a scrub is in flight the pointer is outside the field more often than in it, and
+ * every label it crosses would otherwise show a text caret and highlight blue. */
+body.scrubbing, body.scrubbing * {
+    cursor: ew-resize !important;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* Directly after the "MB", NOT pushed right with margin-left:auto. It is a sentence about
+ * the number beside it — at 1848px wide, auto put it 1600px away from the field it
+ * describes and the two stopped reading as one thought. */
+.capnote {
+    margin-left: 4px;
+    font: var(--fs-small)/1.4 ui-monospace, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+    color: var(--dim);
+}
+
+.capnote.hit { color: var(--warn); }
+.capnote.clear { color: var(--ok); }
+
+/* Flagged rows are marked by something ADDED — a tint and a caret — never by fading the
+ * rest. Every clip in this table is one you asked for; being heavy is a fact about it,
+ * not a fault, and the amber is the same amber the report uses for its own warnings so
+ * the two lists agree about what the colour means. */
+tr.over td { background: rgba(217, 164, 65, .09); }
+td.siz.over, .repcount.hit { color: var(--warn); }
+
+.sel {
+    margin-left: auto;
+    max-width: 150px;
+    padding: 3px 5px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--card);
+    color: var(--fg);
+    font: inherit;
+    font-size: var(--fs-small);
+}
+
+.sel.wide { margin-left: 0; max-width: none; width: 100%; }
+
+/* Two labelled fields on one row: the quality mode and its value. */
+.row2cols {
+    display: grid;
+    grid-template-columns: auto 1fr auto 1fr;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+}
+
+.row2cols .tick { margin-top: 0; white-space: nowrap; }
+
+input.num {
+    min-width: 0;
+    padding: 4px 6px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--card);
+    color: var(--fg);
+    font: var(--fs-small)/1.4 ui-monospace, Menlo, monospace;
+}
+
+input.num:disabled { color: var(--off); border-color: #1a1f27; }
 
 /* --------------------------------------------------------------- paths */
 
@@ -396,7 +875,7 @@ tbody tr.divider td {
     height: 6px;
     margin: 10px 0 6px;
     border-radius: 3px;
-    background: #2e2e2e;
+    background: #262e39;
     overflow: hidden;
 }
 
@@ -452,7 +931,7 @@ tbody tr.divider td {
     align-items: baseline;
     gap: 8px;
     padding: 4px 8px;
-    border-bottom: 1px solid #2a2a2a;
+    border-bottom: 1px solid #242b36;
     font-size: var(--fs-small);
 }
 
@@ -471,9 +950,53 @@ tbody tr.divider td {
 }
 
 .row2 .facts { flex: 0 0 auto; color: var(--dim); font-variant-numeric: tabular-nums; }
-.row2.isbad { background: #2a1c1c; }
+/* FOUR outcomes, one visual language, used identically by the live job list and by the
+ * report. Each is a coloured rail plus a marker in the row's own text — added, never taken
+ * away from the others, so a list of nineteen is read by running down the rail:
+ *
+ *   ✓  green   written this run
+ *   ▲  amber   written, but over the size flag
+ *   –  dim     kept — --resume found it already there
+ *   ✕  red     failed, offline, or not decodable
+ *
+ * The wash is deliberately faint. Nineteen fully green rows would make green mean "this is a
+ * list" rather than "this one is fine, and that one is not" — the point of colouring an
+ * outcome is the row that differs, and it can only differ from a quiet background.
+ *
+ * padding-left drops by the width of the rail on every state, so the rows do not shift
+ * sideways as their outcomes arrive. */
+.row2.isbad { background: #2a1218; border-left: 2px solid var(--bad); padding-left: 6px; }
 .row2.isbad .nm { color: var(--bad); }
 .row2.iswarn .facts { color: var(--warn); }
+
+.row2.isok {
+    border-left: 2px solid var(--ok);
+    padding-left: 6px;
+    background: rgba(63, 240, 138, .05);
+}
+
+/* The filename stays --fg for readability; the TICK carries the colour. A column of green
+ * filenames is harder to read than a column of white ones, and the thing being reported is
+ * the outcome, not the name. */
+.row2.isok .nm { color: var(--fg); }
+.row2.isok .facts { color: var(--ok); }
+
+/* Kept by --resume: correct, present, and not this run's work. Neither green nor a problem. */
+.row2.iskept { border-left: 2px solid var(--off); padding-left: 6px; }
+.row2.iskept .nm { color: var(--dim); }
+
+/* Still encoding. No rail colour yet — an unfinished clip has no outcome to report, and
+ * guessing one green before ffmpeg has closed the file is how a truncated write gets
+ * reported as fine. */
+.row2.isrun { border-left: 2px solid var(--accent); padding-left: 6px; }
+.row2.isrun .facts { color: var(--accent); }
+
+/* Over the size flag. A rule down the left rather than a background, so it reads as a
+ * separate axis from isbad/iswarn and a row can carry both at once. padding-left drops by
+ * exactly the width of the rule: without it, flagged rows sit 2px right of their
+ * neighbours and the list looks ragged for a reason nobody can name. */
+.row2.isover { border-left: 2px solid var(--warn); padding-left: 6px; }
+.row2.isover .facts { color: var(--warn); }
 
 .mergeline { color: var(--dim); font-size: var(--fs-small); line-height: 1.45; }
 .mergeline + .mergeline { margin-top: 2px; }
@@ -543,7 +1066,7 @@ code, .log {
     padding: 6px 8px;
     border: 1px solid var(--line);
     border-radius: 4px;
-    background: #111;
+    background: #14171d;
     color: var(--fg);
     font-size: var(--fs-base);
     line-height: 1.4;

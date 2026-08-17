@@ -13,6 +13,13 @@
     <button id="gear" class="gearbtn" title="Settings &amp; maintenance">⚙</button>
 </header>
 
+<!-- ONE SENTENCE SAYING WHAT TO DO NEXT, and it is the first thing on the page.
+     Everything the panel knows about its own state was previously spread across a
+     disabled button, a hint under it, a warning box, and a note beside the folder — so
+     "what do I press now" had to be assembled by the reader from four places. This says
+     it once, in the imperative, and it is never blank. -->
+<div id="nextline" class="nextline">Open a sequence in Premiere, then read it.</div>
+
 <!-- Everything about the TOOL rather than about this timeline. -->
 <section id="gearmenu" class="gearmenu" hidden>
     <p class="lbl">Cut script
@@ -37,11 +44,16 @@
 </div>
 
 <!-- STEP 1 · read ------------------------------------------------------- -->
-<section class="step">
-    <div class="stephead"><span class="stepnum">1</span>Read the timeline</div>
-    <button id="read" class="primary">Read timeline &amp; export XML</button>
-    <p id="readhint" class="hint">Open the sequence you want in Premiere, then click.
-        Nothing in your project is changed.</p>
+<!-- Collapses once it has succeeded. A finished step with a full-width blue button still
+     in it competes with the button you actually want next, and this one occupied a third
+     of the panel to say something a single line says. -->
+<section id="step1" class="step">
+    <div class="stephead"><span class="stepnum">1</span>Timeline</div>
+    <div id="step1body">
+        <button id="read" class="primary">Read timeline</button>
+        <p id="readhint" class="hint">Open the sequence you want in Premiere, then click.
+            Nothing in your project is changed.</p>
+    </div>
 
     <section id="readprog" hidden>
         <div class="bar"><div id="readfill" class="fill"></div></div>
@@ -49,7 +61,10 @@
     </section>
 
     <div id="seqbox" class="card" hidden>
-        <div class="seqname" id="seqname">—</div>
+        <div class="seqrow">
+            <div class="seqname" id="seqname">—</div>
+            <button id="readagain" class="mini">Read again</button>
+        </div>
         <div class="seqmeta" id="seqmeta"></div>
         <div id="mode" class="note" hidden></div>
         <div id="seqwarn" class="note warn" hidden></div>
@@ -67,7 +82,9 @@
 
 <!-- STEP 2 · choose ----------------------------------------------------- -->
 <section id="opts" class="step" hidden>
-    <div class="stephead"><span class="stepnum">2</span>Choose what to cut</div>
+    <div class="stephead"><span class="stepnum">2</span>Clips
+        <span id="listnote" class="listnote"></span>
+    </div>
 
     <p class="lbl">File types
         <span class="q" data-tip="Only clips whose source file is one of these types get cut. The number is how many are on this timeline; a type showing 0 is listed so the set stays the same between projects, and ticking it is remembered for a timeline that has it.">?</span>
@@ -76,12 +93,11 @@
     <div id="types" class="types"></div>
     <div id="typehint" class="note warn" hidden></div>
 
-    <p class="lbl" id="listlbl">Clips
+    <p class="lbl" id="listlbl">Every cut, in timeline order
         <span class="q" data-tip="Every cut this export will make, in timeline order. Untick any single clip to leave it out. Numbers renumber to match the filenames you'll actually get. Hover a row for its timeline position, where the timing came from, and any notes.">?</span>
-        <span id="listnote" class="listnote"></span>
     </p>
     <div id="scanning" class="hint" hidden>Reading the cut list…</div>
-    <!-- Six columns, chosen to FIT 320px. Timeline in, Timing and Notes moved to the row's
+    <!-- Seven columns, sized to fit 320px. Timeline in, Timing and Notes moved to the row's
          tooltip: a table that scrolls sideways inside a page that scrolls down was the main
          reason this panel felt disorderly. -->
     <div class="tablewrap" id="tablewrap" hidden>
@@ -93,6 +109,7 @@
                 <th>Clip</th>
                 <th class="spd">Speed<span class="q" data-tip="Premiere's speed percentage, shown only when it is not 100%. The cut is written at the source's own speed, so a sped-up clip comes out longer than it looks on the timeline.">?</span></th>
                 <th class="frm num">Frames<span class="q" data-tip="How many source frames the cut will contain. This is the number to check a clip against — not the speed percentage, which is a ratio of two rounded values and cannot be reproduced exactly.">?</span></th>
+                <th class="siz num">Size<span class="q" data-tip="What this clip is expected to weigh at the current quality setting — the source's own bitrate scaled by a ratio measured per CRF, then by the resolution. An estimate; it moves as you drag the sliders.">?</span></th>
                 <th class="sts">Status<span class="q" data-tip="ready = not cut yet · missing source = not at the recorded path · AE comp = Dynamic Link, render it out first. Hover a row for its notes.">?</span></th>
             </tr></thead>
             <tbody id="clipbody"></tbody>
@@ -101,8 +118,31 @@
 </section>
 
 <!-- STEP 3 · export ----------------------------------------------------- -->
+<!-- FOUR lines and a button. It used to be twelve controls stacked above the button you
+     came for: a destination, a tick, a size flag, a preset menu, two sliders, a frame-rate
+     menu, two preset buttons and two notes. Almost all of it is set once and never touched
+     again, so all of it now lives behind one summary line that says what it currently
+     adds up to. -->
 <section id="step3" class="step" hidden>
     <div class="stephead"><span class="stepnum">3</span>Export</div>
+
+    <!-- PRESET FIRST, and always visible.
+         The collapsible box that used to hold all of this is gone: he tried it and asked
+         for the settings back on screen permanently. A summary line plus a Change button
+         is a good trade only when the settings are rarely touched, and they are not. -->
+    <p class="lbl">Render preset
+        <span class="q" data-tip="A named set of the settings below, stored in a file the engine owns so the same preset can be used from a terminal. Choosing one fills in everything below it; changing anything by hand sets this back to Custom.">?</span>
+        <select id="preset" class="sel"></select>
+    </p>
+    <!-- A preset made before the bitrate slider was removed, or made from a terminal,
+         can still carry a target rate. The panel has no control that can show one, so
+         it says so rather than quietly exporting at a quality nobody chose. -->
+    <div id="presetwarn" class="note warn" hidden></div>
+
+    <div class="btnrow">
+        <button id="savepreset" class="mini">Save as preset</button>
+        <button id="delpreset" class="mini">Delete preset</button>
+    </div>
 
     <!-- Where output goes belongs HERE, not under "choose what to cut". -->
     <p class="lbl">Save to
@@ -118,6 +158,94 @@
         <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. Useful after fixing offline media on a long timeline.">?</span>
     </label>
 
+    <!-- A review aid, not an encode setting: nothing here changes a single flag given
+         to ffmpeg. Empty means off, so there is no box to tick before the field does
+         anything — the same reason the sliders have none. -->
+    <p class="lbl">Flag large clips
+        <span class="q" data-tip="Marks any clip expected to land above this size, in the list above and again in the report after the export — where the number is the file's ACTUAL size on disk rather than an estimate. Drag the number sideways to change it, or click it and type. Leave it empty for no flagging: it changes nothing about the encode, it only tells you which cuts are the heavy ones.">?</span>
+    </p>
+    <div class="caprow">
+        <span class="capfix">over</span>
+        <input type="number" id="cap" class="numin scrub" min="0" step="1"
+               placeholder="off" title="drag sideways to change, or click and type">
+        <span class="capfix">MB</span>
+        <span id="capnote" class="capnote"></span>
+    </div>
+
+    <!-- ONE quality control. The target-bitrate slider that used to sit below this is
+         gone: measured on real footage it lost on both counts — CRF 18 reached SSIM
+         0.9915 at 4.9 MB where 8 Mbps needed 5.9 MB for 0.9922, and target rate turned
+         out to be the WORSE size predictor on clips this short, using only 43-57% of
+         what it was allowed. `--bitrate` still exists in the engine for anyone with a
+         delivery spec. The green band is MEASURED, not chosen. -->
+    <div class="qblock on" id="crfblock">
+        <div class="qrow">
+            <span class="qname">Quality
+                <span class="q" data-tip="CRF — Constant Rate Factor. The encoder holds a QUALITY and spends whatever bits that takes, so a still hand costs less than moving fabric. Lower is bigger and better. 1 is the default — never 0, x264 then emits a profile no Mac can play.">?</span>
+            </span>
+            <span id="crfread" class="crfread">1</span>
+        </div>
+        <div class="slidewrap">
+            <div class="track crf"></div>
+            <div class="sweet" id="sweetcrf"></div>
+            <!-- Halves, not whole numbers. x264 takes a float and 18.5 encodes
+                 differently from 18 — measured, not assumed. -->
+            <input type="range" id="crf" min="1" max="35" step="0.5" value="1">
+        </div>
+        <div class="scale">
+            <span>1 · near-lossless</span>
+            <span class="band">14–18 best value</span>
+            <span>35 · small</span>
+        </div>
+    </div>
+
+    <!-- No coloured track and no green band: the quality slider has a MEASURED knee
+         behind it and this one has nothing of the kind — the right resolution is
+         whatever the thing consuming these clips wants, which is not a property of the
+         footage. A band here would be decoration pretending to be evidence. -->
+    <div class="qblock on" id="scaleblock">
+        <div class="qrow">
+            <span class="qname">Resolution
+                <span class="q" data-tip="Output size as a percentage of each source's own resolution. This does NOT resample time — the cuts still hold exactly the frames the timeline used, just fewer pixels each, so they stay frame exact. It is the largest single lever on file size: at 50% a clip keeps a quarter of its pixels. Both dimensions round down to even, because H.264 cannot encode an odd one.">?</span>
+            </span>
+            <span id="scaleread" class="crfread">100% · source</span>
+        </div>
+        <div class="slidewrap">
+            <div class="track plain"></div>
+            <input type="range" id="scale" min="10" max="100" step="1" value="100">
+        </div>
+        <div class="scale">
+            <span>10% · tiny</span>
+            <span>100% · source</span>
+        </div>
+    </div>
+
+    <p class="lbl">Frame rate
+        <span class="q" data-tip="Leave as Source unless you have a reason. Forcing a rate RESAMPLES — frames are dropped or duplicated — so the clips no longer hold the frames the timeline used, and the manifest records them as not frame-exact.">?</span>
+    </p>
+    <select id="fps" class="sel wide">
+        <option value="">Source rate — frame exact</option>
+        <option value="23.976">23.976</option>
+        <option value="24">24</option>
+        <option value="25">25</option>
+        <option value="29.97">29.97</option>
+        <option value="30">30</option>
+        <option value="50">50</option>
+        <option value="59.94">59.94</option>
+        <option value="60">60</option>
+    </select>
+    <div id="fpswarn" class="note bad" hidden></div>
+
+    <div id="sizeest" class="note" hidden></div>
+    <div class="btnrow">
+        <!-- Encodes a second of each clip for a figure good to a few percent. Opt-in, for
+             one scan: the estimate above is metadata only and costs nothing. -->
+        <button id="remeasure" class="mini" hidden
+                title="encode a second of each clip at these settings">Re-measure sizes</button>
+    </div>
+
+    <!-- The label says the action and its size, so there is nothing to work out before
+         pressing it: "Export 19 clips". -->
     <button id="export" class="primary">Export clips</button>
 </section>
 
@@ -139,7 +267,7 @@
 <section id="report" hidden>
     <!-- The 278-character paragraph that used to close this section, as a tooltip. It is a
          fact about the tool, not about this run, and it was reprinted on every export. -->
-    <div class="stephead">Status report
+    <div class="stephead">Done
         <span class="q" data-tip="A cut is written at the source's own speed, so a sped-up clip comes out LONGER than it looks on the timeline. Re-speeding it by the percentage shown returns it to the timeline length — to within about a frame, because the frame count is whole and the range Premiere used is not. Check a clip on its frame count, not by re-speeding it.">?</span>
     </div>
 

@@ -33,6 +33,12 @@
                "gear", "gearmenu", "enginestat", "recheck",
                "repcomplete", "repdestrow", "repdest", "repdestlbl", "mergedet", "mergesum",
                "jobtally", "joblist", "stalled", "copyout", "copydest",
+               "preset", "crf", "fps", "fpswarn",
+               "sizeest", "savepreset", "delpreset", "crfread", "sweetcrf",
+               "crfblock", "cap", "capnote", "presetwarn",
+               "nextline", "step1", "step1body", "readagain",
+               "remeasure",
+               "scale", "scaleread", "scaleblock",
                "onlyproblab"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
@@ -50,6 +56,17 @@
         total: 0,
         clips: [],       // the cut list, from a --manifest-only scan
         report: [],      // rows built from the manifest after a run
+        presets: {},     // named export settings, owned by the engine
+        crfVal: 1,       // the one quality setting there is
+        cap: 0,          // MB above which a clip is flagged as large; 0 = no flagging
+        // Which settings the MEASURED sizes belong to. Not the current settings — the ones
+        // the probe actually ran at, so the panel can say when the two have parted.
+        probeCrf: 1,
+        probeScale: 100,
+        // Set for ONE scan by the Re-measure button, then cleared. The default scan must
+        // stay free, so this is never sticky.
+        wantProbe: false,
+        scale: 100,      // output resolution, percent of each source's own
         merge: [],       // the '++' lines xmlcut printed about the merge
         busy: false,
         jobs: {},            // output_file -> {status, t0, t1} while cutting
@@ -151,8 +168,8 @@
         el.pickout.disabled = state.busy;
         el.pickscript.disabled = state.busy;
         el.resume.disabled = state.busy;
-        el.read.textContent = (state.busy && label) ? label
-                                                    : "Read timeline & export XML";
+        el.read.textContent = (state.busy && label) ? label : "Read timeline";
+        el.readagain.disabled = state.busy;
         refreshExportEnabled();
     }
 
@@ -176,6 +193,28 @@
         if (!allTypes) {
             var exts = selectedExts();
             if (exts.length) args.push("--ext", exts.join(","));
+        }
+        /* The settings ride on BOTH now, and that is a reversal.
+         *
+         * They used to be export-only, on the reasoning that a scan encodes nothing so its
+         * manifest would describe no file. That stopped being true when the size estimate
+         * started MEASURING: the scan encodes a second of each clip, and it has to encode
+         * it at the settings on screen or the number it produces belongs to some other
+         * export.
+         *
+         * Extrapolating instead was tried and is not an option. Probing at crf 1 and
+         * scaling to the target with CRF_SIZE_RATIO was measured at 1.8x to 10.5x wrong —
+         * the table's shape is off, and it is off by DIFFERENT amounts for h264 and ProRes
+         * sources (0.25-0.30 vs 0.14-0.16 of the crf-1 rate at crf 14), so no single curve
+         * fixes it. Measure at the settings you are going to use. */
+        args = args.concat(settingArgs());
+        // Opt-in, and for ONE scan. Encoding a second of every clip is the accurate way to
+        // size an export and the slow way; the default estimate is metadata only.
+        if (state.wantProbe) {
+            args.push("--size-probe");
+            // Cleared as soon as it is USED, not on the reply: the next ordinary scan —
+            // a re-read, a type change — must not silently start encoding again.
+            state.wantProbe = false;
         }
         return args;
     }
@@ -202,26 +241,54 @@
      * glance. Families share a hue — camera video blue/purple, stills green, audio
      * amber, project files red — because what usually matters is "is this footage or
      * is this a graphic", not which exact container it came in. */
+    /* ONE HUE PER EXTENSION, not per family.
+     *
+     * This table used to give every video container the same blue — mp4, m4v, avi and webm
+     * were indistinguishable, and so were png/jpg/tif/gif — which defeated the point of
+     * colouring them at all. The dot beside a clip name and the chip that switches its type
+     * on are the same colour, so "which of these rows are the .mov ones" is answered by
+     * looking rather than by reading.
+     *
+     * Hues are spread around the wheel and the WIDELY SEPARATED ones go to the extensions
+     * that actually turn up together. Siblings inside a family keep the family's hue and
+     * shift lightness instead, so .m4v still reads as "a video like .mp4" while remaining
+     * its own colour — related, not identical.
+     *
+     * Saturated for a dark panel: on #16181d every one of these clears 8:1 against the
+     * ground, which the muted set they replaced did not.
+     */
     var TYPE_COLORS = {
-        mp4: "#4a90d9", m4v: "#4a90d9", avi: "#4a90d9", webm: "#4a90d9",
-        mov: "#8e6fd9", qt: "#8e6fd9",
-        mxf: "#3f9e8c", mts: "#3f9e8c", m2ts: "#3f9e8c", mpg: "#3f9e8c",
-        mpeg: "#3f9e8c", ts: "#3f9e8c",
-        r3d: "#c0603f", braw: "#c0603f", ari: "#c0603f", dng: "#c0603f",
-        png: "#4fa85f", jpg: "#4fa85f", jpeg: "#4fa85f", tif: "#4fa85f",
-        tiff: "#4fa85f", bmp: "#4fa85f", gif: "#4fa85f", webp: "#4fa85f",
-        psd: "#7fae4a", psb: "#7fae4a", ai: "#7fae4a",
-        wav: "#c99a3f", mp3: "#c99a3f", aif: "#c99a3f", aiff: "#c99a3f",
-        m4a: "#c99a3f", aac: "#c99a3f", flac: "#c99a3f",
-        aep: "#c05c5c", prproj: "#c05c5c", c4d: "#c05c5c", aet: "#c05c5c",
-        ppj: "#c05c5c", fcpxml: "#c05c5c"
+        // video containers — cyan-blue family, one step apart
+        mp4: "#00b4ff", m4v: "#5ad9ff", avi: "#2f9fd9", webm: "#7d8bff",
+        // QuickTime — violet, the one the timelines pair with mp4 most often
+        mov: "#b57bff", qt: "#9a5ff0",
+        // broadcast/transport — teal
+        mxf: "#22e0c8", mts: "#3ff0d8", m2ts: "#19c4b0",
+        mpg: "#14b8a6", mpeg: "#14b8a6", ts: "#0fa396",
+        // camera raw — ember
+        r3d: "#ff6a2f", braw: "#ff8a3f", ari: "#e05520", dng: "#ff9d5c",
+        // stills — green
+        png: "#3ff08a", jpg: "#ffd23f", jpeg: "#ffd23f", tif: "#7ce68a",
+        tiff: "#7ce68a", bmp: "#a8e05f", gif: "#b6f03f", webp: "#5ce0a8",
+        // layered art — magenta
+        psd: "#ff5ecb", psb: "#e04fb0", ai: "#ff8fd8",
+        // audio — orange
+        wav: "#ff9f2f", mp3: "#ff7a45", aif: "#ffb85c", aiff: "#ffb85c",
+        m4a: "#e08a3f", aac: "#ffc98a", flac: "#d9762f",
+        // project files, which are never cuttable — red-pink, the warning family
+        aep: "#ff5470", prproj: "#ff7d92", c4d: "#e03f5c",
+        aet: "#ff9aab", ppj: "#ff7d92", fcpxml: "#d9455f"
     };
-    var FALLBACK_COLORS = ["#5b8fc9", "#9a7bc8", "#4f9e86", "#b98a44",
-                           "#b3695f", "#7d9a4a", "#a86fa0", "#5f9aa8"];
+
+    /* For an extension the table has never heard of. Eight hues that do not collide with
+     * each other; which one an extension lands on is deterministic, so it keeps its colour
+     * between runs rather than changing every read. */
+    var FALLBACK_COLORS = ["#4fd0ff", "#c08cff", "#3fe8b0", "#ffd45c",
+                           "#ff8a7a", "#c6f04f", "#ff7ad0", "#5fd8e8"];
 
     function colorFor(ext) {
         if (TYPE_COLORS[ext]) return TYPE_COLORS[ext];
-        if (ext === "(none)") return "#6a6a6a";
+        if (ext === "(none)") return "#8b93a3";
         // Deterministic, so the same extension keeps its colour between runs.
         var h = 0;
         for (var i = 0; i < ext.length; i++) h = (h * 31 + ext.charCodeAt(i)) % 9973;
@@ -534,6 +601,8 @@
         el.types.innerHTML = "";
         el.listnote.textContent = "";
         show(el.seqbox, false);
+        show(el.step1body, true);
+        el.step1.className = "step";
         show(el.opts, false);
         show(el.step3, false);
         show(el.tablewrap, false);
@@ -763,6 +832,11 @@
             + r.video_clips + " video clip" + (r.video_clips === 1 ? "" : "s")
             + " as Premiere counts them";
         show(el.seqbox, true);
+        // A finished step 1 folds away. Its full-width blue button competed with the
+        // one you actually want next, and took a third of the panel to say a line's
+        // worth. `Read again` in the summary card is the way back.
+        show(el.step1body, false);
+        el.step1.className = "step done";
 
         if (r.keyframed_ramps > 0) {
             el.seqwarn.textContent = r.keyframed_ramps + " clip"
@@ -850,7 +924,9 @@
         var r = parseInt(hex.substring(1, 3), 16);
         var g = parseInt(hex.substring(3, 5), 16);
         var b = parseInt(hex.substring(5, 7), 16);
-        return "rgba(" + r + "," + g + "," + b + ",0.18)";
+        // Stronger than the 0.18 it was: the chip has to read as lit from its own
+        // colour rather than tinted with a hint of it.
+        return "rgba(" + r + "," + g + "," + b + ",0.22)";
     }
 
     /* What the Export button will actually write: type on, cuttable, and ticked. Counted
@@ -943,6 +1019,44 @@
             show(el.gearmenu, true);
             el.gear.className = "gearbtn on";
         }
+        renderNext();
+    }
+
+    /* ONE SENTENCE saying what to do next, and it is never blank.
+     *
+     * Everything the panel knew about its own state used to be spread across a disabled
+     * button, the hint under it, a warning box and a note beside the folder — so "what do
+     * I press now" was something the reader had to assemble from four places, and the
+     * commonest question about this panel was exactly that.
+     *
+     * Ordered by what BLOCKS progress, most fundamental first, because that is the order
+     * the answers have to come in: no engine beats no read beats no folder beats nothing
+     * ticked. The last branch is the happy one and it still says something, because a line
+     * that empties out when everything is fine reads as a line that broke.
+     */
+    function renderNext() {
+        if (!el.nextline) return;
+        var n = selectedCount(), cls = "nextline", msg;
+        if (state.busy) {
+            msg = "Reading the timeline…";
+            cls += " busy";
+        } else if (!state.script) {
+            msg = "The cut script is missing. Open ⚙ and press Re-check to fetch it.";
+            cls += " bad";
+        } else if (!state.dump) {
+            msg = "Open a sequence in Premiere, then read it.";
+        } else if (!state.out) {
+            msg = "Choose a folder to save into.";
+        } else if (!n) {
+            msg = "Nothing is ticked yet — pick at least one clip or file type.";
+            cls += " warn";
+        } else {
+            msg = "Ready. " + n + " clip" + (n === 1 ? "" : "s") + " will be written into "
+                + (seqFolder() ? seqFolder() + "/" : "the folder above") + ".";
+            cls += " good";
+        }
+        el.nextline.textContent = msg;
+        el.nextline.className = cls;
     }
 
     /* -------------------------------------------------- live per-clip state */
@@ -1023,10 +1137,15 @@
         el.joblist.innerHTML = "";
         for (var k = 0; k < rows.length; k++) {
             var r = rows[k], d = document.createElement("div");
-            d.className = "row2" + (r.j.status === "bad" ? " isbad" : "");
+            // Live, and the same three-colour language as the report: a clip goes green the
+            // moment it lands rather than only once the whole run finishes. On a 94-clip
+            // export that is the difference between watching a list and waiting for one.
+            d.className = "row2" + (r.j.status === "bad" ? " isbad"
+                : r.j.status === "run" ? " isrun" : " isok");
             var nm2 = document.createElement("span");
             nm2.className = "nm";
-            nm2.textContent = r.nm;
+            nm2.textContent = (r.j.status === "bad" ? "✕ "
+                : r.j.status === "run" ? "· " : "✓ ") + r.nm;
             d.appendChild(nm2);
             var f = document.createElement("span");
             f.className = "facts";
@@ -1372,6 +1491,14 @@
             return false;
         }
         state.clips = [];
+        /* The settings the scan's probe actually ran at, taken from the manifest rather
+         * than assumed to be the current ones. A scan is asynchronous: the sliders can
+         * have moved between spawning it and reading its result, and recording what is on
+         * screen now would claim a measurement that was never taken. */
+        var pset = data.settings || {};
+        state.probeCrf = (pset.crf === null || pset.crf === undefined)
+            ? state.crfVal : Number(pset.crf);
+        state.probeScale = Number(pset.scale_percent || 100);
         var clips = data.clips || [];
         for (var i = 0; i < clips.length; i++) {
             var c = clips[i];
@@ -1406,6 +1533,30 @@
                     ? (Math.round(spd) + "%" + (c.reversed ? "⏪" : "")) : "",
                 timing: String(c.timing_source || ""),
                 frames: Number(c.source_consumed_frames || 0),
+                // For the live size estimate — no encoding needed, the scan already
+                // probed the source.
+                secs: Number(c.source_duration_seconds || 0),
+                srcBitrate: Number(c.bitrate || 0),
+                // MEASURED bits per second, from the engine encoding a second or so of
+                // this very clip at these very settings. The only trustworthy basis for
+                // the size column — see size_probe() in xmlcut.py for the 180x that the
+                // source-bitrate model was out by.
+                probeBps: Number(c.probe_bps || 0),
+                // For the metadata model: what it costs per pixel depends on the source's
+                // codec class and its own bits per pixel, not on its bitrate alone.
+                w: Number(c.width || 0),
+                h: Number(c.height || 0),
+                srcFps: Number(c.source_fps || 0),
+                codec: String(c.codec || "").toLowerCase(),
+                // media_kind, not display_kind — `kind` above is the row's colour, and
+                // pricing a video as a still because they shared a field name was exactly
+                // the bug this separates.
+                still: String(c.media_kind || "") === "still",
+                // The source's own pixels, so the resolution slider can say what it will
+                // actually produce rather than only a percentage. A timeline mixes
+                // 1080x1920 and 2160x3840, and "50%" means two different files.
+                w: Number(c.width || 0),
+                h: Number(c.height || 0),
                 status: status,
                 notes: notes,
                 kind: kind,
@@ -1483,6 +1634,8 @@
     function renderClips() {
         var body = el.clipbody;
         body.innerHTML = "";
+        // Read once for the whole table rather than per row.
+        var qs = settings(), lim = capBytes();
         var visible = [];
         for (var i = 0; i < state.clips.length; i++) {
             var r = state.clips[i];
@@ -1513,14 +1666,19 @@
                 var dr = document.createElement("tr");
                 dr.className = "divider";
                 var dc = document.createElement("td");
-                dc.setAttribute("colspan", "6");
+                dc.setAttribute("colspan", "7");
                 dc.textContent = "cannot be cut — fix these or untick their type";
                 dr.appendChild(dc);
                 body.appendChild(dr);
             }
             var tr = document.createElement("tr");
             var picked = isPicked(v);
-            tr.className = "k-" + v.kind + (picked ? "" : " unpicked");
+            // Sized at the CURRENT settings, so both the number and the flag move with
+            // the sliders. Computed before the row class, which needs to know.
+            var eb = clipBytes(v, qs);
+            var over = (lim > 0 && eb > lim && picked && v.group === 0);
+            tr.className = "k-" + v.kind + (picked ? "" : " unpicked")
+                + (over ? " over" : "");
 
             // The tick lives in its own cell, built here rather than through the generic
             // cell loop because it holds a control rather than text.
@@ -1551,10 +1709,17 @@
              * clips.csv carry all of it, and the tooltip has it per row. */
             tr.title = [v.clip, "at " + v.tc,
                         v.timing ? "timing from " + v.timing : "",
-                        v.notes, v.source].filter(function (s) { return !!s; }).join(" · ");
+                        v.notes, v.source,
+                        over ? "over the " + state.cap + " MB flag" : ""
+                       ].filter(function (s) { return !!s; }).join(" · ");
             var cells = [
                 [v.n ? pad2(v.n) : "—", "idx num"], [v.clip, "clipname"],
-                [v.speed, "spd"], [String(v.frames), "frm num"], [v.status, "sts"]
+                [v.speed, "spd"], [String(v.frames), "frm num"],
+                // The caret marks the flagged ones for anyone who cannot rely on the
+                // colour — the row tint alone would be the only thing saying it.
+                [eb > 0 ? (over ? "▲ " : "") + humanBytes(eb) : "—",
+                 "siz num" + (over ? " over" : "")],
+                [v.status, "sts"]
             ];
             for (var k = 0; k < cells.length; k++) {
                 var td = document.createElement("td");
@@ -1587,6 +1752,7 @@
             ? (cuttable + " of " + visible.length + " cuttable")
             : (chosen + " of " + cuttable + " ticked");
         syncPickAll();
+        renderSizeEstimate();
     }
 
     function pad2(n) { return (n < 10 ? "0" : "") + n; }
@@ -1777,7 +1943,7 @@
     }
 
     /* Is this path the copy the panel owns? Only that one is ever replaced automatically —
-     * a script somewhere else is his own checkout, and not ours to overwrite. */
+     * a script somewhere else is the user's own checkout, and not ours to overwrite. */
     function isOurCopy(p) {
         var dir = extensionDir();
         return !!(dir && p && String(p).indexOf(dir + "/lib/") === 0);
@@ -1817,7 +1983,7 @@
     /* The whole recovery, in order: is it there → does it run → if absent, download it,
      * validate it, write it into the panel and link it.
      *
-     * `auto` is true when this ran by itself on open. He asked for the download to happen
+     * `auto` is true when this ran by itself on open. The download was asked to happen
      * without being asked, and it only ever happens when NO engine could be found —
      * an existing one is never replaced from here. */
     function recheckScript(auto) {
@@ -1916,6 +2082,422 @@
                 });
             });
         });
+    }
+
+    /* ------------------------------------------------- export settings */
+
+    /* The defaults here are the MEASURED ones — crf 1 because crf 0 emits a profile no Mac
+     * can play, veryfast because the preset never moves a frame boundary. Everything in
+     * this section is a deliberate move away from them, so each control states its cost
+     * rather than leaving it to be discovered in the output. */
+    function settings() {
+        return {
+            crf: state.crfVal,
+            fps: el.fps.value ? parseFloat(el.fps.value) : null,
+            scale: state.scale
+        };
+    }
+
+    /* The engine's own flags, so the panel cannot describe one export and run another. */
+    function settingArgs() {
+        var s = settings(), a = [];
+        if (s.crf && s.crf !== 1) a.push("--crf", String(s.crf));
+        if (s.fps) a.push("--fps", String(s.fps));
+        if (s.scale && s.scale < 100) a.push("--scale", String(s.scale));
+        return a;
+    }
+
+    /* Output bitrate relative to the source's, per crf. The same measured table the engine
+     * carries — it cannot be imported into JavaScript, so it is duplicated deliberately and
+     * noted in both places. Panel-side only for the live preview; the number that goes in
+     * the manifest is always the engine's. */
+    var CRF_SIZE_RATIO = [[1, 2.77], [14, 1.26], [18, 0.94], [23, 0.62], [28, 0.37]];
+
+    function sizeRatio(crf) {
+        if (crf <= CRF_SIZE_RATIO[0][0]) return CRF_SIZE_RATIO[0][1];
+        var last = CRF_SIZE_RATIO[CRF_SIZE_RATIO.length - 1];
+        if (crf >= last[0]) return last[1];
+        for (var i = 0; i < CRF_SIZE_RATIO.length - 1; i++) {
+            var a = CRF_SIZE_RATIO[i], b = CRF_SIZE_RATIO[i + 1];
+            if (crf >= a[0] && crf <= b[0]) {
+                return a[1] + (crf - a[0]) / (b[0] - a[0]) * (b[1] - a[1]);
+            }
+        }
+        return last[1];
+    }
+
+    function humanBytes(n) {
+        var u = ["B", "KB", "MB", "GB"], i = 0;
+        while (n >= 1024 && i < 3) { n /= 1024; i++; }
+        return (i < 2 ? Math.round(n) : n.toFixed(1)) + " " + u[i];
+    }
+
+    /* Live estimate from the SCAN's manifest — seconds and source bitrates are already
+     * there, so this needs no encoding and updates as the settings change. Measured
+     * against real encodes of the fixture, it lands within ~6% (13.0 vs 12.3 MB) on
+     * footage the ratio table fits, and is worded as an estimate everywhere. */
+    /* Bytes for ONE clip at the current settings. Everything that shows a size goes
+     * through here: the per-row column, the total beside the slider, and the report. Three
+     * copies of this arithmetic would be three chances for the table and the total to
+     * disagree in front of someone deciding whether to press Export. */
+    /* Bytes for ONE clip. MEASURED where possible.
+     *
+     * The measured path needs no arithmetic beyond multiplying by the clip's length: the
+     * engine already encoded a second of this clip at these settings, resolution filter
+     * included, so the resolution and the crf are inside the number. Applying the crf table
+     * or the area factor on top would be counting them twice.
+     *
+     * The modelled path below is the fallback for --no-size-probe, for a clip whose probe
+     * timed out, and for an older engine that does not send probe_bps. It scales the
+     * SOURCE's bitrate, which is unreliable by up to 180x on intraframe footage; it is kept
+     * only so that something is shown, and staleSizes() tells the reader which they have. */
+    /* THE SIZE MODEL, mirrored from xmlcut.py — metadata only, so it costs nothing and
+     * follows the sliders live. Duplicated deliberately: it cannot be imported into a CEP
+     * panel, and both copies carry the same note. Calibrated by measuring real encodes at
+     * six crf values; see estimate_bps() and CLAUDE.md.
+     *
+     * Unit is OUTPUT bits per pixel per frame, which is the thing that clusters. Codec class
+     * separates it — an already-compressed source re-encodes larger, because the second pass
+     * has to reproduce the first one's artefacts as well as the picture. */
+    var INTRAFRAME = { prores: 1, dnxhd: 1, dnxhr: 1, mjpeg: 1, cineform: 1, v210: 1,
+                       v410: 1, rawvideo: 1, ffv1: 1, huffyuv: 1, dvvideo: 1, hqx: 1,
+                       cfhd: 1, prores_ks: 1 };
+    var BPP_INTER = [[6, 0.759], [14, 0.290], [18, 0.144], [23, 0.066], [28, 0.032]];
+    var BPP_INTRA = [[6, 0.261], [14, 0.069], [18, 0.030], [23, 0.013], [28, 0.006]];
+    var SRC_SHARE = [[6, 2.806], [14, 1.074], [18, 0.598], [23, 0.288], [28, 0.144]];
+    // A still is not a rate — almost all of its file is the one keyframe, so it is priced
+    // as this many frames' worth of picture whatever its length.
+    var STILL_FRAMES = 1.5;
+    var CONTAINER_FIXED = 512;   // measured: 458-byte intercept, and it does NOT scale
+
+    function lerp(tbl, x) {
+        if (x <= tbl[0][0]) return tbl[0][1];
+        var last = tbl[tbl.length - 1];
+        if (x >= last[0]) return last[1];
+        for (var i = 0; i < tbl.length - 1; i++) {
+            var a = tbl[i], b = tbl[i + 1];
+            if (x >= a[0] && x <= b[0]) {
+                return a[1] + (x - a[0]) / (b[0] - a[0]) * (b[1] - a[1]);
+            }
+        }
+        return last[1];
+    }
+
+    function clipBytes(c, s) {
+        if (!c || !(c.secs > 0)) return 0;
+        // MEASURED, if Re-measure was pressed. Nothing to compute — the probe ran at these
+        // settings with the resolution filter applied, so the number is already right.
+        if (c.probeBps > 0) return c.probeBps * c.secs / 8 + CONTAINER_FIXED;
+
+        var crf = s.crf || 1, pct = s.scale || 100;
+        var d = scaledDims(c.w, c.h, pct);
+        var intra = !!INTRAFRAME[c.codec];
+        if (d && c.still) {
+            // A still: one picture, not a per-second rate. Checked FIRST, so a video that
+            // happens to be missing its frame rate cannot fall through into this branch —
+            // which it did, and priced a 2-second clip as a single frame.
+            return lerp(BPP_INTER, crf) * d[0] * d[1] * STILL_FRAMES / 8 + CONTAINER_FIXED;
+        }
+        if (d && c.srcFps > 0) {
+            var px = d[0] * d[1] * c.srcFps;
+            var bpp = lerp(intra ? BPP_INTRA : BPP_INTER, crf);
+            if (!intra && c.srcBitrate > 0) {
+                // The source's own bits per pixel, as a CEILING — a genuinely low-bitrate
+                // source really does encode small. Computed at the SOURCE's dimensions,
+                // because a downscale removes pixels, not detail per pixel.
+                var sbpp = c.srcBitrate / (c.w * c.h * c.srcFps);
+                bpp = Math.min(bpp, sbpp * lerp(SRC_SHARE, crf));
+            }
+            return bpp * px * c.secs / 8 + CONTAINER_FIXED;
+        }
+        if (!(c.srcBitrate > 0)) return 0;
+        // No dimensions at all — the last resort, and the unreliable one.
+        return c.srcBitrate * sizeRatio(crf) * Math.pow(pct / 100, 2) * c.secs / 8;
+    }
+
+    /* Are the measured sizes still describing the settings on screen?
+     *
+     * A probe belongs to the crf and the scale it ran at. Moving either makes every size
+     * on screen the answer to a question nobody is asking any more — and the estimate must
+     * say so rather than quietly scaling the number, because scaling it is exactly the
+     * 10x-wrong extrapolation this whole change exists to remove.
+     */
+    function measured() {
+        for (var i = 0; i < state.clips.length; i++) {
+            if (state.clips[i].probeBps > 0) return true;
+        }
+        return false;
+    }
+
+    /* Only the MEASURED sizes can go stale. The model follows the sliders by construction,
+     * so with no probe there is nothing to be out of date — which is the whole reason the
+     * model is the default: live, free, and never lying about which settings it describes. */
+    function staleSizes() {
+        return measured() && (state.crfVal !== state.probeCrf
+                              || state.scale !== state.probeScale);
+    }
+
+    /* The dimensions this scale will actually produce, computed the SAME way the engine's
+     * scaled_dims() and ffmpeg's own filter compute them — truncated to even, because
+     * H.264 4:2:0 cannot encode an odd dimension. Three copies of this rounding would be
+     * three chances for the panel to promise a size the file does not have. */
+    function scaledDims(w, h, pct) {
+        if (!w || !h) return null;
+        var f = pct / 100;
+        return [Math.max(2, Math.floor(w * f / 2) * 2),
+                Math.max(2, Math.floor(h * f / 2) * 2)];
+    }
+
+    /* "50% · 540×960", or "50% · mixed sources" when the timeline holds more than one
+     * resolution — naming one of them would be wrong for every clip of the other. */
+    function renderScaleRead() {
+        if (!el.scaleread) return;
+        var pct = state.scale;
+        if (pct >= 100) { el.scaleread.textContent = "100% · source"; return; }
+        // The clips that will actually be CUT, not every clip on the timeline: an
+        // unticked 3000x3000 still would otherwise turn a uniform 1080x1920 export into
+        // "mixed sources" on the strength of a file nobody is exporting.
+        var picked = pickedClips();
+        var seen = {}, dims = null, n = 0;
+        for (var i = 0; i < picked.length; i++) {
+            var c = picked[i];
+            if (!c.w || !c.h) continue;
+            var k = c.w + "x" + c.h;
+            if (!seen[k]) { seen[k] = 1; n++; dims = [c.w, c.h]; }
+        }
+        var out = (n === 1) ? scaledDims(dims[0], dims[1], pct) : null;
+        el.scaleread.textContent = pct + "% · "
+            + (out ? (out[0] + "×" + out[1])
+                   : (n > 1 ? "mixed sources" : "of source"));
+    }
+
+    /* The "flag large clips" threshold in BYTES, or 0 for off.
+     *
+     * MB here is 1024*1024, matching humanBytes — the two numbers sit next to each other
+     * on the same row, and a clip shown as "10 MB" that is not flagged by a 10 MB cap
+     * would read as a bug in whichever of the two the reader trusted less. */
+    function capBytes() {
+        return state.cap > 0 ? state.cap * 1024 * 1024 : 0;
+    }
+
+    /* Whether one finished clip is over the flag, asked of the size it ACTUALLY came out
+     * at. Derived on every render rather than stored on the row, so typing a new
+     * threshold re-marks a report that is already on screen — the report survives in
+     * state.report long after the run, and a stored verdict would answer the question the
+     * field asked at export time rather than the one being asked now. */
+    function isOver(r) {
+        var lim = capBytes();
+        return !!(lim && r && r.bytes > lim);
+    }
+
+    /* The CRF band, MEASURED on real 1080x1920 footage at 13-15 Mbps — SSIM against the
+     * originals, then the knee found by asking what each step buys:
+     *
+     *   MB saved per 0.001 SSIM: 5.49 (1->14), 1.71, 1.27, then 0.81, 0.53 …
+     *   so the bend is 14-18.
+     *
+     * The bitrate band that used to sit beside it is gone with its slider. The reason is
+     * kept here because it is the evidence for offering ONE control rather than two:
+     * CRF 18 reached SSIM 0.9915 at 4.9 MB where 8 Mbps needed 5.9 MB for 0.9922 — the
+     * same quality, 20% bigger, because a fixed rate spends the same bits everywhere
+     * while CRF spends them where the picture needs them. */
+    var BANDS = { crf: [1, 35, 14, 18] };
+
+    /* Where a value sits along its slider, 0..1. Linear — the scale has run 1..35 since
+     * it was drawn, and the band at 14-18 already lands mid-track without help.
+     *
+     * (The bitrate slider needed a logarithmic mapping to put its own band anywhere
+     * usable. That went with the slider; if a rate control ever returns, the note in
+     * CLAUDE.md explains why a linear one is unusable.) */
+    function frac(key, v) {
+        var b = BANDS[key];
+        return (v - b[0]) / (b[1] - b[0]);
+    }
+
+    function paintBand(node, key) {
+        node.style.left = (frac(key, BANDS[key][2]) * 100) + "%";
+        node.style.width = ((frac(key, BANDS[key][3]) - frac(key, BANDS[key][2])) * 100)
+            + "%";
+    }
+
+    /* Writes the state back into every control. Called on any settings change and after a
+     * scan, so nothing on screen can be showing the boot value of something that moved. */
+    function applyScale() {
+        paintBand(el.sweetcrf, "crf");
+        el.crf.value = String(state.crfVal);
+        el.cap.value = state.cap > 0 ? String(state.cap) : "";
+        el.scale.value = String(state.scale);
+        renderScaleRead();
+    }
+
+    /* How many picked clips are over the flag, and — while the list is short enough to
+     * name them — WHICH. On a 74-clip timeline "3 are over" leaves you scrolling for the
+     * three; their numbers are the same numbers the filenames will carry. */
+    function renderCapNote() {
+        if (!el.capnote) return;
+        var lim = capBytes();
+        if (!lim) { el.capnote.textContent = ""; el.capnote.className = "capnote"; return; }
+        var picked = pickedClips(), s = settings();
+        var hits = [];
+        for (var i = 0; i < picked.length; i++) {
+            var b = clipBytes(picked[i], s);
+            if (b > lim) hits.push(picked[i].n ? pad2(picked[i].n) : "?");
+        }
+        el.capnote.className = "capnote" + (hits.length ? " hit" : " clear");
+        if (!picked.length) { el.capnote.textContent = ""; return; }
+        if (!hits.length) {
+            el.capnote.textContent = "none over";
+        } else if (hits.length <= 5) {
+            el.capnote.textContent = hits.length + " over · " + hits.join(" ");
+        } else {
+            el.capnote.textContent = hits.length + " of " + picked.length + " over";
+        }
+    }
+
+    function renderSizeEstimate() {
+        if (!el.sizeest) return;
+        renderCapNote();
+        /* Offered only when pressing it would change something: the sizes on screen were
+         * measured at other settings, or were never measured at all. Set HERE rather than
+         * where the settings change, so that after a
+         * re-measure had already answered the question the button stayed on screen still
+         * asking it. */
+        if (el.remeasure) {
+            // Always offered when nothing has been measured — it is the accurate path, not
+            // a repair for a broken one.
+            show(el.remeasure, !!state.clips.length && (staleSizes() || !measured()));
+            el.remeasure.className = "mini" + (staleSizes() ? " on" : "");
+        }
+        var picked = pickedClips();
+        if (!picked.length) { show(el.sizeest, false); return; }
+        var s = settings(), total = 0, known = 0;
+        for (var i = 0; i < picked.length; i++) {
+            var b = clipBytes(picked[i], s);
+            if (b > 0) { total += b; known++; }
+        }
+        // The readout beside the slider is the same number, so it is set HERE rather than
+        // recomputed in renderSettings — which only ran on a settings change, leaving the
+        // readout showing the boot value after a scan.
+        el.crfread.textContent = state.crfVal
+            + (total > 0 ? "  ·  " + humanBytes(total) : "");
+        if (!known) { show(el.sizeest, false); return; }
+        var stale = staleSizes();
+        el.sizeest.className = "note" + (stale ? " warn" : "");
+        if (stale) {
+            // Never a scaled number. The sizes shown are the ones that were measured, and
+            // the line says which settings they belong to.
+            el.sizeest.textContent = "~" + humanBytes(total) + " for " + picked.length
+                + " clip(s) — measured at CRF " + state.probeCrf + " · "
+                + state.probeScale + "% size. Re-measure to update these for CRF "
+                + state.crfVal + " · " + state.scale + "%.";
+        } else if (measured()) {
+            el.sizeest.textContent = "~" + humanBytes(total) + " for " + picked.length
+                + " clip(s) — measured, by encoding a second of each clip at these"
+                + " settings.";
+        } else {
+            el.sizeest.textContent = "~" + humanBytes(total) + " for " + picked.length
+                + " clip(s) — an estimate, usually within about 1.5x. Re-measure encodes a"
+                + " second of each clip for a figure good to a few percent.";
+        }
+        show(el.sizeest, true);
+    }
+
+    function renderSettings() {
+        applyScale();
+        // The one setting that changes what the files CONTAIN rather than how big
+        // they are. Said in red, and not folded into a tooltip.
+        if (el.fps.value) {
+            el.fpswarn.textContent = "Forcing " + el.fps.value + " fps RESAMPLES: frames "
+                + "are dropped or duplicated to hit that rate, so these clips will NOT "
+                + "hold the frames the timeline used. The manifest records them as "
+                + "frame_exact = false.";
+            show(el.fpswarn, true);
+        } else {
+            show(el.fpswarn, false);
+        }
+        renderSizeEstimate();
+        rememberSettings();
+    }
+
+    function rememberSettings() {
+        try {
+            window.localStorage.setItem("xmlcut.export", JSON.stringify({
+                crf: state.crfVal, fps: el.fps.value,
+                scale: state.scale,
+                // Kept here rather than in a preset: presets are the ENGINE's file and
+                // describe an encode, and this changes nothing about the encode.
+                cap: state.cap
+            }));
+        } catch (e) {}
+    }
+
+    function restoreSettings() {
+        var o = null;
+        try { o = JSON.parse(window.localStorage.getItem("xmlcut.export") || "null"); }
+        catch (e) { o = null; }
+        if (!o) return;
+        if (o.crf) state.crfVal = parseFloat(o.crf) || 1;
+        if (o.fps) el.fps.value = o.fps;
+        if (o.cap) state.cap = Math.max(0, parseFloat(o.cap) || 0);
+        if (o.scale) state.scale = Math.max(10, Math.min(100, parseFloat(o.scale) || 100));
+    }
+
+    /* Presets live in a FILE the engine owns, not in localStorage — so one can be made in
+     * the panel and used from a terminal, inspected, or shared. The engine is the only
+     * thing that writes it. */
+    function loadPresets(then) {
+        runJson(["--list-presets-json"], function (r) {
+            state.presets = (r && r.presets) || {};
+            var keep = el.preset.value;
+            el.preset.innerHTML = "";
+            var blank = document.createElement("option");
+            blank.value = "";
+            blank.textContent = "Custom";
+            el.preset.appendChild(blank);
+            var names = [];
+            for (var k in state.presets) {
+                if (state.presets.hasOwnProperty(k)) names.push(k);
+            }
+            names.sort();
+            for (var i = 0; i < names.length; i++) {
+                var o = document.createElement("option");
+                o.value = names[i];
+                o.textContent = names[i];
+                el.preset.appendChild(o);
+            }
+            el.preset.value = keep;
+            el.delpreset.disabled = !el.preset.value;
+            if (then) then();
+        });
+    }
+
+    /* A preset can still carry a target bitrate — one made before the slider was
+     * removed, or made from a terminal, where --bitrate is still supported. There is no
+     * control here that can show one, so the quality half of such a preset is REFUSED and
+     * said out loud. Applying it invisibly would export at a setting nothing on screen
+     * names, which is the one thing this panel is not allowed to do; and silently
+     * substituting the current CRF would be worse, because the preset would then have a
+     * name that means something different in the panel than on the command line. */
+    function applyPreset(name) {
+        var s = state.presets && state.presets[name];
+        if (!s) return;
+        if (s.bitrate) {
+            el.presetwarn.textContent = "\u201c" + name + "\u201d targets a bitrate of "
+                + s.bitrate + ". This panel exports by CRF only, so its quality setting "
+                + "was NOT applied — CRF " + state.crfVal + " still stands. Run "
+                + "xmlcut.py --bitrate " + s.bitrate + " from a terminal if you need it.";
+            show(el.presetwarn, true);
+        } else {
+            show(el.presetwarn, false);
+            // parseFloat, not parseInt: a preset saved at crf 18.5 must not come back
+            // as 18 while still calling itself by the same name.
+            if (s.crf) {
+                state.crfVal = Math.max(1, Math.min(35, parseFloat(s.crf) || 1));
+            }
+        }
+        el.fps.value = s.fps ? String(s.fps) : "";
+        state.scale = s.scale ? Math.max(10, Math.min(100, parseFloat(s.scale) || 100)) : 100;
+        renderSettings();
     }
 
     /* ------------------------------------------------------------ updates */
@@ -2123,6 +2705,10 @@
             var spd = Number(c.speed_percent || 100);
             var frames = Number(c.source_consumed_frames || 0);
             if (frames > 0) facts.push(frames + "f");
+            // The real size, not an estimate — the file is on disk by now. xmlcut records
+            // what it wrote; if it did not, fall back to nothing rather than guessing.
+            var wrote = Number(c.output_bytes || 0);
+            if (wrote > 0) facts.push(humanBytes(wrote));
             if (Math.abs(spd - 100) > 0.01) {
                 facts.push(Math.round(spd) + "%");
                 if (tl > 0) facts.push("→ " + tl.toFixed(2) + "s");
@@ -2138,6 +2724,18 @@
                 facts: facts.join(" · "),
                 bad: bad,
                 warn: warn,
+                // The size the file ACTUALLY came out at, kept as a number so the flag
+                // can be re-applied when the threshold changes. Storing an over/under
+                // verdict here instead would freeze it at whatever the field said the
+                // moment the export finished, and the whole point of typing a new number
+                // is to ask the same question again.
+                bytes: wrote,
+                // Did this cut actually get WRITTEN this run? Kept apart from `bad`, which
+                // only says something went wrong: a clip that was skipped by --resume is
+                // neither written nor broken, and calling it either would be a lie in the
+                // one place someone checks after a long export.
+                wrote: (st === "ok"),
+                kept: (st === "skipped_existing"),
                 problem: bad || warn
             });
         }
@@ -2219,10 +2817,23 @@
             if (only && !r.problem) continue;
             shown++;
             var div = document.createElement("div");
-            div.className = "row2" + (r.bad ? " isbad" : (r.warn ? " iswarn" : ""));
+            /* ONE marker per row, and the list becomes scannable by colour alone.
+             *
+             * Precedence runs by what needs attention, not by what is nicest to report:
+             * broken, then bigger than you asked for, then left alone by --resume, then
+             * written and fine. A clip can be both written and over the flag; the flag is
+             * the half worth seeing, so amber wins over green.
+             *
+             * The marker is put in the DOM text rather than by CSS ::before so that it is
+             * part of what the row SAYS. The copied report is built from state.report, not
+             * from these nodes, so nothing leaks into the paste. */
+            var mark = r.bad ? "✕ " : isOver(r) ? "▲ " : r.kept ? "– " : r.wrote ? "✓ " : "";
+            div.className = "row2"
+                + (r.bad ? " isbad" : (r.warn ? " iswarn" : ""))
+                + (isOver(r) ? " isover" : (r.wrote ? " isok" : r.kept ? " iskept" : ""));
             var nm = document.createElement("span");
             nm.className = "nm";
-            nm.textContent = r.name;
+            nm.textContent = mark + r.name;
             div.appendChild(nm);
             if (r.facts) {
                 var f = document.createElement("span");
@@ -2233,9 +2844,15 @@
             el.rows.appendChild(div);
         }
         // "18 of 18 shown" restated the "18 written" pill directly above it. Only says
-        // anything when the filter is actually hiding something.
+        // anything when the filter is actually hiding something — or when the size flag
+        // has something to report, which is the one fact this line can add.
+        var nOver = 0;
+        for (var z = 0; z < state.report.length; z++) if (isOver(state.report[z])) nOver++;
         el.repcount.textContent = (shown === state.report.length)
-            ? "" : (shown + " of " + state.report.length + " shown");
+            ? (nOver ? nOver + " over " + state.cap + " MB" : "")
+            : (shown + " of " + state.report.length + " shown"
+               + (nOver ? " · " + nOver + " over " + state.cap + " MB" : ""));
+        el.repcount.className = "repcount" + (nOver ? " hit" : "");
         if (!shown) {
             var e2 = document.createElement("div");
             e2.className = "row2";
@@ -2277,6 +2894,16 @@
         // The two lines added to the report on screen belong in the pasted copy too — they
         // are the ones that make a partial run legible to whoever receives it.
         if (el.repcomplete.textContent) out.push(el.repcomplete.textContent);
+        // The size flag travels with the paste. This report gets sent to whoever asked
+        // why the output was heavy, and "▲" beside four filenames means nothing without
+        // the line that says what the ▲ is measured against.
+        var over = [];
+        for (var v = 0; v < state.report.length; v++) {
+            if (isOver(state.report[v])) over.push(state.report[v].name);
+        }
+        if (over.length) {
+            out.push(over.length + " clip(s) over " + state.cap + " MB, marked ▲");
+        }
         if (outDir()) out.push(outDir());
         if (state.merge.length) {
             out.push("");
@@ -2419,9 +3046,171 @@
         reveal(exists(d) ? d : state.out);
     });
     el.showsaved.addEventListener("click", function () { reveal(state.folder); });
+
+    /* Re-measure. Deliberately a BUTTON rather than something that fires on its own after a
+     * pause: it spawns a real encode of every clip, and a control that starts nineteen ffmpeg
+     * processes because you nudged a slider is worse than an estimate that says it is one.
+     * Sets the flag for ONE scan; argsFor clears it as it is used. */
+    el.remeasure.addEventListener("click", function () {
+        if (state.busy || !state.dump) return;
+        state.wantProbe = true;
+        setBusy(true, "Measuring…");
+        scanClips();
+    });
+    // The way back into a collapsed step 1. Same action as the big button it replaced;
+    // readSequence() re-expands the step itself on the way through its reset.
+    el.readagain.addEventListener("click", function () { readSequence(); });
     el.updbtn.addEventListener("click", applyUpdate);
     el.checkupd.addEventListener("click", function () { checkUpdate(true); });
     el.recheck.addEventListener("click", function () { recheckScript(false); });
+
+    /* `input`, not `change`: a range fires `change` only on release, and watching the
+     * size move while dragging is the whole point of a slider here.
+     *
+     * renderSettings is deliberately NOT called from either handler — it writes the value
+     * back into the slider, which would fight a drag in progress.
+     *
+     * There is no mode to select any more. The touch-to-select machinery that used to sit
+     * here existed only to stop the two quality sliders needing a radio ticked first;
+     * with one quality control there is nothing to choose between, so it is gone rather
+     * than left switching a thing to itself. */
+    el.crf.addEventListener("input", function () {
+        // parseFloat, not parseInt: CRF steps in halves and x264 takes a float, so
+        // rounding here would quietly discard half of every step.
+        var v = parseFloat(el.crf.value);
+        if (!isNaN(v)) state.crfVal = v;
+        el.preset.value = "";
+        el.delpreset.disabled = true;
+        show(el.presetwarn, false);
+        renderSizeEstimate();
+        if (state.clips.length) renderClips();
+    });
+
+    /* Resolution applies ON TOP of the quality setting rather than competing with it — it
+     * resamples space, not bits. It does clear the named preset, because unlike the size
+     * flag it genuinely changes what ffmpeg is told. */
+    el.scale.addEventListener("input", function () {
+        var v = parseInt(el.scale.value, 10);
+        if (!isNaN(v)) state.scale = Math.max(10, Math.min(100, v));
+        el.preset.value = "";
+        el.delpreset.disabled = true;
+        show(el.presetwarn, false);
+        rememberSettings();
+        renderScaleRead();
+        renderSizeEstimate();
+        if (state.clips.length) renderClips();
+    });
+
+    /* The flag is not an encode setting, so it does not clear the named preset and does
+     * not go through renderSettings — nothing it changes affects what ffmpeg is told.
+     * ONE function, reached both by typing and by dragging, so the two cannot drift. */
+    function applyCap() {
+        var v = parseFloat(el.cap.value);
+        state.cap = (isNaN(v) || v <= 0) ? 0 : v;
+        rememberSettings();
+        renderCapNote();
+        if (state.clips.length) renderClips();
+        if (state.report.length) renderReport();
+    }
+
+    // `input` rather than `change`, so the table reacts as the number is typed.
+    el.cap.addEventListener("input", applyCap);
+
+    /* Drag the number sideways to change it, the way every numeric field in Premiere
+     * works. It was asked for by that comparison, and the details are what make it feel
+     * like that one rather than merely respond to a drag:
+     *
+     *   - a click that does not MOVE is still a click. Premiere focuses the field for
+     *     typing; so mousedown cannot commit to a scrub, it has to wait and see. Under
+     *     SLOP px of travel this ends in focus() and select(), and typing works as before.
+     *   - the pointer is followed on `document`, not on the input. Drag faster than the
+     *     repaint and the cursor leaves the 62px box within one frame; bound to the input,
+     *     the scrub would stop dead the moment it did.
+     *   - the delta is measured from where the drag STARTED, never accumulated per move.
+     *     Accumulating rounds every step and the value drifts away from the pointer over a
+     *     long drag, so letting go leaves it somewhere you did not put it.
+     *   - it never goes below zero, because zero is already "off" and there is nothing
+     *     underneath it to mean.
+     */
+    function scrubNumber(input, pxPer, after) {
+        var SLOP = 3;
+        var live = false, moved = false, x0 = 0, v0 = 0;
+        input.addEventListener("mousedown", function (e) {
+            live = true;
+            moved = false;
+            x0 = e.clientX;
+            v0 = parseFloat(input.value);
+            if (isNaN(v0)) v0 = 0;
+            // Stops the caret being placed and the label being text-selected mid-drag.
+            // The click case is put back by hand on mouseup.
+            if (e.preventDefault) e.preventDefault();
+        });
+        document.addEventListener("mousemove", function (e) {
+            if (!live) return;
+            var dx = e.clientX - x0;
+            if (!moved && Math.abs(dx) < SLOP) return;
+            moved = true;
+            document.body.className = "scrubbing";
+            var v = Math.max(0, Math.round(v0 + dx / pxPer));
+            if (String(v) !== input.value) {
+                input.value = String(v);
+                after();
+            }
+        });
+        document.addEventListener("mouseup", function () {
+            if (!live) return;
+            live = false;
+            document.body.className = "";
+            if (!moved) {
+                if (input.focus) input.focus();
+                if (input.select) input.select();
+            }
+        });
+    }
+
+    // 3px per MB: 5 to 50 is a 135px drag, about the width of the panel's controls, and a
+    // single pixel of jitter cannot move the number.
+    scrubNumber(el.cap, 3, applyCap);
+
+    var setInputs = [el.fps];
+    for (var si = 0; si < setInputs.length; si++) {
+        setInputs[si].addEventListener("change", function () {
+            // Any hand edit means the settings are no longer the named preset.
+            el.preset.value = "";
+            el.delpreset.disabled = true;
+            renderSettings();
+            if (state.clips.length) renderClips();
+        });
+    }
+    el.preset.addEventListener("change", function () {
+        el.delpreset.disabled = !el.preset.value;
+        if (el.preset.value) applyPreset(el.preset.value);
+    });
+    el.savepreset.addEventListener("click", function () {
+        cs.evalScript("askName(" + jsStr("Save these export settings as:") + ")",
+            function (name) {
+                name = String(name || "").trim();
+                if (!name || name === "null" || name === "undefined") return;
+                var s = settings(), a = ["--save-preset", name, "--presets-only"];
+                if (s.crf) a.push("--crf", String(s.crf));
+                if (s.fps) a.push("--fps", String(s.fps));
+                if (s.scale && s.scale < 100) a.push("--scale", String(s.scale));
+                runJson(a, function () {
+                    loadPresets(function () {
+                        el.preset.value = name;
+                        el.delpreset.disabled = false;
+                    });
+                });
+            });
+    });
+    el.delpreset.addEventListener("click", function () {
+        var name = el.preset.value;
+        if (!name) return;
+        runJson(["--delete-preset", name, "--presets-only"], function () {
+            el.preset.value = "";
+            loadPresets();
+        });
+    });
 
     el.gear.addEventListener("click", function () {
         var open = el.gearmenu.hidden;
@@ -2488,6 +3277,9 @@
             state.resume = !!window.localStorage.getItem("xmlcut.resume");
         } catch (e) { state.resume = false; }
         el.resume.checked = state.resume;
+        restoreSettings();
+        renderSettings();
+        if (state.script) loadPresets();
         wireTips();
         // Off the critical path: a slow or absent network must never delay the panel.
         if (state.script) checkUpdate(false);

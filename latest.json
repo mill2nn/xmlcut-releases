@@ -1,6 +1,6 @@
 {
-  "version": "3.16",
-  "notes": "Copy-path buttons, and the audit implemented: the fixture now actually tests the transition fix, the panel dump path has a test, and clips that are skipped say why. Fixes a nested sequence between two transitions being dropped.",
+  "version": "3.25",
+  "notes": "New look and a size estimate you can trust. Measured, not guessed: the old estimate scaled each source's bitrate and read ProRes up to 186x too high. Plus a resolution slider, a flag for oversized clips, one quality control instead of two, a line that always says what to do next, and green ticks as each clip lands.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

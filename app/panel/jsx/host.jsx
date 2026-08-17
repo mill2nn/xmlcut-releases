@@ -546,6 +546,17 @@ function findXmlcut() {
     return ser(result);
 }
 
+/* A name prompt. CEP's own window.prompt is unreliable inside Premiere, so the ask goes
+ * through ExtendScript, which has a real modal. Returns "" when cancelled. */
+function askName(message) {
+    try {
+        var v = prompt(message, "");
+        return (v === null || v === undefined) ? "" : String(v);
+    } catch (e) {
+        return "";
+    }
+}
+
 /* --------------------------------------------------------------- pickers */
 
 /* Native folder chooser. Returns "" when cancelled — the panel treats that as
