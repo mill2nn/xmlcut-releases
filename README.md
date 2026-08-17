@@ -1,57 +1,94 @@
-# xmlcut — downloads
+# Raw-cutter
 
-Built downloads for **xmlcut**, a command-line tool and local GUI that extracts every cut of
-an Adobe Premiere Pro timeline as an individual video file, straight from the timeline's
-Final Cut Pro 7 XML export. Each clip comes with a manifest row describing exactly where it
-came from, which makes the output usable as a labelled dataset.
+Every cut of an Adobe Premiere Pro timeline, as its own video file — read straight from the
+sequence you have open, with a manifest row per clip describing exactly where it came from.
 
-Source lives elsewhere. This repository holds the zips, plus the files an installed copy
-downloads when it updates itself (in `app/`).
+## Install — one line
 
-## Download
+Open **Terminal** and paste this:
 
-Grab the newest zip from **[Releases](../../releases/latest)**.
+```bash
+curl -fsSL https://raw.githubusercontent.com/mill2nn/xmlcut-releases/main/install.sh | bash
+```
 
-You only need to do that once. xmlcut updates itself after that: when a new version is
-published, the page shows a bar at the top with an **Update** button. One click and you are
-current — no new zip, no re-download. The version you were on is kept in a `.backup` folder
-beside the tool, and if anything fails mid-update nothing on disk is changed at all.
+That is the whole thing. Nothing to download, nothing to unzip, and macOS does not question
+it — a script you run from a Terminal you opened yourself is not treated as a downloaded
+file, so there is no "unidentified developer" block to click through.
+
+It fetches the current version, installs the Premiere panel, and tells you what to do next.
+
+### Then
+
+1. **Quit Premiere completely** — Cmd-Q, not just closing the window. Reopen it.
+   A panel that was already open will not see the install until Premiere restarts; that is
+   the usual reason it looks like nothing happened.
+2. **Window → Extensions → Raw-cutter**
+3. Open the sequence you want and click **Read timeline**.
+
+The line under the panel's title always says what to do next. Hover any **?** for what a
+control does.
 
 ## What you need
 
-- **macOS** with the built-in `python3` (3.8 or newer). No Python packages at all — the tool
-  imports nothing outside the standard library.
-- **ffmpeg**, once:
+Two things, and the installer checks for both before touching anything — it prints the exact
+command for whichever is missing and changes nothing.
+
+- **macOS** with `python3`. Usually already there; if not, `xcode-select --install`.
+- **ffmpeg**, which does the actual cutting:
 
   ```bash
   brew install ffmpeg
   ```
 
-  Without Homebrew, see [brew.sh](https://brew.sh) first.
+  No Homebrew? [brew.sh](https://brew.sh) first.
 
-## Running it
+No Python packages. The tool imports nothing outside the standard library.
 
-Unzip anywhere, then double-click **Open xmlcut GUI.command**. macOS blocks anything
-downloaded from the internet on first launch — right-click the file → **Open** → **Open**.
-Once only.
+## Updates
 
-Your browser opens. Drag the XML Premiere exported onto the page, pick the sequence, choose
-an output folder, then **Scan timeline** and **Cut clips**. Leave the Terminal window open
-while you work; it is the local server. Nothing is installed, and nothing leaves your machine
-apart from the update check, which reads one small file from GitHub.
+You will not run that line again. When a new version is published the panel shows an
+**Update** button — one click and it refreshes itself, the cut engine and the panel files
+together. The version you were on is kept in a `.backup` folder, and if an update fails
+part-way nothing on disk is changed.
 
-`README.md` inside the zip has the full detail, including what every manifest column means.
+## Prefer to download it?
 
-## What it is careful about
+There is a zip on the [latest release](../../releases/latest) if you would rather. It expands
+to three things; double-click **Install Raw-cutter.command**.
 
-- **Frame exact.** Cuts are re-encoded rather than stream-copied, because a stream copy can
-  only start on a keyframe and overran measured cut lengths by 22–147%, leaving clips carrying
-  part of the following shot.
-- **Lossless.** x264 crf 0, verified bit-for-bit identical to the decoded source. The source's
-  pixel format is preserved, so a 10-bit 4:2:2 master is not quietly flattened.
-- **Honest about timing.** The source range is read from Premiere's own tick values, which stay
-  correct through speed ramps where frame arithmetic drifts by over a second. Reversed clips,
-  nested sequences, stills and speed ramps are each handled and labelled.
-- **It refuses to guess.** Premiere exports every sequence in a project into one XML, so if
-  there is more than one, the tool stops and asks which — silently cutting the wrong timeline
-  is the worst failure mode for a dataset.
+macOS blocks it the first time, because it *did* arrive as a download:
+
+> "Install Raw-cutter.command" cannot be opened because it is from an unidentified developer.
+
+To get past it: **right-click the file → Open → Open**. Once only — it clears the same block
+from everything else in the folder. This is the only reason the one-line install above
+exists, and why it is the one to prefer.
+
+## Without Premiere
+
+`app/Open xmlcut GUI.command` opens a page in your browser instead: drag in an XML that
+Premiere exported (**File → Export → Final Cut Pro XML**), pick the sequence, choose a
+folder, then Scan and Cut. Leave its Terminal window open while you work — that window is
+the server.
+
+## What is in here
+
+This repository is the download and update channel, not the source.
+
+- `install.sh` — the one-line installer above
+- `app/` — the files an installed copy fetches when it updates itself
+- `latest.json` — the version and release notes the Update button reads
+- [Releases](../../releases) — the zips
+
+## Cutting is not lossy by accident
+
+Clips are written at the source's own speed and hold exactly the frames the timeline used,
+so a sped-up clip comes out **longer** than it looks on the timeline. Check a clip on its
+frame count rather than by re-speeding it: the frame count is a whole number and the range
+Premiere consumed is not, so a ratio of the two cannot reproduce the percentage exactly.
+
+Forcing a frame rate is the one setting that breaks this, and the panel says so in red when
+you do. Changing the resolution does not — it resamples space, not time, so the cuts stay
+frame-exact.
+
+Nothing leaves your machine except the update check, which reads one small file from GitHub.
