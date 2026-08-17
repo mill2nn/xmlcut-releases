@@ -77,9 +77,15 @@ COUNT=0
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   mkdir -p "$DEST/$(dirname "$f")"
+  # ⚠️ PERCENT-ENCODE THE SPACES. Four of these files have spaces in their names —
+  # "Open xmlcut GUI.command", the two panel installers — and curl rejects a URL
+  # containing a raw space outright: "URL rejected: Malformed input to a URL function".
+  # The first version of this script died on the fourth file with three already written,
+  # which is precisely why it was run against a real fetch before being trusted.
+  url="${f// /%20}"
   # Straight to the destination rather than via $TMP: a partial fetch then leaves a
   # half-written file that says so, instead of a tidy folder missing something.
-  curl -fsSL "$RAW/$f" -o "$DEST/$f" || { say "!! failed on $f — stopping."; exit 1; }
+  curl -fsSL "$RAW/$url" -o "$DEST/$f" || { say "!! failed on $f — stopping."; exit 1; }
   COUNT=$((COUNT + 1))
 done <<< "$FILES"
 say "$COUNT file(s)"
