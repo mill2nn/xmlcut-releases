@@ -81,14 +81,19 @@ else
 fi
 echo "  copied to: $DEST"
 
-echo
-echo "Installed. Now:"
-echo "  1. Quit Premiere Pro completely (Cmd-Q), then reopen it."
-echo "  2. Window > Extensions > Raw-cutter"
-echo "  3. Open the timeline you want and click 'Read active sequence'."
-echo
-echo "Reads and XML exports land beside your Premiere project, in xmlcut/<sequence>/."
-echo "An unsaved project falls back to ~/Desktop/xmlcut-dumps/. Nothing else is changed."
-echo
-read -n 1 -s -r -p "Press any key to close."
-echo
+# Quiet when something else is doing the talking. The top-level installer and install.sh
+# both call this and then print their own closing instructions, so unguarded this said
+# "Installed. Now:" twice with two slightly different versions of the same three steps.
+if [ -z "${RAWCUTTER_WRAPPED:-}" ]; then
+  echo
+  echo "Installed. Now:"
+  echo "  1. Quit Premiere Pro completely (Cmd-Q), then reopen it."
+  echo "  2. Window > Extensions > Raw-cutter"
+  echo "  3. Open the sequence you want and click 'Read timeline'."
+  echo
+  echo "Reads and XML exports land beside your Premiere project, in xmlcut/<sequence>/."
+  echo "An unsaved project falls back to ~/Desktop/xmlcut-dumps/. Nothing else is changed."
+  echo
+  read -n 1 -s -r -p "Press any key to close."
+  echo
+fi
