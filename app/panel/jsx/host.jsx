@@ -557,6 +557,94 @@ function askName(message) {
     }
 }
 
+/* A yes/no that has to be ACCEPTED, for a question that must not be answered by accident.
+ * Same reasoning as askName(): CEP's own window.confirm is unreliable inside Premiere, and
+ * ExtendScript has a real modal.
+ *
+ * ⚠️ THIS BLOCKS PREMIERE'S MAIN THREAD until it is answered — every ExtendScript modal
+ * does, askName() included. That is fine here and would not be on a timer: this is only
+ * ever raised by a click the user made a moment ago, and it is the last thing between him
+ * and an export.
+ *
+ * noAsDflt is true, so Return, Escape and closing the window ALL land on "no". Anything
+ * that is not exactly "yes" is a no, which is also what a Premiere whose confirm() throws
+ * comes out as — the unsafe branch is never the default and never the accident. */
+function askConfirm(message) {
+    try {
+        return confirm(message, true, "Raw-cutter") === true ? "yes" : "no";
+    } catch (e) {
+        return "no";
+    }
+}
+
+/* THREE ANSWERS, which confirm() cannot give: two ways forward and a way out.
+ *
+ * ⚠️ SAME BLOCKING CAVEAT AS askConfirm() — a ScriptUI dialog holds Premiere's main thread
+ * until it is answered, so this is only ever raised from a click.
+ *
+ * Returns "a", "b", or "" — and "" is the safe branch, which is also what the Cancel button,
+ * the Escape key (that is what {name: "cancel"} buys), the window's close box and a ScriptUI
+ * that is unavailable on this host all come out as. The caller must treat anything that is
+ * not "a" or "b" as "do nothing". */
+function askChoice(title, message, aLabel, bLabel) {
+    var out = "";
+    try {
+        var w = new Window("dialog", String(title));
+        w.orientation = "column";
+        w.alignChildren = "fill";
+        var t = w.add("statictext", undefined, String(message), { multiline: true });
+        t.characters = 58;
+        var row = w.add("group");
+        row.alignment = "right";
+        var a = row.add("button", undefined, String(aLabel));
+        var b = row.add("button", undefined, String(bLabel));
+        var c = row.add("button", undefined, "Cancel", { name: "cancel" });
+        a.onClick = function () { out = "a"; w.close(); };
+        b.onClick = function () { out = "b"; w.close(); };
+        c.onClick = function () { out = ""; w.close(); };
+        w.show();
+        return out;
+    } catch (e) {
+        return "";
+    }
+}
+
+/* WHICH SEQUENCE IS OPEN RIGHT NOW, and nothing else.
+ *
+ * dumpActiveSequence() answers this too, but it walks every clipitem on every track to do
+ * it — seconds on a real timeline, and it writes a .json each time. This is called when the
+ * panel regains focus, on a slow idle timer, and once more just before an export, so it may
+ * touch exactly two properties and must never have a side effect.
+ *
+ * Three outcomes, kept apart on purpose. "No project" and "no active sequence" are NOT the
+ * same as a different sequence being open, and the panel treats them differently, so `none`
+ * is a field rather than something to be pattern-matched out of an error string. */
+function activeSequenceStamp() {
+    var result = { ok: false, none: false };
+    try {
+        if (!app || !app.project) {
+            result.error = "No project open.";
+            return ser(result);
+        }
+        var seq = app.project.activeSequence;
+        if (!seq) {
+            result.none = true;
+            result.error = "No active sequence — open a timeline first.";
+            return ser(result);
+        }
+        result.ok = true;
+        /* THE IDENTITY IS THE ID. The name comes back as well, but only so a message can
+         * name the sequence a human recognises — two sequences can share a name (a
+         * duplicate, a _v2, one per bin) and comparing names would agree on exactly the
+         * mix-up this exists to catch. */
+        result.id = String(get(seq, "sequenceID", ""));
+        result.name = String(get(seq, "name", ""));
+    } catch (e) {
+        result.error = String(e) + (e.line ? (" (line " + e.line + ")") : "");
+    }
+    return ser(result);
+}
+
 /* --------------------------------------------------------------- pickers */
 
 /* Native folder chooser. Returns "" when cancelled — the panel treats that as
@@ -682,6 +770,12 @@ function dumpActiveSequence() {
         result.pruned = pruneOldReads(dir);
         result.keep_reads = KEEP_READS;
         result.sequence = data.sequence.name;
+        /* WHICH sequence this was, not just what it was called. The panel compares this
+         * against activeSequenceStamp().id to catch a read of sequence A being exported
+         * while B is the open one; the name alone cannot do that job, because a duplicate
+         * carries the same name. It was already in the dump's own JSON — the summary is
+         * what the panel keeps in memory, so it has to be here too. */
+        result.sequence_id = data.sequence.id;
         // The sequence name made safe to be a folder. Returned so the panel can name the
         // export's subfolder without a second copy of this rule — safeName() already has
         // to exist here to name the read folder, and two implementations of "what is a
@@ -1201,7 +1295,7 @@ function probeRender(destFolder, spec, mbps, onePass) {
             res.renders.push(again);
         }
 
-        /* Put the timeline back. Tung's one condition on this whole feature was that
+        /* Put the timeline back. the team lead's one condition on this whole feature was that
          * the timeline stays intact. */
         res.restored = false;
         if (before.in_ticks !== null && before.out_ticks !== null) {
@@ -1359,7 +1453,30 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks) {
         var totalMs = 0;
         var onePassUsed = !!(res.bitrate && res.bitrate.one_pass);
 
+        /* ⚠️ THE ONLY PLACE THIS LOOP CAN BE STOPPED FROM OUTSIDE.
+         *
+         * exportAsMediaDirect blocks Premiere's main thread for the whole of a range, so the
+         * panel gets no turn while one is rendering and cannot be asked anything. What it CAN
+         * do is put a file on disk before it stops getting turns — Cancel writes _render_stop
+         * into this same folder — and this reads it BETWEEN ranges. So Cancel finishes the
+         * range it is on and then stops, which is the most that can honestly be offered here.
+         * The panel's own button says exactly that rather than promising an instant stop.
+         *
+         * Removed as it is honoured, so it cannot cancel the run after this one. And removed
+         * before the loop as well: a run cancelled after its LAST range leaves the file
+         * behind, and that must not stop the next run before it has begun. */
+        var stopFile = new File(dir.fsName + "/_render_stop");
+        if (stopFile.exists) {
+            try { stopFile.remove(); } catch (eStale) {}
+        }
+
         for (i = 0; i < ranges.length; i++) {
+            if (stopFile.exists) {
+                try { stopFile.remove(); } catch (eStop) {}
+                res.stopped = true;
+                res.stopped_at = i;
+                break;
+            }
             var one = renderOneRange(seq, ranges[i].label, ranges[i].in_frames,
                                      ranges[i].out_frames, dir.fsName, pre.found,
                                      timebase);

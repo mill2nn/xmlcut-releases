@@ -146,7 +146,7 @@
              the other is the edit as it played, with the colour, the titles, the Motion
              and the speed ramps already in the pixels.
 
-             "thêm option xuất như video có effect ( timline intact)" — Tung, 18 Aug. It is
+             "thêm option xuất như video có effect ( timline intact)" — the team lead, 18 Aug. It is
              an OPTION, and the timeline is left exactly as it was found: the panel reads
              the sequence's in/out points before it starts and writes them back after. -->
         <div class="field f-mode">
@@ -200,7 +200,7 @@
              AI Product team's requirement, 18 Aug, and it lands on the one export path they
              consume. So the panel writes H.264 in .mp4 and offers no choice about it.
 
-             ⚠️ This reverses the H.265 option Tung asked for earlier the same morning ("a nghĩ
+             ⚠️ This reverses the H.265 option the team lead asked for earlier the same morning ("a nghĩ
              e nên cho thêm 2 lựa chọn encode là H.264 và H.265"). Both are his; the later one
              is about what the dataset must be. Every line of the H.265 work still runs —
              `--vcodec libx265` from a terminal, the measured size ratio, its estimate — and
@@ -309,7 +309,7 @@
          They were the last four blocks of prose in a region whose whole job is fields. -->
 
     <!-- HIDDEN, not removed. "cái flag large clip thì cứ để ẩn đi thôi, sau này nếu thêm lại
-         thì ko cần phải code lại" — Tung, 18 Aug. Every line of its logic still works; only
+         thì ko cần phải code lại" — the team lead, 18 Aug. Every line of its logic still works; only
          these two elements are hidden, so bringing it back is deleting two attributes. -->
     <p class="lbl" hidden>Flag large clips
         <span class="q" data-tip="Marks any clip expected to land above this size, in the list above and again in the report after the export — where the number is the file's ACTUAL size on disk rather than an estimate. Drag the number sideways to change it, or click it and type. Leave it empty for no flagging: it changes nothing about the encode, it only tells you which cuts are the heavy ones.">?</span>
@@ -329,7 +329,10 @@
         <span id="listnote" class="listnote"></span>
     </div>
 
-    <p class="lbl">File types
+    <!-- ⚠️ THE LABEL CARRIES AN ID so the whole File types block can go in one move. It is
+         hidden outright in timeline-render mode, where the source file's extension decides
+         nothing — see applyCutFrom() in main.js for why hidden rather than dimmed. -->
+    <p class="lbl" id="typelbl">File types
         <span class="q" data-tip="Only clips whose source file is one of these types get cut. The number is how many are on this timeline; a type showing 0 is listed so the set stays the same between projects, and ticking it is remembered for a timeline that has it.">?</span>
         <button id="typeall" class="linkbtn">select what's here</button>
     </p>

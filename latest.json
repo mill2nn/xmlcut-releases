@@ -1,6 +1,6 @@
 {
-  "version": "3.55",
-  "notes": "Them nut x de tat thong bao changelog; giu nguyen changelog cua 3.54 cho ai nhay thang len 3.55.",
+  "version": "3.56",
+  "notes": "SUA LOI MAT CLIP o Timeline render (bo loc loai file chay truoc khi danh dau clip se render, nen .mov/.png/graphic bi xoa am tham); khong can tick loai file o Timeline render; kiem tra sequence dang mo co dung sequence da Read; cat theo in/out cua clip thay vi giua transition; 2 clip giong het trong 1 nest tinh la mot; Cancel dung that + hoi Replace khi trung ten.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

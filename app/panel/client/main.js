@@ -33,7 +33,7 @@
                "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
                "mergebox", "resume", "updbar", "updtext", "updbtn",
-               "typeall", "scripthelp",
+               "typeall", "typelbl", "scripthelp",
                "readprog", "readfill", "readtext", "pickall", "checkupd",
                "gear", "gearmenu", "enginestat", "recheck",
                "repdestrow", "repdest", "repdestlbl", "mergedet", "mergesum",
@@ -149,6 +149,21 @@
         bundled: "",
         searchTried: [],
         unpicked: {},   // clip key -> true when individually unticked
+        /* THE NAME OF THE SEQUENCE PREMIERE HAD OPEN at the last check, kept only so the
+         * export's confirmation can name it. The comparison itself is on the ID, which is
+         * never held here — it is read fresh every time, because a remembered ID is exactly
+         * the stale fact this whole guard exists to prevent. See checkSequence(). */
+        seqOpenName: "",
+        /* CANCEL WAS PRESSED for the run that is going. Read by the render phase to decide
+         * whether to hand over to the encode phase at all, and by the close handler so a
+         * stopped run is reported as stopped rather than as finished. Cleared when a run
+         * STARTS, never when one ends — a flag cleared on the way out can be cleared by the
+         * very handler that was supposed to read it. */
+        cancelled: false,
+        /* --resume for THIS RUN ONLY, because he answered "Skip" to the Replace question.
+         * Kept apart from state.resume, which is his standing choice on the tick: answering
+         * one question must not silently rewrite a setting. Consumed where it is used. */
+        resumeOnce: false,
         updateInfo: null
     };
 
@@ -202,6 +217,25 @@
      * folder called `Cut\Final` — legal on macOS — sent `\F` into the literal, which
      * ExtendScript evaluates to `F`. The host then wrote the XML to a path that does not
      * exist and the export failed with nothing useful to say. */
+    /* AN ExtendScript REPLY, OR NULL. One helper, because `try { JSON.parse } catch` is not
+     * the guard it looks like.
+     *
+     * ⚠️ JSON.parse("null") DOES NOT THROW. It succeeds and returns null, so a catch-only
+     * guard hands null downstream and the next property read takes the panel down with a
+     * TypeError. An ExtendScript function that returns undefined answers exactly "null", so
+     * this is what a host.jsx older than the panel produces — and it crashed the READ path
+     * (`r.ok`), the XML path (`r.tried`) and the render path (`r.tried`), all three of which
+     * had a catch and none of which was protected by it. Measured, not theorised: a probe
+     * against a host answering "null" died on main.js's dumpActiveSequence callback.
+     *
+     * Returning null and letting each caller say its own thing keeps that decision where it
+     * belongs — a failed read is fatal, a failed XML export is not. */
+    function hostReply(raw) {
+        var r = null;
+        try { r = JSON.parse(raw); } catch (e) { return null; }
+        return (r && typeof r === "object") ? r : null;
+    }
+
     function jsStr(s) {
         return '"' + String(s === null || s === undefined ? "" : s)
             .replace(/\\/g, "\\\\")
@@ -295,7 +329,23 @@
         } else {
             args = [state.script, state.dump, "-o", outDir];
         }
-        if (!allTypes) {
+        /* ⚠️ THE TYPE FILTER IS A SOURCE-MODE CONCEPT AND ONLY A SOURCE-MODE CONCEPT.
+         *
+         * In source mode the extension genuinely decides the export: ffmpeg opens the camera
+         * file, so a .mogrt — a Zip archive — is something it cannot read. In RENDER mode the
+         * pixels come from Premiere, which has already resolved the .png, the adjustment layer
+         * and the Essential Graphics title that has no source file at all, so filtering on a
+         * source extension filters on something nothing is reading. His words: "in timeline
+         * mode i dont need to select anything like the mp4, mov, png just render the clip as
+         * the master track".
+         *
+         * The engine reached the same conclusion from its own side — its --ext now exempts any
+         * cut that is render_planned, has a render_path, or has no source path, because --ext
+         * was DELETING the very rows --render-planned had just declared cuttable. Not sending
+         * the flag says that once instead of twice, and it also covers the case the engine's
+         * exemption cannot: a cut whose render FAILED has neither flag, so a .png on the
+         * master track would be dropped by --ext on the retry. */
+        if (!allTypes && state.cutFrom !== "render") {
             var exts = selectedExts();
             if (exts.length) args.push("--ext", exts.join(","));
         }
@@ -327,6 +377,18 @@
     function spawnOpts() {
         return {
             cwd: path.dirname(state.script),
+            /* ⚠️ ITS OWN PROCESS GROUP, and this is what makes Cancel able to stop anything.
+             *
+             * The engine encodes with ThreadPoolExecutor(max_workers=JOBS), so several ffmpeg
+             * processes are its children at once, and it installs no signal handler. Killing
+             * python3 alone therefore ORPHANS them and every clip in flight finishes and lands
+             * — which is "I pressed stop and it exported to the end" from the far side.
+             *
+             * `detached` makes python3 the leader of a new group, so kill(-pid) reaches ffmpeg
+             * too. Without it, -pid would be the PANEL's own group and the kill would signal
+             * Premiere. unref() is deliberately NOT called: the panel still holds the handle
+             * and still gets the close event. */
+            detached: true,
             // A bare env means the C locale, and Python then cannot print a Vietnamese
             // filename to stdout without raising. Pin UTF-8.
             env: {
@@ -462,8 +524,12 @@
     var RAIL_SEV = { error: 0, warn: 1, info: 2 };
     /* Every subject say() can occupy, in the order they appear WITHIN a severity. A key that
      * nothing writes would be a promise about an ordering that never happens, so this list and
-     * the say() call sites are the same seventeen. */
-    var RAIL_KEYS = ["err", "failures", "audionum", "audio", "fps", "readmode",
+     * the say() call sites are the same eighteen. */
+    /* "seq" leads, ahead even of a hard failure: when the open sequence is not the one that
+     * was read, every other row on the rail — the destination folder, the cut list, the size
+     * estimate — is describing a sequence that is not on screen, so it is the row that has to
+     * be read first. */
+    var RAIL_KEYS = ["seq", "err", "failures", "audionum", "audio", "fps", "readmode",
                      "ramps", "types", "preset", "dest", "stall", "sizes", "rendermode",
                      "complete", "renders", "scan", "saved"];
     var railRows = {};        // key -> {sev, text, title}
@@ -507,11 +573,33 @@
     /* 3.54's list is carried forward rather than retyped: 3.54 went out and was replaced
      * within the hour, so anyone who lands straight on 3.55 must still be told what 3.54
      * changed — otherwise the release they skipped is the one nobody hears about. */
+    var CL_355 = CL_354.concat([
+        "Thông báo này giờ có nút × để tắt đi khi đã đọc xong."
+    ]);
+    /* ⚠️ 3.56 leads with a data-loss fix, so it goes FIRST in the list and not last. An audit
+     * measured render mode silently deleting up to 72% of the cuts the scan had shown — 68
+     * rows offered, 19 delivered on one real timeline — because the flag that marks a row as
+     * render-backed was set AFTER the file-type filter that reads it. Anyone who exported in
+     * Timeline render mode on 3.53-3.55 got fewer clips than the panel promised. */
     var CHANGELOG = {
         "3.54": CL_354,
-        "3.55": CL_354.concat([
-            "Thông báo này giờ có nút × để tắt đi khi đã đọc xong."
-        ])
+        "3.55": CL_355,
+        "3.56": [
+            "⚠️ SỬA LỖI MẤT CLIP — quan trọng nhất bản này. Ở Timeline render, panel hiện "
+            + "22 clip nhưng export ra ít hơn (có lần chỉ 6). Nguyên nhân: bộ lọc loại file "
+            + "chạy TRƯỚC khi đánh dấu clip sẽ được render, nên .mov / .png / graphic bị xoá "
+            + "âm thầm. Ai đã export bằng Timeline render ở bản 3.53–3.55 nên chạy lại.",
+            "Ở Timeline render giờ không cần tick loại file nữa — mọi clip trên master track "
+            + "đều được render, kể cả ảnh và graphic không có source.",
+            "Panel kiểm tra sequence đang mở có đúng là sequence đã Read hay không. Không "
+            + "khớp thì báo đỏ, và bấm Export sẽ hỏi lại trước khi chạy.",
+            "Transition: cắt theo đúng in/out của clip trên master track, không cắt ở giữa "
+            + "transition nữa.",
+            "Hai clip giống hệt nhau trong cùng một nested sequence giờ tính là một, nên bỏ "
+            + "tick một cái không còn làm mất cả hai.",
+            "Bấm Cancel là dừng thật; nếu export lại mà trùng tên file thì panel hỏi Replace.",
+            "Clip không có source (nest, title, graphic) giờ cũng có số dung lượng ước lượng."
+        ].concat(CL_355)
     };
 
     /* Shown when the running version differs from the one last seen here.
@@ -912,7 +1000,16 @@
         show(el.opts, false);
         show(el.step3, false);
         show(el.tablewrap, false);
-        show(el.mergebox, false);
+        /* ⚠️ #mergedet, NOT #mergebox — and getting this wrong is why "3 merge notes"
+         * expanded to nothing.
+         *
+         * #mergebox is the INNER div of the <details>. This line used to hide it, from back
+         * when it was the whole box, and the reset was never re-aimed after the disclosure
+         * wrapper arrived. Nothing ever un-hid it, so from the first read onwards the body
+         * was display:none for the rest of the session while renderMerge() went on showing
+         * #mergedet with a count on its summary. He clicked it and got an empty box, twice.
+         * Hiding the disclosure is what was meant: it takes its body with it. */
+        show(el.mergedet, false);
         showReport(false);
         show(el.prog, false);
         /* Every rail row that belonged to the PREVIOUS read goes with it. They used to be
@@ -927,6 +1024,11 @@
         say("sizes", "warn", "");
         say("renders", "info", "");
         say("failures", "error", "");
+        /* And the mismatch row, which this read is about to settle one way or the other:
+         * pressing Read is one of the two ways to resolve it (switching back is the other),
+         * so leaving it up while the read runs would show an error about a state that has
+         * just been replaced. */
+        say("seq", "error", "");
         // The destination is named after the sequence, so it is unknown again until this
         // read answers. Leaving the old sequence's folder on screen would name the wrong
         // one — the same staleness as the clip table above.
@@ -937,10 +1039,8 @@
 
         cs.evalScript("dumpActiveSequence()", function (raw) {
             if (!resumeRead()) return;
-            var r;
-            try {
-                r = JSON.parse(raw);
-            } catch (e) {
+            var r = hostReply(raw);
+            if (!r) {
                 setBusy(false);
                 readStage(-1);
                 fail("Premiere did not return a readable reply:\n" + raw);
@@ -1003,10 +1103,9 @@
                 // An unreadable reply means no XML — not the end of the read. This used to
                 // `return` here, which left the panel busy on step 2 with every control
                 // disabled and no error shown. The dump alone still cuts.
-                var r = { ok: false, error: "unreadable reply from Premiere" };
-                try {
-                    r = JSON.parse(raw);
-                } catch (e) {
+                var r = hostReply(raw);
+                if (!r) {
+                    r = { ok: false, error: "unreadable reply from Premiere" };
                     log("xml export: unreadable reply: " + raw);
                 }
                 for (var i = 0; i < (r.tried || []).length; i++) {
@@ -1106,6 +1205,11 @@
          * decision anyone made about THIS timeline, so the present types are switched
          * back on and the panel says it did that. */
         state.typesReset = "";
+        /* ⚠️ NOT IN RENDER MODE. The rescue below exists so a timeline can never open with
+         * nothing cuttable ticked — but in render mode no tick gates anything, so there is no
+         * such state to rescue, and running it anyway would rememberTypeChoices() a change he
+         * never made and carry it into his next SOURCE export. */
+        if (state.cutFrom === "render") return true;
         var present = presentCuttable();
         var anyOn = false;
         for (var q = 0; q < present.length; q++) {
@@ -1185,6 +1289,16 @@
 
         // The destination folder is named after this sequence, so it is only knowable now.
         setOutDest();
+        /* ⚠️ AND THE RENDER-MODE NOTE, WHICH COULD NOT APPEAR BEFORE THIS LINE EXISTED.
+         *
+         * renderStripFoot() opens with "nothing until the number exists" — the render bitrate
+         * is frame size x fps x quality, so it is unknowable until a read has reported the
+         * sequence's pixels. But nothing re-ran it WHEN the read landed: it was reached only
+         * from renderSettings(), i.e. from touching a control. So in render mode the note
+         * stayed empty from launch until something unrelated was nudged, which is the same
+         * class of defect as a count over an empty box — a message with no route to the
+         * screen. Found by a test asserting the note's wording and reading "". */
+        renderStripFoot();
         refreshExportEnabled();
     }
 
@@ -1296,6 +1410,13 @@
          * nowhere to hide, and the panel's very first screen said "This timeline has no media
          * that can be cut." above a button asking you to read a timeline. */
         if (state.busy || !state.clips.length) return "";
+        /* ⚠️ SILENT IN RENDER MODE, because every sentence below it is about the type filter
+         * and the type filter does not apply there. "Not selected: .aegraphic (36), .png (15)
+         * — clips of those types are on this timeline and will NOT be cut" is simply FALSE
+         * when Premiere is rendering them, and "This timeline has no media that can be cut"
+         * is false of a timeline made entirely of graphics. A warning that is wrong is worse
+         * than no warning: it sends him to fix something that is already right. */
+        if (state.cutFrom === "render") return "";
         if (state.typesReset) {
             return "Nothing was selected, so " + state.typesReset
                  + " — the types on this timeline — were switched back on.";
@@ -1443,7 +1564,10 @@
         } else if (!state.out) {
             msg = "Choose a folder to save into.";
         } else if (!n) {
-            msg = "Nothing is ticked yet — pick at least one clip or file type.";
+            // There is no file type to pick in render mode — the chips are not on screen.
+            msg = state.cutFrom === "render"
+                ? "Nothing is ticked yet — pick at least one clip."
+                : "Nothing is ticked yet — pick at least one clip or file type.";
             cls += " warn";
         } else {
             msg = "Ready. " + n + " clip" + (n === 1 ? "" : "s") + " will be written into "
@@ -1524,15 +1648,32 @@
      * and result on a clip that is not running, and there would be nothing on screen to say
      * so. Showing nothing is the honest failure; the manifest sets both rows right when the
      * run ends. */
+    /* ⚠️ RESOLVED AGAINST THE CLIP LIST, BOTH LENGTHS, and that is the half that makes the
+     * cut_id change safe.
+     *
+     * The engine's progress line is still "video/1/0/72 name.mp4" — the id was deliberately
+     * NOT put in it, because the matcher for that line is
+     * /^\s*>>\s+(?:([a-z]+\/\d+\/\d+(?:\/\d+)?)\s+)?(.+)$/ and a fifth slash component makes
+     * group 1 fail, which dumps the whole token into the FILENAME group and takes live
+     * progress out on the panel that is already installed.
+     *
+     * So the 4-field branch can no longer just reassemble the fields into a key: clipKey()
+     * now returns an id whenever the manifest carried one, and a reassembled four-field
+     * string would match no row at all. It has to look the clip up and ask clipKey() what
+     * that clip's key IS — which is what the 3-field branch has always done, and for the
+     * same reason. Ambiguous stays dark: that is this panel's existing convention for "we do
+     * not know which row", and a wrong row lighting up is worse than none. */
     function keyFromEngine(k) {
         var p = String(k || "").split("/");
-        if (p.length === 4) return p[0] + " " + p[1] + " " + p[2] + " " + p[3];
-        if (p.length !== 3) return "";
+        if (p.length !== 3 && p.length !== 4) return "";
         var hit = "", n = 0;
         for (var i = 0; i < state.clips.length; i++) {
             var c = state.clips[i];
             if (String(c.trackType) === p[0] && String(c.trackIndex) === p[1]
-                && String(c.timelineIn) === p[2]) { hit = clipKey(c); n++; }
+                && String(c.timelineIn) === p[2]
+                && (p.length === 3 || String(c.timelineOut) === p[3])) {
+                hit = clipKey(c); n++;
+            }
         }
         return n === 1 ? hit : "";
     }
@@ -1737,6 +1878,189 @@
         refreshExportEnabled();
     }
 
+    /* ============================== IS THE OPEN SEQUENCE STILL THE ONE THAT WAS READ?
+     *
+     * THE FAILURE THIS EXISTS FOR: Read on sequence A, switch to B in Premiere, Export. The
+     * cut list, the frame ranges, the file names and the manifest are all A's, and he is
+     * looking at B. In source mode that is a wrong LIST — the clips are still cut from A's
+     * own media, so nothing of B is inside them. In TIMELINE RENDER mode it is far worse:
+     * Premiere renders whatever sequence is active, so every file would hold B's pixels under
+     * A's name, A's number and A's timecode, and nothing in the output or in the report would
+     * say so. Wrong data that looks right is the one thing this tool may not produce — it
+     * exists to build a training set.
+     *
+     * COMPARED ON THE ID, NEVER THE NAME. A duplicate, a _v2, two sequences in different
+     * bins can all be called the same thing, so a name comparison would agree on precisely
+     * the confusion being guarded against. The names are carried only so a message can say
+     * which sequence is which — "mismatch" on its own makes him go and work that out.
+     *
+     * ⚠️ THE ONE HOLE LEFT: if Premiere returns no sequenceID at either end, two different
+     * sequences that share a name cannot be told apart here. That downgrade is said out loud
+     * in the message and written to the log rather than hidden — a silent weaker check is how
+     * a guard becomes a false reassurance.
+     */
+
+    /* 20 SECONDS while idle, and the number is a choice.
+     *
+     * Every check is a round trip into ExtendScript, which competes with Premiere's own main
+     * thread — so this is not a tight timer, and it is not the primary trigger either. The
+     * moment that actually matters is the focus check: he switches sequence in Premiere and
+     * comes straight back to the panel. The interval only covers the panel that is visible
+     * and never refocused — undocked, or on a second monitor — where 20s means the row is up
+     * long before anyone could pick settings and reach Export. Three round trips a minute is
+     * nothing beside one read, and it never fires while the panel is busy or a run is going. */
+    var SEQ_CHECK_MS = 20000;
+
+    function readSeqName() { return state.info ? String(state.info.sequence || "") : ""; }
+    function readSeqId() { return state.info ? String(state.info.sequence_id || "") : ""; }
+
+    /* Quoted, so a sequence called "final" or "V2" reads as one thing inside a sentence. */
+    function qn(s) {
+        return "“" + String(s === null || s === undefined || s === "" ? "?" : s) + "”";
+    }
+
+    /* THE ROW. "error", not "warn", for two reasons: the rail sorts errors first, and this is
+     * not a thing to be aware of — everything else on screen is about the wrong sequence
+     * until it is fixed.
+     *
+     * Kept to one sentence of consequence plus one of remedy. It costs real height at a 320px
+     * dock, and each name appears once: after "Read A · B is open now", "a render" needs no
+     * further pointing at. */
+    function sayMismatch(open, weak) {
+        var read = readSeqName();
+        var what = state.cutFrom === "render"
+            ? "A render would put " + qn(open) + "’s picture into " + qn(read)
+              + "’s clips."
+            : "Export would cut " + qn(read) + ", not " + qn(open) + ".";
+        say("seq", "error", "Read " + qn(read) + " · " + qn(open) + " is open now. "
+            + what + " Press Read again, or switch back."
+            + (weak ? " (Name check only — no sequence id from Premiere.)" : ""));
+    }
+
+    /* @param when  "focus" | "idle" | "export". Logged, so a row that appeared can be traced
+     *              to the check that found it, and it is what exempts the export check from
+     *              the busy guard.
+     * @param cb    called with true when it is safe to carry on, false on a mismatch. Only
+     *              the export path passes one.
+     */
+    function checkSequence(when, cb) {
+        // Nothing has been read, so there is no identity to compare against and no row.
+        if (!state.info) { if (cb) cb(true); return; }
+        /* NEVER MID-FLIGHT. An evalScript issued during a render or a scan queues behind
+         * ExtendScript work that can run for minutes, and its answer would describe a moment
+         * that has passed. The export check is exempt because it runs BEFORE anything starts
+         * — that is the whole point of it. */
+        if (when !== "export" && (state.busy || state.running)) return;
+        cs.evalScript("activeSequenceStamp()", function (raw) {
+            var r = null;
+            try { r = JSON.parse(raw); } catch (e) {}
+            if (!r || typeof r !== "object") {
+                /* THE CHECK COULD NOT BE MADE. Said out loud, because a guard that has
+                 * silently stopped working is worse than no guard. The realistic cause is a
+                 * host.jsx older than this panel — reinstalling is the fix, and it is the
+                 * same remedy folderSafe() already documents for that mismatch.
+                 *
+                 * It does NOT block the export. Refusing to cut at all because a panel is
+                 * newer than the script beside it would strand him mid-job over a check,
+                 * and the row plus the log say exactly what is missing. */
+                say("seq", "warn", "Cannot tell which sequence is open. "
+                    + "Reinstall the panel to restore this check.");
+                log("sequence check (" + when + "): unreadable reply: " + raw);
+                if (cb) cb(true);
+                return;
+            }
+            if (r.none) {
+                /* NO ACTIVE SEQUENCE AT ALL — deliberately neither a mismatch nor a row.
+                 * It cannot produce wrong-data-that-looks-right, which is the only thing
+                 * this guard is for: in source mode Premiere's state is irrelevant, the
+                 * clips being cut from the camera files; and in render mode renderCuts()
+                 * opens app.project.activeSequence itself and comes back with "No active
+                 * sequence — open a timeline first", which is a loud failure that writes
+                 * nothing. A row that appeared every time a timeline tab was closed is
+                 * exactly the nagging that teaches him to ignore the rail. */
+                say("seq", "error", "");
+                log("sequence check (" + when + "): no active sequence");
+                if (cb) cb(true);
+                return;
+            }
+            if (!r.ok) {
+                say("seq", "warn", "Cannot tell which sequence is open. "
+                    + "Reinstall the panel to restore this check.");
+                log("sequence check (" + when + "): " + (r.error || "unknown"));
+                if (cb) cb(true);
+                return;
+            }
+            var openId = String(r.id || ""), openName = String(r.name || "");
+            var readId = readSeqId();
+            /* The ID decides whenever both ends have one. Only when one of them does not
+             * does this fall back to the name, and then it says so. */
+            var weak = !readId || !openId;
+            var same = weak ? (openName === readSeqName()) : (openId === readId);
+            state.seqOpenName = openName;
+            if (weak) {
+                log("sequence check (" + when + "): NO SEQUENCE ID (read \"" + readId
+                    + "\", open \"" + openId + "\") — comparing names, which cannot tell "
+                    + "two sequences of the same name apart");
+            }
+            if (same) {
+                // RESOLVED: he switched back, or this is simply the ordinary case. A stale
+                // error row is worse than none — it teaches him to ignore the rail.
+                say("seq", "error", "");
+                if (cb) cb(true);
+                return;
+            }
+            sayMismatch(openName, weak);
+            log("sequence check (" + when + "): MISMATCH — read \"" + readSeqName()
+                + "\" [" + readId + "], open \"" + openName + "\" [" + openId + "]");
+            if (cb) cb(false);
+        });
+    }
+
+    /* THE GATE, and nothing about it may be passable by accident.
+     *
+     * askConfirm() puts up an ExtendScript modal whose default is NO, so Return, Escape and
+     * the close box all answer no; anything that is not exactly "yes" is read as no here, so
+     * a thrown confirm() or an unreadable reply lands the same way. `proceed` is called on a
+     * yes and on nothing else — the safe branch is the one that happens by default, by
+     * accident, and by failure.
+     *
+     * ⚠️ askConfirm() BLOCKS PREMIERE'S MAIN THREAD while it is up, as every ExtendScript
+     * modal does. That is why it is raised only here: as the direct consequence of a click
+     * he made a moment ago, never from the focus check and never from the timer. */
+    function confirmMismatch(proceed) {
+        var read = readSeqName(), open = state.seqOpenName || "?";
+        var msg;
+        if (state.cutFrom === "render") {
+            /* STRONGER IN RENDER MODE, because the consequence is different in kind rather
+             * than in degree: the files themselves would be wrong, not just the list. */
+            msg = "STOP — this is not the sequence you read.\n\n"
+                + "You read:   " + read + "\n"
+                + "Open now:   " + open + "\n\n"
+                + "Timeline render renders WHATEVER SEQUENCE IS OPEN. Premiere will render "
+                + open + ", and every clip will be written under " + read + "'s name, number "
+                + "and timecode. The pictures inside them will be " + open + "'s, and nothing "
+                + "in the files or in the report will say so.\n\n"
+                + "Switch back to " + read + " in Premiere, or press Read on " + open + ".\n\n"
+                + "Export anyway?";
+        } else {
+            msg = "This is not the sequence you read.\n\n"
+                + "You read:   " + read + "\n"
+                + "Open now:   " + open + "\n\n"
+                + "The cut list, the frame ranges and the file names are all " + read
+                + "'s. The clips are cut from " + read + "'s own media, so nothing from "
+                + open + " will be inside them — but this export will not match the "
+                + "timeline you are looking at.\n\n"
+                + "Switch back to " + read + " in Premiere, or press Read on " + open + ".\n\n"
+                + "Export " + read + " anyway?";
+        }
+        log("export held: read \"" + read + "\" but \"" + open + "\" is open — asking");
+        cs.evalScript("askConfirm(" + jsStr(msg) + ")", function (raw) {
+            var yes = String(raw === null || raw === undefined ? "" : raw).trim() === "yes";
+            log("sequence mismatch: " + (yes ? "exported anyway" : "export cancelled"));
+            if (yes) proceed();
+        });
+    }
+
     /* THE EXPORT, in one or two phases.
      *
      * Cutting from source is one phase: the engine reads the camera files. Cutting from a
@@ -1746,6 +2070,217 @@
      * all that changes is which file ffmpeg opens.
      */
     function doExport() {
+        /* THE AUTHORITATIVE CHECK, and the reason the rail row is not enough on its own: the
+         * row can be up to SEQ_CHECK_MS old and he may never have looked at it. This one runs
+         * at the moment the export is asked for, and nothing starts until it has answered. */
+        checkSequence("export", function (safe) {
+            if (safe) return startExport();
+            confirmMismatch(startExport);
+        });
+    }
+
+    /* ===================================================================== STOP MEANS STOP
+     *
+     * His report: "khi a phát hiện có vấn đề khi nó đang export, a bấm huỷ/dừng nhưng nó vẫn
+     * export cho đến cùng" — he pressed cancel mid-export and it ran to the end.
+     *
+     * MEASURED, TWO CAUSES, ONE PER PHASE:
+     *
+     *   THE RENDER PHASE has no subprocess at all. It is ONE blocking evalScript across every
+     *   range, with Premiere's main thread inside it, so state.proc is null the whole time —
+     *   and the old handler was `if (state.proc) { proc.kill(); }`, i.e. it did NOTHING, in
+     *   silence, with the button enabled. Press Cancel while Premiere is rendering and both
+     *   phases run to completion. That is the report, exactly.
+     *
+     *   THE ENCODE PHASE is a subprocess, and killing it looks like it works. But the engine
+     *   runs ffmpeg on a thread pool and installs no signal handler, so SIGTERM to python3
+     *   orphans every ffmpeg it started and each finishes its clip. Killing the process GROUP
+     *   is what actually stops it — see the `detached` note in spawnOpts().
+     *
+     * WHAT IS PROMISED, AND IT IS NOT THE SAME IN BOTH: the encode stops now. The render
+     * finishes the range it is on and starts no other — a blocking host call cannot be
+     * interrupted from here, and the button says so rather than offering a stop it cannot
+     * deliver. Nothing is encoded from a stopped render.
+     */
+
+    /* Where the panel tells host.jsx to stop. renderCuts() reads this between ranges. */
+    function renderStopFile() {
+        var d = renderDir();
+        return d ? path.join(d, "_render_stop") : "";
+    }
+
+    function writeRenderStop() {
+        var f = renderStopFile();
+        if (!f) return false;
+        try {
+            /* ⚠️ THE FOLDER MAY NOT EXIST YET. renderCuts() creates it, but Cancel can be
+             * pressed in the seconds before Premiere gets that far — and writeFileSync into a
+             * missing directory throws, which would make the button a no-op again in exactly
+             * the window where someone who spotted the problem instantly would press it. */
+            fs.mkdirSync(path.dirname(f), { recursive: true });
+        } catch (e) { /* already there, or a runtime without recursive mkdir */ }
+        try {
+            // The content is never read — existence is the whole signal.
+            fs.writeFileSync(f, "stop\n", "utf8");
+            log("cancel: asked Premiere to stop after the current clip (" + f + ")");
+            return true;
+        } catch (e) {
+            log("cancel: could not write the stop file: " + e);
+            return false;
+        }
+    }
+
+    function clearRenderStop() {
+        var f = renderStopFile();
+        if (!f) return;
+        try { if (exists(f)) fs.unlinkSync(f); } catch (e) {}
+    }
+
+    /* SIGTERM the group, then SIGKILL whatever is left.
+     *
+     * ⚠️ THE NEGATIVE PID IS ONLY SAFE BECAUSE THE CHILD IS DETACHED. With spawnOpts()'s
+     * `detached: true` python3 leads a group of its own; without it, -pid addresses the
+     * PANEL's group and this would signal Premiere itself. Both calls are attempted and both
+     * are wrapped, so a runtime with no process.kill still gets the plain proc.kill(). */
+    function killTree(proc) {
+        var pid = proc && proc.pid;
+        var np = null;
+        try { np = (node && node.process) ? node.process : null; } catch (e) {}
+        if (!np) { try { np = process; } catch (e2) { np = null; } }
+        try {
+            if (np && pid) np.kill(-pid, "SIGTERM");
+        } catch (e3) { log("cancel: group SIGTERM failed: " + e3); }
+        try { proc.kill(); } catch (e4) {}
+        /* AND A SECOND SHOT. python3 can be inside a blocking wait and ffmpeg can be mid
+         * write; SIGTERM asks and SIGKILL insists. Only if the thing has not gone on its own
+         * — state.proc is nulled by the close handler, so this compares identity rather than
+         * killing whatever happens to be running by then. */
+        setTimeout(function () {
+            if (state.proc !== proc) return;
+            log("cancel: still alive after SIGTERM — SIGKILL");
+            try { if (np && pid) np.kill(-pid, "SIGKILL"); } catch (e5) {}
+            try { proc.kill("SIGKILL"); } catch (e6) {}
+        }, 1500);
+    }
+
+    function cancelRun() {
+        if (!state.running && !state.proc) return;
+        state.cancelled = true;
+        if (state.proc) {
+            log("cancel: killing the encode (pid " + state.proc.pid + ") and its group");
+            killTree(state.proc);
+            el.progtext.textContent = "Stopping…";
+        } else {
+            // No subprocess, so this is the render phase.
+            writeRenderStop();
+            el.progtext.textContent = "Stopping after this clip…";
+        }
+        // One call, after both branches. It used to sit in the render branch only, so the
+        // button went on offering a stop it had already delivered for the whole encode.
+        cancelLabel();
+    }
+
+    /* THE BUTTON MUST NOT LIE. In the encode phase it stops the run; in the render phase the
+     * most it can do is stop the next clip from starting, so that is what it offers. One
+     * short label, no explanatory sentence beside it — this is the whole control. */
+    function cancelLabel() {
+        if (!el.cancel) return;
+        /* Between runs, back to rest. Without this the button would still read "Stopping…"
+         * and be disabled when the NEXT run's progress row appeared. */
+        if (!state.running && !state.proc) {
+            el.cancel.disabled = false;
+            el.cancel.textContent = "Cancel";
+            return;
+        }
+        if (state.cancelled) {
+            el.cancel.textContent = "Stopping…";
+            el.cancel.disabled = true;
+            return;
+        }
+        el.cancel.disabled = false;
+        el.cancel.textContent = state.proc ? "Cancel" : "Stop after this clip";
+    }
+
+    function startExport() {
+        /* THE REPLACE QUESTION. Asked only when the destination already holds something this
+         * run could overwrite — a re-export, or the partial set a cancelled run left behind,
+         * which is exactly the case he asked about.
+         *
+         * HOW IT COMPOSES with what is already here, because there are now three ways to
+         * answer the same question and they must not contradict each other:
+         *
+         *   the `skip clips already there` tick IS the standing answer. Ticked, he has
+         *   already said "skip", so asking again would be asking a question he has answered
+         *   — no prompt, and --resume goes on the command line as it always did.
+         *
+         *   a RETRY is a deliberate request to rewrite the clips that failed. Replacing is
+         *   the entire point of it, so it is never asked either.
+         *
+         *   otherwise: Replace overwrites (no --resume, which is today's behaviour), Skip
+         *   passes --resume for this one run without touching his tick, and Cancel — the
+         *   default, and what a dismissed dialog gives — writes nothing.
+         */
+        var already = (!state.resume && !state.retryKeys.length) ? clashCount() : 0;
+        if (!already) return beginExport();
+        askReplace(already, beginExport);
+    }
+
+    /* HOW MANY CLIPS ARE ALREADY IN THE DESTINATION.
+     *
+     * ⚠️ NOT countIn(). The engine writes its own bookkeeping into the very same folder —
+     * manifest.json, clips.csv, the _renders scratch — so counting everything would raise the
+     * Replace question after every export ever run into that folder, including one that
+     * produced no clip at all. Measured: the first export leaves manifest.json behind, and
+     * the second was then asked about "1 file(s)" that were never his. Only media counts,
+     * because only media is what he stands to lose. */
+    function clashCount() {
+        var dir = outDir();
+        if (!dir) return 0;
+        var skip = { "manifest.json": 1, "clips.csv": 1, "pick.txt": 1,
+                     "_renders": 1, "_render_progress.json": 1, "_render_stop": 1 };
+        var n = 0;
+        try {
+            var names = fs.readdirSync(dir);
+            for (var i = 0; i < names.length; i++) {
+                var nm = String(names[i]);
+                if (nm.charAt(0) === "." || skip[nm]) continue;
+                n++;
+            }
+        } catch (e) { return 0; }
+        return n;
+    }
+
+    function askReplace(already, proceed) {
+        var dest = outDir();
+        var msg = seqFolder() + "/" + outKind() + "/ already holds " + already
+            + " file(s).\n\n" + dest + "\n\n"
+            + "Replace — overwrite the names this export reproduces.\n"
+            + "Skip — keep what is there and write only what is missing.\n"
+            + "Cancel — write nothing.";
+        log("clash: " + already + " file(s) already in " + dest + " — asking");
+        cs.evalScript("askChoice(" + jsStr("Files are already there") + ", " + jsStr(msg)
+            + ", " + jsStr("Replace") + ", " + jsStr("Skip") + ")", function (raw) {
+            var a = String(raw === null || raw === undefined ? "" : raw).trim();
+            if (a === "a") {
+                log("clash: replacing");
+                proceed();
+                return;
+            }
+            if (a === "b") {
+                log("clash: skipping what is already there");
+                state.resumeOnce = true;
+                proceed();
+                return;
+            }
+            /* ⚠️ THE DEFAULT BRANCH, and it is the one that writes nothing. Cancel, Escape,
+             * the close box, a ScriptUI that threw and an unreadable reply all land here. */
+            log("clash: export cancelled");
+        });
+    }
+
+    function beginExport() {
+        state.cancelled = false;
+        clearRenderStop();
         if (state.cutFrom !== "render") return runEngineExport(null);
         renderThenExport();
     }
@@ -1792,6 +2327,8 @@
         show(el.prog, true);
         setRunning(true);
         setBusy(true, "Rendering…");
+        // There is no subprocess in this phase, so the button says what it can actually do.
+        cancelLabel();
         el.barfill.style.width = "0";
         log("render: " + spec.length + " cut(s) -> " + dir);
         pollRenderProgress(dir, spec.length);
@@ -1800,10 +2337,8 @@
             + ", " + renderMbps() + ", 1, " + jsStr(includeList().join(",")) + ")",
             function (raw) {
                 stopRenderPoll();
-                var r, i, t;
-                try {
-                    r = JSON.parse(raw);
-                } catch (e) {
+                var i, t, r = hostReply(raw);
+                if (!r) {
                     log("render: unreadable reply: " + raw);
                     show(el.prog, false);
                     setRunning(false);
@@ -1828,6 +2363,28 @@
                 }
                 log("render: " + r.written + " written, " + (r.failed || 0)
                     + " failed, in " + r.folder);
+
+                /* ⚠️ A STOPPED RENDER IS NOT HANDED TO THE ENCODE. `stopped` is renderCuts()
+                 * honouring the stop file between ranges; state.cancelled covers the case
+                 * where the click landed after the last range, when there was no boundary
+                 * left to notice it. Encoding a partial render because he pressed Cancel at
+                 * the wrong moment is the same class of surprise as not stopping at all.
+                 *
+                 * The renders are KEPT rather than swept, so a re-export with Skip finishes
+                 * the job instead of asking Premiere to render it all again. */
+                if (r.stopped || state.cancelled) {
+                    stopRenderPoll();
+                    show(el.prog, false);
+                    setRunning(false);
+                    setBusy(false);
+                    cancelLabel();
+                    say("renders", "warn", "Stopped after " + r.written + " of "
+                        + spec.length + " clip(s). Nothing was cut. The finished renders are "
+                        + "kept — export again and choose Skip to carry on from here.");
+                    log("render: STOPPED at range " + (r.stopped_at === undefined
+                        ? "?" : r.stopped_at) + " — the encode was not started");
+                    return;
+                }
 
                 /* Carried into the run's own notes rather than shown and lost: the report
                  * is what he reads afterwards, and both of these change what it means. */
@@ -1886,7 +2443,10 @@
             // for renders it never made.
             if (state.vtrackWant) args.push("--video-track", String(state.vtrackWant));
         }
-        if (state.resume) args.push("--resume");
+        /* His standing choice on the tick, OR the one-run answer to the Replace question.
+         * resumeOnce is consumed here so answering "Skip" once cannot narrow the next run. */
+        if (state.resume || state.resumeOnce) args.push("--resume");
+        state.resumeOnce = false;
         // Only when something is actually unticked; otherwise the flag is noise.
         var retry = state.retryKeys.slice();
         state.retryKeys = [];          // consumed here, so it cannot narrow the next run
@@ -1932,6 +2492,8 @@
             return;
         }
         state.proc = proc;
+        // A real subprocess now exists, so Cancel can promise a real stop again.
+        cancelLabel();
 
         var tail = "";
         var stderr = "";
@@ -2011,6 +2573,17 @@
             setBusy(false);
             setRunning(false);
             show(el.prog, false);
+            /* ⚠️ SAY THAT IT WAS STOPPED. A killed run exits non-zero with a partial manifest,
+             * and the report built from it reads exactly like a run that failed halfway — so
+             * without this the panel answers "stop" with what looks like a fault. The row also
+             * names the way forward, because the folder now holds an incomplete set and the
+             * next export has to be told what to do about it. */
+            if (state.cancelled) {
+                say("renders", "warn", "Stopped. The clips already written are in the folder; "
+                    + "export again and choose Skip to finish the rest.");
+                log("run stopped by Cancel (exit " + code + ")");
+            }
+            cancelLabel();
 
             if (stderr) log("stderr: " + stderr);
 
@@ -2194,6 +2767,18 @@
          * ones. The panel gates its migration notice on this so it cannot tell someone their
          * numbers changed on the evidence of a manifest written before they did. */
         state.audioNumbering = String(pset.audio_track_numbering || "");
+        /* THE SEQUENCE'S OWN FRAME SIZE, off the FCP7 XML's <samplecharacteristics>.
+         *
+         * This is what a row with NO SOURCE FILE can be priced from. A nest cut as one clip,
+         * an adjustment layer, a title, an offline clip — every input the size model wants
+         * (width, height, fps, bitrate) comes from probing a source file, and there is no
+         * file to probe, so those rows showed nothing at all. In render mode the output IS
+         * the sequence, so the sequence's own pixels are the right basis.
+         *
+         * Backward compatible by construction: a manifest from an older engine has no
+         * sequence_width, these stay 0, and the branch in clipBytes() never fires. */
+        state.seqW = Number(pset.sequence_width || 0);
+        state.seqH = Number(pset.sequence_height || 0);
         sayAudioRenumbered();
         var clips = data.clips || [];
         for (var i = 0; i < clips.length; i++) {
@@ -2208,6 +2793,23 @@
             var status = String(c.display_status || "");
             var notes = String(c.display_notes || "");
             var kind = String(c.display_kind || "") || "ok";
+            /* ⚠️ A ROW THAT CAN BE CUT MUST NOT BE PAINTED AS A FAILURE.
+             *
+             * The engine's describe() sets kind "bad" whenever a cut has no source file, and
+             * in render mode that cut is perfectly cuttable — Premiere is what supplies the
+             * picture. So a nest, a title and an adjustment layer arrived TICKABLE AND RED at
+             * once, which is how the reviewer found them ("những file báo màu đỏ"). Red has to
+             * mean "this will not work"; k-warn is the class for "look at this".
+             *
+             * ⚠️ DEMOTED HERE RATHER THAN IN THE ENGINE, because the panel is the only side
+             * that knows the mode. The identical manifest row IS a failure in source mode,
+             * where there is no file to cut from — so a kind changed engine-side would paint
+             * a genuinely broken row amber. estimate_basis "sequence" is the engine saying
+             * "this cut has no source", which is exactly the population. */
+            if (kind === "bad" && cuttable && state.cutFrom === "render"
+                && String(c.estimate_basis || "") === "sequence") {
+                kind = "warn";
+            }
             var spd = Number(c.speed_percent || 100);
 
             state.clips.push({
@@ -2236,6 +2838,13 @@
                 // probed the source.
                 secs: Number(c.source_duration_seconds || 0),
                 srcBitrate: Number(c.bitrate || 0),
+                /* WHAT THE ENGINE'S OWN SIZE FIGURE RESTS ON: measured · source · sequence ·
+                 * ceiling · unknown. The panel does not use the engine's estimated_bytes —
+                 * it recomputes, so the number keeps following the crf and scale controls
+                 * instead of freezing at scan time — but it does use this to know WHICH kind
+                 * of row it is looking at. "sequence" is the one with no source file. */
+                estBasis: String(c.estimate_basis || ""),
+                cutId: String(c.cut_id || ""),
                 // MEASURED bits per second, from the engine encoding a second or so of
                 // this very clip at these very settings. The only trustworthy basis for
                 // the size column — see size_probe() in xmlcut.py for the 180x that the
@@ -2276,7 +2885,23 @@
      * tick (unticking one dropped both from the export), shared a row state (one row told
      * both stories while the other stayed dark), and shared a line in the pick file, so a
      * retry of one failed clip re-encoded two. */
+    /* AND NOW THE ENGINE'S OWN ID WHEN THERE IS ONE.
+     *
+     * cut_id is a 12-hex content digest — clip name, track, timeline range, source path,
+     * source in and duration, speed, reverse, and the nest it came out of. It is the only
+     * thing that can separate TWO DIFFERENT PICTURES occupying the same frames of one track,
+     * which the four fields cannot: that is the residual collision the out-point fix did not
+     * reach. It is also computed at parse time, so unlike a timeline range it is immune to
+     * the cross-dissolve split and to --whole-frames, both of which move ranges afterwards.
+     *
+     * ⚠️ THE FALLBACK IS NOT OPTIONAL. A manifest from an older engine carries no cut_id, and
+     * the four fields are still correct there. Every other key-producing path in this panel
+     * has to agree with this function about which of the two it is using — see keyFromEngine()
+     * and the manifest key in buildReport(), both of which prefer the id for the same reason.
+     * Landing this alone, with those two still spelling four fields, would point the live
+     * progress states and the whole report at keys no row holds. */
     function clipKey(c) {
+        if (c.cutId) return c.cutId;
         return c.trackType + " " + c.trackIndex + " " + c.timelineIn + " " + c.timelineOut;
     }
 
@@ -2284,7 +2909,15 @@
      * individually unticked. Type filtering and per-clip ticking are separate on
      * purpose: switching a type back on should not resurrect a clip you deliberately
      * dropped. */
+    /* IS THIS CLIP'S TYPE TICKED?
+     *
+     * ⚠️ ALWAYS YES IN RENDER MODE, and this is the ONE place that answer is given — so the
+     * clip list, the count on the button, the pick file, the size estimate and the argv
+     * cannot disagree about it. There is nothing to gate there: the picture comes out of
+     * Premiere, not out of the source file, so anything sitting on the master track is a
+     * shot — a still, an adjustment layer, a title with no <file> path at all. */
     function typeOn(c) {
+        if (state.cutFrom === "render") return true;
         return state.types[c.ext] ? state.types[c.ext].on : true;
     }
 
@@ -2410,8 +3043,12 @@
         var visible = [];
         for (var i = 0; i < state.clips.length; i++) {
             var r = state.clips[i];
-            var on = state.types[r.ext] ? state.types[r.ext].on : true;
-            if (on && inRun(r)) visible.push(r);
+            /* ⚠️ THROUGH typeOn(), NOT A SECOND COPY OF IT. This line held its own inline
+             * `state.types[r.ext] ? ... : true`, which is how the list came to disagree with
+             * everything computed from typeOn() — in render mode the chips filtered the rows
+             * on screen while the argv, the count and the pick file had stopped caring. One
+             * definition, one answer. */
+            if (typeOn(r) && inRun(r)) visible.push(r);
         }
 
         // Numbered in TIMELINE order — the order the manifest is already in — because
@@ -2673,14 +3310,32 @@
         for (var i = 0; i < state.merge.length; i++) {
             var raw = String(state.merge[i]);
             var item = raw.indexOf("· ") === 0;
+            var txt = item ? raw.substring(2) : raw;
+            /* A BLANK NOTE IS NOT A NOTE. It used to be counted and then rendered as an
+             * empty div — a number over nothing, the same lie from the other direction. */
+            if (!txt.replace(/^\s+|\s+$/g, "")) continue;
             if (!item) heads++;
             var d = document.createElement("div");
             d.className = "mergeline" + (item ? " item" : "");
-            d.textContent = item ? raw.substring(2) : raw;
+            d.textContent = txt;
             el.mergebox.appendChild(d);
         }
-        el.mergesum.textContent = heads === 1 ? "1 merge note"
-                                             : (heads + " merge notes");
+        /* ⚠️ THE COUNT COMES FROM WHAT WAS ACTUALLY APPENDED, so "3 merge notes" over an
+         * empty box is a state this function can no longer produce — which is the whole
+         * point, because it produced exactly that and it was reported twice.
+         *
+         * `heads || shown` covers the other end of it: a run whose every line is a "· "
+         * detail has no headings, and announcing "0 merge notes" above a box full of lines
+         * would be the same defect mirrored. */
+        var shown = el.mergebox.children.length;
+        if (!shown) {
+            show(el.mergedet, false);
+            return;
+        }
+        // The one writer of both, so the body can never be hidden under a visible summary.
+        show(el.mergebox, true);
+        var n = heads || shown;
+        el.mergesum.textContent = n === 1 ? "1 merge note" : (n + " merge notes");
         show(el.mergedet, true);
     }
 
@@ -3130,6 +3785,29 @@
             }
             return bpp * px * c.secs / 8 + CONTAINER_FIXED;
         }
+        /* NO SOURCE TO READ — a nest cut as one clip, an adjustment layer, a title, an
+         * offline clip. Eight rows on a real render-mode timeline showed no size at all,
+         * and the reviewer read the blanks as a fault.
+         *
+         * In render mode the output is the SEQUENCE, so it is priced from the sequence's
+         * frame size with the same model and the same controls: same bits-per-pixel curve,
+         * same codec ratio, same scale. Computed here rather than read from the engine's
+         * estimated_bytes on purpose — a stored figure would freeze at scan time and stop
+         * following the crf and scale sliders, which is the one property that makes these
+         * numbers worth showing.
+         *
+         * ⚠️ RENDER MODE ONLY. In source mode these rows cannot be cut at all, so a number
+         * would describe a file that is never going to exist. */
+        if (!d && state.cutFrom === "render" && state.seqW > 0 && state.seqH > 0) {
+            var sd = scaledDims(state.seqW, state.seqH, pct);
+            // The sequence's real rate, which the read already reported. Only if it did:
+            // inventing one would put a number on screen with nothing behind it.
+            var sfps = state.info ? Number(state.info.fps || 0) : 0;
+            if (sd && sfps > 0) {
+                return lerp(BPP_INTER, crf) * ratio * sd[0] * sd[1] * sfps
+                     * c.secs / 8 + CONTAINER_FIXED;
+            }
+        }
         if (!(c.srcBitrate > 0)) return 0;
         // No dimensions at all — the last resort, and the unreliable one.
         return c.srcBitrate * sizeRatio(crf) * ratio * Math.pow(pct / 100, 2) * c.secs / 8;
@@ -3310,6 +3988,12 @@
         for (i = 0; i < state.clips.length; i++) {
             c = state.clips[i];
             if (c.trackType !== "video") continue;
+            /* ⚠️ ONLY THE CLIPS THAT WOULD ACTUALLY BE CUT. This counted every video
+             * clipitem, so the menu offered "V1 · 11 clips" beside a list reading "10 of 10
+             * cuttable" — one number describing the timeline, the other describing the
+             * export, two lines apart, with nothing saying which was which. If a count and
+             * the list can disagree, one of them is wrong. */
+            if (c.group !== 0) continue;
             if (!seen[c.trackIndex]) { seen[c.trackIndex] = 0; }
             seen[c.trackIndex]++;
         }
@@ -3510,6 +4194,27 @@
         if (el.wholeframes) el.wholeframes.disabled = render;
         if (el.wfwrap) el.wfwrap.className = "tick" + (render ? " inert" : "");
         show(el.wfwhy, render);
+        /* THE FILE-TYPE CHIPS GO ENTIRELY IN RENDER MODE — hidden, not dimmed, and the
+         * departure from the `whole frames only` convention two lines up is deliberate.
+         *
+         * That convention is for a control whose STATE still means something in the mode you
+         * are in: one checkbox, one line, and four words beside it saying why it is asleep.
+         * The chips are not that. They are a variable-length row of three to eight
+         * interactive labels, each carrying a COUNT, which wraps to two or three lines at a
+         * 320px dock. Dimming them would leave twenty-odd nodes and eight numbers on screen
+         * doing nothing AND add a reason phrase to explain them — cutting the knobs while
+         * adding the text, which is exactly how the last "calmer" pass came out busier.
+         *
+         * The counts are also the specific thing a QA pass found misleading here: they summed
+         * every cut on every track (37 + 10 + 8 + 1 = 56) beside a list holding the master
+         * track's 10. A dimmed number is still read. Removing the artefact beats annotating
+         * it, and it leaves nothing that can disagree with the list.
+         *
+         * And it is not a control he could go looking for and fail to find: the mode is a
+         * deliberate choice in a dropdown, and putting it back brings the whole block back
+         * visibly in the same gesture. */
+        show(el.typelbl, !render);
+        show(el.types, !render);
         renderStripFoot();
     }
 
@@ -3538,7 +4243,12 @@
                  + " Mbps, then ffmpeg encodes it at your quality.");
         // Said because it is not obvious and it is wrong for a retimed clip: the scan runs
         // before any render exists, so the estimate can only come from the source.
-        out.push("Sizes are estimated from the source clips in this mode.");
+        /* Both bases, in one sentence. It said only "from the source clips", which became
+         * half true the moment rows with no source started being priced from the sequence's
+         * frame size instead — and a blank was what sent the reviewer looking in the first
+         * place, so which basis a number has is worth the eight extra words. */
+        out.push("Sizes are estimated from the source clips, or from the sequence's frame "
+                 + "size where a clip has no source — a nest, a title, an adjustment layer.");
         say("rendermode", "info", out.join(" "));
     }
 
@@ -4286,12 +4996,15 @@
              * what makes the table the report: after this loop every row says what the
              * manifest says. */
             /* Built by hand rather than through clipKey(), because a manifest row is not a
-             * clip row — it carries the engine's field names. It must spell the SAME four
-             * fields, out-point included, or the report would write to keys no row holds. */
-            var rkey = String(c.track_type || "video") + " "
+             * clip row — it carries the engine's field names. It must therefore make the SAME
+             * choice clipKey() makes, in the same order: the engine's cut_id when the manifest
+             * sent one, and the four fields (out-point included) when it did not. Spell it any
+             * other way and the whole report writes to keys no row holds — every outcome, every
+             * size, every failure reason landing nowhere. */
+            var rkey = String(c.cut_id || "") || (String(c.track_type || "video") + " "
                 + Number(c.track_index || 1) + " "
                 + Number(c.timeline_in_frames || 0) + " "
-                + Number(c.timeline_out_frames || 0);
+                + Number(c.timeline_out_frames || 0));
             setRow(rkey, {
                 st: bad ? "bad" : (st === "skipped_existing" ? "kept"
                                    : (st === "ok" ? "ok" : "bad")),
@@ -4592,11 +5305,25 @@
 
     el["export"].addEventListener("click", doExport);
 
-    el.cancel.addEventListener("click", function () {
-        if (state.proc) {
-            try { state.proc.kill(); } catch (e) {}
-        }
+    /* WHEN THE SEQUENCE CHECK FIRES. Two of the three moments are here; the third and
+     * authoritative one is inside doExport().
+     *
+     * 1. THE PANEL REGAINS FOCUS OR BECOMES VISIBLE. This is the exact moment the failure
+     *    happens through: he switches sequence in Premiere, then comes back to the panel to
+     *    press Export. Both events are bound because a docked CEP panel does not reliably
+     *    get a window focus event when the tab it lives in is brought forward — the
+     *    visibility change does. Firing twice costs one round trip and the check is
+     *    idempotent, so the overlap is not worth avoiding. */
+    window.addEventListener("focus", function () { checkSequence("focus"); });
+    document.addEventListener("visibilitychange", function () {
+        if (!document.hidden) checkSequence("focus");
     });
+    /* 2. SLOWLY, WHILE IDLE, so a mismatch does not sit unnoticed on a panel that is never
+     *    refocused. Whether a round trip is allowed at all is decided inside
+     *    checkSequence() — one place makes that call, not two. */
+    setInterval(function () { checkSequence("idle"); }, SEQ_CHECK_MS);
+
+    el.cancel.addEventListener("click", cancelRun);
 
     el.retry.addEventListener("click", function () {
         var keys = [];
@@ -4968,10 +5695,8 @@
             + ", " + renderMbps() + ", 1)",
             function (raw) {
                 el.pocrender.disabled = false;
-                var r;
-                try {
-                    r = JSON.parse(raw);
-                } catch (e) {
+                var r = hostReply(raw);
+                if (!r) {
                     log("poc: unreadable reply: " + raw);
                     pocSay("Premiere did not return a readable reply. The raw text is"
                         + " in the log, under the gear.", "error");

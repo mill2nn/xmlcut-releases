@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import collections
 import csv
+import hashlib
 import json
 import math
 import os
@@ -41,7 +42,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.55"
+VERSION = "3.56"
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -1260,6 +1261,28 @@ class Cut:
     transition_out: str = ""
     edge_in_transition: str = ""   # "head", "tail" or "both" — edge reconstructed
     estimated_bytes: int = 0       # what this cut is expected to weigh, before encoding
+    # WHERE that number came from, because the answer is not the same for every row and a
+    # blank size cell reads as a broken tool rather than as a missing input:
+    #   "measured"  a real short encode of this clip at these settings (--size-probe)
+    #   "source"    the source file's own dimensions, rate and bitrate
+    #   "sequence"  the SEQUENCE's frame size — for a row that has no source to read,
+    #               which in render mode is exactly what the render will be
+    #   "unknown"   no usable input at all; the size is genuinely not knowable yet
+    estimate_basis: str = ""
+    # A STABLE IDENTITY for this cut, unique within one parse of one sequence.
+    #
+    # ⚠️ NOT THE INDEX, AND THAT IS MEASURED. `index` is renumbered after every filter:
+    # scanning a 21-cut timeline and then exporting 19 of them moved ALL NINETEEN
+    # surviving indices (3->1, 4->2, 5->3, …). An index is a position in a list, not a
+    # name for a thing.
+    #
+    # Derived instead from what does NOT move: the clip name, the track, the timeline
+    # range, the source file and its range, the speed and the reverse — all read at parse
+    # time, before any filter, and identical in a scan and an export of the same XML.
+    # Computed BEFORE the cross-dissolve split and before --whole-frames, so neither can
+    # shift it; that is a strict improvement on the four-field key, whose sensitivity to
+    # the split is why the pipeline had to be reordered.
+    cut_id: str = ""
     output_bytes: int = 0          # what it actually weighed, once written
     # MEASURED bits per second, from a real short encode of this clip at probe_crf. The
     # only honest basis for an estimate — see size_probe() for why the source's own
@@ -1344,6 +1367,10 @@ class Timeline:
         # Nests collapsed to one cut. Counted so the advisory can say so ONCE rather than
         # per item, and so a number that shrinks can never do it quietly.
         self.nests_one_cut: list[str] = []
+        # Cuts merged into an earlier identical cut. Recorded as PAIRS, not a count: the
+        # list got SHORTER, and a clip count that quietly moves from 31 to 22 is the exact
+        # pattern that cost a day of misdiagnosis.
+        self.merged_duplicates: list[dict] = []
         self.files: dict[str, dict] = {}
         # <sequence> DEFINITIONS by id, for the same reason self.files exists: a nest's
         # second appearance in the document is a bare <sequence id="…"/> with no children
@@ -1360,6 +1387,11 @@ class Timeline:
         self.warnings: list[str] = []
         self.sequence_name = ""
         self.sequence_fps = 25.0
+        # The sequence's own frame size, from <media><video><format>. Needed because
+        # a RENDER is the sequence, not the source: for a cut with no source file to
+        # read, these are the only honest dimensions to price an output from.
+        self.sequence_width = 0
+        self.sequence_height = 0
         self.sequence_duration_frames = 0
         self.available_sequences: list[dict] = []
         # Why clipitems did not become cuts. Counted rather than warned one-by-one: a real
@@ -1471,10 +1503,10 @@ class Timeline:
         The same idiom as <file>, MEASURED on a real Premiere FCP7 export rather than
         inferred — a timeline using one nest twice writes:
 
-            <clipitem id="clipitem-42">  <name>Nested Sequence 08</name>
+            <clipitem id="clipitem-42">  <name>a nest clipitem</name>
               <start>0</start> <end>1366</end> <in>0</in> <out>1366</out>
               <sequence id="sequence-2">  duration rate name media timecode logginginfo
-            <clipitem id="clipitem-80">  <name>Nested Sequence 08</name>
+            <clipitem id="clipitem-80">  <name>a nest clipitem</name>
               <start>1366</start> <end>1586</end> <in>1366</in> <out>1586</out>
               <sequence id="sequence-2"/>          <- NO CHILDREN AT ALL
 
@@ -1506,6 +1538,10 @@ class Timeline:
         self.sequence_name = txt(seq, "name", "Untitled Sequence")
         self.sequence_fps = parse_rate(seq.find("rate"), 25.0)
         self.sequence_duration_frames = int(num(seq, "duration", 0) or 0)
+        _fmt = seq.find("media/video/format/samplecharacteristics")
+        if _fmt is not None:
+            self.sequence_width = int(num(_fmt, "width", 0) or 0)
+            self.sequence_height = int(num(_fmt, "height", 0) or 0)
 
         # Register every <file> in the DOCUMENT before walking the chosen sequence.
         #
@@ -1613,8 +1649,135 @@ class Timeline:
                 + " — pass --nest resolve to cut the clips inside them instead")
 
         self.cuts.sort(key=lambda c: (c.timeline_in_frames, c.track_type != "video", c.track_index))
+        self._drop_duplicate_cuts()
+        self._assign_cut_ids()
         for i, c in enumerate(self.cuts, start=1):
             c.index = i
+
+    def _drop_duplicate_cuts(self) -> None:
+        """Emit a cut once, not twice, when a second one would be byte-for-byte identical.
+
+        ⚠️ THE BUG THIS FIXES, from a real run: nine pairs of progress lines like
+
+            >> video/1/0/31   01_(02.00-03.03)_<stem>.mp4
+            >> video/1/0/31   02_(02.00-03.03)_<stem>.mp4
+
+        Same track, same timeline in AND out, same source file, same source range. Thirty-one
+        files written for a twenty-two-clip master track: 31 - 9 = 22, and the nine extras
+        were redundant copies.
+
+        WHERE THEY COME FROM. A nested sequence's inner clipitems are all stamped with the
+        PARENT clipitem's track index — they are placed on the parent's timeline, so that is
+        right — but a nest with STACKED inner video tracks can hold the same shot on inner V1
+        and inner V2 across the same span. Flattened onto one parent track those become two
+        cuts identical in every field that decides an output.
+
+        WHY DE-DUPLICATION RATHER THAN RENUMBERING. pick_key is (track type, track index,
+        timeline in, timeline out); it is also render_name, and the panel's clipKey. Giving
+        inner clips a synthetic track index would make those keys unique but would put nested
+        cuts on a track number the timeline does not have, and --video-track (which render
+        mode uses to keep only the master track) would then drop every nested cut. Refusing to
+        resolve such a nest loses the clips. Dropping a duplicate loses NOTHING: the second
+        cut would have produced the same bytes under a different index.
+
+        ⚠️ AND IT IS ALSO THE PANEL SYMPTOM: "two videos in the same nested sequence are
+        linked to each other" — untick one and the other unticks too. The panel's row identity
+        is those same four fields, so two colliding cuts were always one row to it. There is
+        one row now because there is one cut.
+
+        ⚠️ THE IDENTITY IS THE USER'S OWN, AND THE TIMELINE POSITION IS THE PART THAT MUST
+        NOT BE DROPPED: "detect if the clip name and the in out, duration is the same mark
+        them as one" — plus the timeline position, which he confirmed after being shown the
+        case that breaks without it. Two files in one of his own output folders share a
+        name, a source range and a byte size and are BOTH legitimate: the same source clip
+        placed twice at two different points on the timeline, which is two real shots.
+        Merging on name and source range alone deletes one of every such pair.
+
+        So: clip name + source in/out + duration + TIMELINE in/out. Track is in there too,
+        because the same clip on two tracks at one instant is two different pictures; speed
+        and reverse are in there because they change the pixels. The key is therefore wider
+        than pick_key in every direction — anything that could alter a single output byte,
+        or even the label on it, keeps both cuts.
+        """
+        if not self.cuts:
+            return
+        seen: dict = {}
+        keep: list[Cut] = []
+        for c in self.cuts:
+            key = (c.clip_name or "",
+                   c.track_type, int(c.track_index),
+                   c.timeline_in_frames, c.timeline_out_frames,
+                   c.source_path,
+                   round(c.source_in_seconds or 0.0, 6),
+                   round(c.source_duration_seconds or 0.0, 6),
+                   round(c.speed_percent or 100.0, 6),
+                   bool(c.reversed))
+            if key in seen:
+                self.merged_duplicates.append({
+                    "name": c.clip_name or "(unnamed)",
+                    "kept": seen[key].clip_name or "(unnamed)",
+                    "track": f"{c.track_type[0].upper()}{int(c.track_index)}",
+                    "in": c.timeline_in_frames,
+                    "out": c.timeline_out_frames,
+                    "nested_from": c.nested_from or "",
+                })
+                continue
+            seen[key] = c
+            keep.append(c)
+        self.cuts = keep
+        if self.merged_duplicates:
+            # NAMED, WITH WHERE. A count on its own sends you looking through the whole
+            # timeline; these lines say which clip and which frames.
+            rows = [f"{d['name']} on {d['track']} at {d['in']}-{d['out']}"
+                    + (f" (in {d['nested_from']})" if d["nested_from"] else "")
+                    for d in self.merged_duplicates]
+            self.warnings.append(
+                f"{len(self.merged_duplicates)} cut(s) merged into an identical earlier "
+                f"cut — same clip name, same source in/out and duration, same timeline "
+                f"position, so the second file would have been the first one again: "
+                + "; ".join(rows[:6]) + (f"; … and {len(rows) - 6} more"
+                                         if len(rows) > 6 else "")
+                + ". A nested sequence with stacked inner video tracks puts the same shot "
+                  "on two layers, and both flatten onto the parent's track")
+
+    def _assign_cut_ids(self) -> None:
+        """A stable per-cut identity, for selectors that cannot be told apart otherwise.
+
+        ⚠️ WHY THIS EXISTS. pick_key is (track type, track index, timeline in, timeline
+        out), and two GENUINELY DIFFERENT pictures can occupy exactly the same frames of
+        one track — a plain graphic on one inner layer of a nest and a decorated variant on
+        the layer above. De-duplication cannot help there: both hold real pixels, so both
+        must survive, and then they answer to one selector. MEASURED on a real export: 7
+        such pairs in a single nest, and because source mode always resolves nests this is
+        reachable in ordinary use rather than behind a flag.
+
+        The consequence without an id is the linked-tick the reviewer reported — the panel's
+        row identity is those same four fields, so unticking one row unticks its twin.
+
+        The id is a short digest of everything that identifies the cut and nothing that
+        depends on what else survived a filter. Same input XML, same sequence, same id, in
+        the scan and in the export.
+        """
+        seen: dict = {}
+        for c in self.cuts:
+            base = "\u0000".join(str(x) for x in (
+                c.clip_name or "",
+                c.track_type, int(c.track_index),
+                c.timeline_in_frames, c.timeline_out_frames,
+                c.source_path,
+                round(c.source_in_seconds or 0.0, 6),
+                round(c.source_duration_seconds or 0.0, 6),
+                round(c.speed_percent or 100.0, 6),
+                bool(c.reversed),
+                c.nested_from or "",
+            ))
+            # An occurrence counter for anything still tied. _drop_duplicate_cuts has
+            # already removed exact repeats, so this should never fire — it is here so that
+            # if it ever does, the ids stay UNIQUE instead of silently colliding again.
+            n = seen.get(base, 0)
+            seen[base] = n + 1
+            raw = base if n == 0 else f"{base}\u0000#{n}"
+            c.cut_id = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
     def premiere_track_numbers(self, section: ET.Element, track_type: str) -> list[int]:
         """Lane ordinal -> Premiere track number, for one <video>/<audio> section.
@@ -2252,6 +2415,11 @@ class DumpTimeline:
         self.available_sequences: list[dict] = []
         self.sequence_name = ""
         self.sequence_fps = 25.0
+        # The sequence's own frame size, from <media><video><format>. Needed because
+        # a RENDER is the sequence, not the source: for a cut with no source file to
+        # read, these are the only honest dimensions to price an output from.
+        self.sequence_width = 0
+        self.sequence_height = 0
         self.sequence_duration_frames = 0
         self._load(dump_path)
 
@@ -2974,7 +3142,7 @@ def write_timeline_audio(tl, args) -> dict:
     whole = Cut(track_type="video", timeline_in_frames=0, timeline_out_frames=frames)
     parts, note = vo_contributions(whole, items, fps)
     # ⚠️ AN ITEM PARKED PAST THE END OF THE SEQUENCE WAS DROPPED IN SILENCE. MEASURED on a
-    # real export: MrClaps_Funk_main.wav sits at frames 2515-2641 on a timeline whose
+    # real export: a music .wav sat at frames 2515-2641 on a timeline whose
     # duration is 1426, so a two-item track reported `parts: 1` with an empty note and no
     # warning anywhere. Here — and only here — a non-overlap really does mean "outside the
     # sequence", because `whole` spans all of it; in a per-cut mix it is ordinary.
@@ -3325,6 +3493,13 @@ def estimate_sizes(cuts: list[Cut], args) -> None:
     # aims at whatever the frame size, so a downscaled clip does NOT get smaller in that
     # mode, and multiplying there would promise a saving the mode does not give.
     area = (pct / 100.0) ** 2
+    # For the no-source branch below. Carried on args because that is what this function
+    # already takes, and set once in main() from the timeline it belongs to.
+    render_mode = bool(getattr(args, "render_planned", False)
+                       or getattr(args, "render_dir", None))
+    seq_w = int(getattr(args, "sequence_width", 0) or 0)
+    seq_h = int(getattr(args, "sequence_height", 0) or 0)
+    seq_fps = float(getattr(args, "sequence_fps", 0) or 0)
     for c in cuts:
         # A RENDER is a timeline range, so it is as long as the clip LOOKED and as big as
         # the sequence. A 2x sped-up 4K clip in a 1080 sequence eats two seconds of 4K
@@ -3336,25 +3511,64 @@ def estimate_sizes(cuts: list[Cut], args) -> None:
         # In render mode the source's own state no longer disqualifies a cut: the pixels
         # come from Premiere, so an offline clip or a Dynamic Link comp still has a file.
         unusable = (c.media_kind == "unsupported" or not c.source_exists)
-        if secs <= 0 or (unusable and not c.render_path):
+        if secs <= 0:
+            c.estimate_basis = "unknown"
+            continue
+        if unusable and not c.render_path:
+            # ⚠️ NO SOURCE TO READ, AND THAT USED TO MEAN A BLANK SIZE CELL. He asked why
+            # the red rows show no estimate and guessed they were exporting twice; they were
+            # not. A nest cut as one clip, an adjustment layer, a title and an offline clip
+            # all have no source file, so every input the size model reads — dimensions,
+            # frame rate, bitrate — is absent, on both sides: the engine scored 0 and the
+            # panel's own clipBytes() returned 0 for the same reason.
+            #
+            # In RENDER mode the size is nonetheless knowable, and from better inputs than
+            # a source would give: the render IS the sequence, so it comes out at the
+            # sequence's frame size and rate for as long as the clip sits on the timeline.
+            # That is the same bits-per-pixel model every other row uses, applied to the
+            # dimensions that actually decide this output. Marked "sequence" so nobody
+            # reads it as having come from a source clip that does not exist.
+            if not render_mode or seq_w <= 0 or seq_h <= 0:
+                c.estimate_basis = "unknown"
+                continue
+            c.output_width, c.output_height = scaled_dims(seq_w, seq_h, pct)
+            if rate:
+                c.estimated_bytes = int(rate * secs / 8)
+                c.estimate_basis = "ceiling"
+                continue
+            sw, sh = c.output_width, c.output_height
+            if not sw or not sh:
+                c.estimate_basis = "unknown"
+                continue
+            bpp = _interp(BPP_INTER, crf_of(args)) * codec_ratio(vcodec_of(args),
+                                                                 crf_of(args))
+            c.estimated_bytes = int(bpp * sw * sh * (seq_fps or 25.0) * secs / 8
+                                    + CONTAINER_FIXED)
+            c.estimate_basis = "sequence"
             continue
         if rate:
             c.estimated_bytes = int(rate * secs / 8)
+            c.estimate_basis = "ceiling"
         elif c.probe_bps > 0:
             # MEASURED, when --size-probe asked for it. The probe ran at THESE settings,
             # resolution filter included, so the area factor is already in the number and
             # must not be applied twice. The container's fixed cost is added once, not
             # scaled — see CONTAINER_FIXED.
             c.estimated_bytes = int(c.probe_bps * secs / 8 + CONTAINER_FIXED)
+            c.estimate_basis = "measured"
         else:
             # The default: metadata only, so it costs nothing and a slider can follow it.
             modelled = estimate_bytes_for(c, crf_of(args), pct, secs,
                                           vcodec_of(args))
             if modelled > 0:
                 c.estimated_bytes = int(modelled)
+                c.estimate_basis = "source"
             elif c.bitrate:
                 # No dimensions to work from — the last resort, and the unreliable one.
                 c.estimated_bytes = int(float(c.bitrate) * ratio * crat * area * secs / 8)
+                c.estimate_basis = "source"
+            else:
+                c.estimate_basis = "unknown"
 
 
 RENDER_EXTS = (".mp4", ".mov", ".m4v", ".mxf", ".mkv")
@@ -3447,6 +3661,62 @@ def attach_renders(cuts: list[Cut], render_dir: Path) -> tuple[int, list[Cut]]:
                 except ValueError:
                     pass
     return matched, missing
+
+
+def overlapping_cut_frames(cuts: list[Cut]) -> tuple[int, int]:
+    """(pairs of cuts sharing at least one frame, distinct frames held by more than one).
+
+    ⚠️ NOT A FAULT REPORT. With --transitions ignore — the default — each cut is the
+    clipitem's own in/out, and Premiere represents a cross-dissolve by overlapping the two
+    clips by the transition's length, so both of them genuinely hold the blended frames.
+    Sharing is the accepted consequence of cutting exactly what the editor drew.
+
+    It is measured and recorded because somebody training on a folder of these files cannot
+    discover it by looking: the clips are all the right length, correctly named, and the
+    duplication is a couple of dozen frames deep inside two of them. A number in the
+    manifest is the only way to find it without diffing pixels.
+
+    Ranges are half-open [in, out), the same convention duration_frames uses. Counted per
+    track, because two cuts on different tracks are different pictures at the same instant
+    rather than the same picture twice.
+    """
+    groups: dict = {}
+    for c in cuts:
+        groups.setdefault((c.track_type, int(c.track_index)), []).append(c)
+
+    pairs = 0
+    frames = 0
+    for key in sorted(groups):
+        row = sorted(groups[key],
+                     key=lambda c: (c.timeline_in_frames, c.timeline_out_frames))
+        for i, a in enumerate(row):
+            for b in row[i + 1:]:
+                # In-points only increase, so once one clears a's out-point they all do.
+                if b.timeline_in_frames >= a.timeline_out_frames:
+                    break
+                if min(a.timeline_out_frames, b.timeline_out_frames) > b.timeline_in_frames:
+                    pairs += 1
+
+        # DISTINCT frames, by sweep. Adding up each pair's overlap would count a frame
+        # twice where three cuts meet, which is exactly the case a stacked nest produces.
+        events: list[tuple[int, int]] = []
+        for c in row:
+            if c.timeline_out_frames > c.timeline_in_frames:
+                events.append((c.timeline_in_frames, 1))
+                events.append((c.timeline_out_frames, -1))
+        events.sort()
+        depth = 0
+        prev = events[0][0] if events else 0
+        i = 0
+        while i < len(events):
+            pos = events[i][0]
+            if depth >= 2:
+                frames += pos - prev
+            while i < len(events) and events[i][0] == pos:
+                depth += events[i][1]
+                i += 1
+            prev = pos
+    return pairs, frames
 
 
 def split_transition_overlaps(cuts: list[Cut], seq_fps: float) -> int:
@@ -3743,6 +4013,8 @@ def pick_matches(cut: Cut, keys: set) -> bool:
     Four fields match exactly. THREE match any cut starting there — the old format, kept
     working on purpose; see read_pick_file().
     """
+    if cut.cut_id and cut.cut_id in keys:
+        return True
     k = pick_key(cut)
     return k in keys or k[:3] in keys
 
@@ -3758,15 +4030,32 @@ def unmatched_picks(keys: set, cuts: list) -> int:
     """
     matched = set()
     for c in cuts:
+        # An id selector is what matched this cut when one is present in the file; record
+        # that, or a run picked entirely by id would report every selector as stale.
+        if c.cut_id and c.cut_id in keys:
+            matched.add(c.cut_id)
         k = pick_key(c)
-        matched.add(k if k in keys else k[:3])
+        if k in keys:
+            matched.add(k)
+        elif k[:3] in keys:
+            matched.add(k[:3])
     return len(keys - matched)
+
+
+# A cut id as _assign_cut_ids writes it: 12 lowercase hex characters. Matched strictly, so
+# a mistyped track type can never be mistaken for an id and silently select nothing.
+CUT_ID_RE = re.compile(r"[0-9a-f]{12}")
 
 
 def read_pick_file(path: Path) -> set:
     """Selectors from a --pick file. Blank lines and # comments ignored.
 
-    'TRACKTYPE TRACKINDEX TIMELINEIN TIMELINEOUT', one per line — pick_key() spelled out.
+    Two forms, one per line:
+
+      a CUT ID       twelve hex characters, from the manifest's `cut_id`. The only form
+                     that can separate two different pictures occupying the same frames of
+                     one track — see Timeline._assign_cut_ids.
+      'TRACKTYPE TRACKINDEX TIMELINEIN TIMELINEOUT'   pick_key() spelled out.
 
     THREE FIELDS ARE STILL ACCEPTED and mean "any cut starting there". This file is an
     internal protocol between the panel and the engine and the two ship together, so a
@@ -3786,9 +4075,18 @@ def read_pick_file(path: Path) -> set:
         if not line or line.startswith("#"):
             continue
         parts = line.split()
+        # ⚠️ A SINGLE TOKEN IS A CUT ID, and it is tried FIRST because it is the only form
+        # that can separate two different pictures occupying the same frames. The
+        # four-field form stays exactly as it was: this file is the protocol between the
+        # panel and the engine, and a panel older than this engine — or a hand-written
+        # file — must keep working rather than turning a version skew into a run that
+        # will not start.
+        if len(parts) == 1 and CUT_ID_RE.fullmatch(parts[0]):
+            keys.add(parts[0])
+            continue
         if len(parts) not in (3, 4):
             raise SystemExit(f"error: {path}:{n}: expected 'TRACKTYPE TRACKINDEX "
-                             f"TIMELINEIN TIMELINEOUT', got {line!r}")
+                             f"TIMELINEIN TIMELINEOUT' or a cut id, got {line!r}")
         try:
             keys.add((parts[0], *(int(f) for f in parts[1:])))
         except ValueError:
@@ -3992,10 +4290,29 @@ def export_summary(tl: Timeline, args) -> dict:
             # Premiere's tracks, not the XML's per-channel lanes, so a saved "5" from an
             # older manifest points at different material. A panel reading a manifest
             # without this key must not present old numbers under the new key.
+            # The SEQUENCE's own frame size, published so a front end can price a row
+            # that has no source with the same model it uses for everything else —
+            # and keep following the crf and scale controls, instead of showing a
+            # number frozen at whatever the scan was run with.
+            "sequence_width": int(getattr(tl, "sequence_width", 0) or 0),
+            "sequence_height": int(getattr(tl, "sequence_height", 0) or 0),
             "audio_track_numbering": "premiere",
             "nest": str(getattr(args, "nest_effective", "resolve")),
             "nest_applied": str(getattr(args, "nest_applied", "all")),
+            "transitions": str(getattr(args, "transitions", "ignore")),
             "transitions_split": int(getattr(args, "transitions_split", 0) or 0),
+            # How much of this folder is duplicated between neighbouring clips. Zero under
+            # --transitions split by construction; non-zero is the accepted cost of
+            # cutting each clip at its own in/out. See overlapping_cut_frames().
+            # The pick_key invariant, on the record for every run. Zero is the contract;
+            # non-zero means stacked layers cover identical frames with different pixels.
+            "duplicate_pick_keys": int(getattr(args, "duplicate_pick_keys", 0) or 0),
+            "merged_duplicates": len(getattr(tl, "merged_duplicates", []) or []),
+            # The pairs themselves, so a dataset reader can see WHAT was merged and where
+            # rather than only that the number moved.
+            "merged_duplicate_cuts": list(getattr(tl, "merged_duplicates", []) or []),
+            "overlapping_pairs": int(getattr(args, "overlap_pairs", 0) or 0),
+            "overlapping_frames": int(getattr(args, "overlap_frames", 0) or 0),
             "render_dir": str(getattr(args, "render_dir", "") or ""),
             "video_track": int(getattr(args, "video_track", 0) or 0),
             "renders_matched": int(getattr(args, "render_matched", 0) or 0),
@@ -4426,6 +4743,23 @@ def main():
     # active (--render-dir or --render-planned), "resolve" otherwise. An explicit --nest
     # always wins. Source mode ignores the choice entirely — a nest has no file to seek, so
     # one-cut there would only lose clips.
+    # ⚠️ DEFAULT IS `ignore`, IN BOTH MODES, AND THAT IS A DECISION NOT AN OVERSIGHT.
+    # "and ignore the transition just cut by the clip in out for me" — each cut is exactly
+    # the clipitem's own <start>/<end> as Premiere wrote it. The cost was put to him in
+    # plain terms — the two clips across a dissolve BOTH contain the blend, so neighbours
+    # share those frames — and he chose it with the cost known. He was also offered
+    # mode-scoped behaviour and a panel tick and declined both: source media and timeline
+    # render behave identically.
+    #
+    # `split` keeps the old behaviour reachable, in the same hidden-not-deleted shape as
+    # --vcodec libx265: the function and all of its tests stay, one argument away. He has
+    # reversed this decision once already today, in both directions.
+    ap.add_argument("--transitions", choices=["split", "ignore"], default="ignore",
+                    help="what to do where a cross-dissolve makes two clips overlap: "
+                         "'ignore' (default) cuts each clip at its own in/out exactly as "
+                         "Premiere wrote it, so the two clips across a dissolve both "
+                         "contain the blended frames; 'split' moves the boundary to the "
+                         "middle of the overlap so no frame appears in two files")
     ap.add_argument("--nest", choices=["one-cut", "resolve"], default=None,
                     help="what a nested sequence becomes in timeline-render mode: "
                          "'one-cut' treats the whole nest as a single clip, since the "
@@ -4703,12 +5037,36 @@ def main():
     #     never passes it (settingArgs() does not emit it), so both runs use the same
     #     default. Splitting first would also change which cuts a given --min-frames
     #     drops, which is a behaviour change rather than a fix.
-    if getattr(args, "render_planned", False) or getattr(args, "render_dir", None):
+    #
+    # ⚠️ AND THE ORDERING ABOVE STAYS PUT even though the split is off by default. With
+    # --transitions ignore the divergence cannot arise at all, but anyone passing
+    # --transitions split must still get a scan and an export that agree, so the sequencing
+    # this comment describes is load-bearing for that path and its regression test.
+    if (getattr(args, "transitions", "ignore") == "split"
+            and (getattr(args, "render_planned", False)
+                 or getattr(args, "render_dir", None))):
         n_split = split_transition_overlaps(tl.cuts, tl.sequence_fps)
         args.transitions_split = n_split
         if n_split:
             print(f"\n  split {n_split} cross-dissolve overlap(s) at the midpoint, so no "
                   f"two cuts hold the same frame")
+
+    # ⚠️ MARKED BEFORE --ext, NOT AFTER. This block used to sit ~65 lines below the --ext
+    # filter, which reads `render_planned` — so the flag was ALWAYS False when the filter
+    # ran, and two of that filter's three render-aware clauses were dead code. `attach_renders`
+    # sits below it too, so `render_path` was empty there as well. The measured consequence in
+    # render mode was severe: --render-planned offered 68 rows on one real timeline and
+    # `--render-planned --ext mp4` delivered 19, silently deleting 49 rows that were all
+    # `cuttable: true, "ready — from render"`. That is the reviewer's "nó ra đúng 6 vid" and
+    # his 25 -> 22, neither of which he caused.
+    #
+    # Also no longer gated on `not render_dir`. A render IS planned on an export too; the
+    # separate question of whether a render actually EXISTS is answered by `render_path`,
+    # which attach_renders sets, and which run_cut still refuses to proceed without.
+    if getattr(args, "render_planned", False) or getattr(args, "render_dir", None):
+        for c in tl.cuts:
+            if c.track_type == "video":
+                c.render_planned = True
 
     if args.ext:
         # Filtered BEFORE the indices are assigned, so a run limited to one type gets a
@@ -4775,13 +5133,6 @@ def main():
             if len(missing) > 10:
                 print(f"       ... and {len(missing) - 10} more")
 
-    if getattr(args, "render_planned", False) and not getattr(args, "render_dir", None):
-        # Scan only. On an export --render-dir is what decides, and attach_renders has
-        # already said which cuts really have a file.
-        for c in tl.cuts:
-            if c.track_type == "video":
-                c.render_planned = True
-
     for i, c in enumerate(tl.cuts, start=1):
         c.index = i
         if getattr(args, "fps", None):
@@ -4801,6 +5152,44 @@ def main():
             print(f"\n  --whole-frames: pulled {n_trim} cut(s) in to frame boundaries "
                   f"({sum(c.frames_trimmed for c in tl.cuts)} frame(s) dropped in total)")
     assign_output_names(tl.cuts, args.container, tl.sequence_fps)
+
+    # ⚠️ THE COST OF --transitions ignore, ON THE RECORD AS A NUMBER. Measured on the final
+    # cut list, after every filter, so it describes the folder that is about to be written
+    # rather than some earlier version of it. Stated as a fact, not a warning: he asked for
+    # the clips' own in/out points knowing the two sides of a dissolve would share frames.
+    # ⚠️ THE INVARIANT, CHECKED ON EVERY RUN RATHER THAN IN A TEST. pick_key's own docstring
+    # claims "a cut cannot both start and end where another one does without being that cut",
+    # and that claim was false nine times in one real run before the de-duplication above.
+    # It was ALSO measured as 0 on a different real timeline, which is exactly why this is
+    # computed here and not asserted on one fixture: the shape that breaks it is data the
+    # test author did not have.
+    #
+    # De-duplication removes every collision whose two cuts were identical. What it CANNOT
+    # remove is two GENUINELY DIFFERENT cuts sharing a range — a title stacked over a shot
+    # for exactly the same frames. Those keep both cuts, because both hold real pixels, and
+    # they are reported rather than quietly collapsed: they share a render filename and, in
+    # the panel, one row.
+    _pk = {}
+    for _c in tl.cuts:
+        _pk[pick_key(_c)] = _pk.get(pick_key(_c), 0) + 1
+    args.duplicate_pick_keys = sum(v - 1 for v in _pk.values() if v > 1)
+    if args.duplicate_pick_keys:
+        _names = sorted({c.clip_name for c in tl.cuts
+                         if _pk.get(pick_key(c), 0) > 1})
+        tl.warnings.append(
+            f"{args.duplicate_pick_keys} cut(s) share a (track, in, out) identity with "
+            f"another cut that is NOT identical to them: "
+            + ", ".join(_names[:4]) + (", …" if len(_names) > 4 else "")
+            + ". They are all kept, but they share a render filename and the panel shows "
+              "them as one row — stacked layers covering exactly the same frames")
+    args.overlap_pairs, args.overlap_frames = overlapping_cut_frames(tl.cuts)
+    if args.overlap_pairs:
+        tl.warnings.append(
+            f"{args.overlap_pairs} pair(s) of cuts share {args.overlap_frames} frame(s) "
+            f"in total — a cross-dissolve puts the blend in BOTH clips, and "
+            f"--transitions ignore cuts each clip at its own in/out. Pass "
+            f"--transitions split to move each boundary to the middle of the overlap "
+            f"instead")
 
     print(f"{NAME} {VERSION}")
     print(f"  sequence : {tl.sequence_name}  @ {tl.sequence_fps:g} fps")
@@ -4845,6 +5234,9 @@ def main():
         # After probing, because the crf estimate scales the SOURCE's own bitrate. The
         # print lives here rather than in the header block above for the same reason —
         # up there the estimate is always zero, which is how the first version shipped.
+        args.sequence_width = getattr(tl, "sequence_width", 0)
+        args.sequence_height = getattr(tl, "sequence_height", 0)
+        args.sequence_fps = tl.sequence_fps
         estimate_sizes(tl.cuts, args)
         est = sum(c.estimated_bytes for c in tl.cuts)
         if est:
