@@ -468,6 +468,17 @@
                      "complete", "renders", "scan", "saved"];
     var railRows = {};        // key -> {sev, text, title}
 
+    /* Delegated. renderRail() replaces innerHTML, so a listener bound to a row dies with
+     * the row it was bound to — the close button has to be caught on the rail itself. */
+    if (el.railmsgs) {
+        el.railmsgs.addEventListener("click", function (ev) {
+            var t = ev.target;
+            var k = t && t.getAttribute ? t.getAttribute("data-x") : null;
+            if (!k || !railRows[k]) return;
+            say(k, railRows[k].sev, "");
+        });
+    }
+
     /* WHAT CHANGED, shown once after an update.
      *
      * Asked for by the team lead, who updates often and could not tell what he was getting:
@@ -478,8 +489,7 @@
      *
      * Keyed by the version in xmlcut.py, which readVersion() already reads, so there is no
      * second place to bump. Vietnamese because the people reading it are the video team. */
-    var CHANGELOG = {
-        "3.54": [
+    var CL_354 = [
             "Nested sequence — ở Timeline render, mỗi nest giờ ra 1 clip. Trước đây nest dùng "
             + "lại lần thứ 2 bị bỏ qua hoàn toàn nên thiếu cut.",
             "Track audio giờ đánh số đúng như Premiere. Trước đây panel hiện A1–A7 cho timeline "
@@ -493,7 +503,15 @@
             + "Retry không phải render lại từ đầu.",
             "Thêm nút mở folder cạnh Export. Thông báo gom về một chỗ, thanh dưới gọn hơn, và "
             + "lý do một clip lỗi giờ đọc được thay vì bị cắt mất."
-        ]
+    ];
+    /* 3.54's list is carried forward rather than retyped: 3.54 went out and was replaced
+     * within the hour, so anyone who lands straight on 3.55 must still be told what 3.54
+     * changed — otherwise the release they skipped is the one nobody hears about. */
+    var CHANGELOG = {
+        "3.54": CL_354,
+        "3.55": CL_354.concat([
+            "Thông báo này giờ có nút × để tắt đi khi đã đọc xong."
+        ])
     };
 
     /* Shown when the running version differs from the one last seen here.
@@ -516,18 +534,24 @@
         if (!seen && !hadPrior) return;
         var lines = CHANGELOG[ver];
         if (!lines || !lines.length) return;
-        say("changelog", "info", "Bản " + ver + " có gì mới:\n• " + lines.join("\n• "));
+        say("changelog", "info", "Bản " + ver + " có gì mới:\n• "
+            + lines.join("\n• "), "", true);
     }
 
-    function say(key, sev, text, title) {
+    function say(key, sev, text, title, dismissable) {
         var t = String(text === null || text === undefined ? "" : text);
         var had = railRows[key];
         if (!t) {
             if (!had) return;
             delete railRows[key];
         } else {
-            if (had && had.sev === sev && had.text === t && had.title === title) return;
-            railRows[key] = { sev: sev, text: t, title: title || "" };
+            if (had && had.sev === sev && had.text === t && had.title === title
+                && had.dismiss === !!dismissable) return;
+            railRows[key] = { sev: sev, text: t, title: title || "",
+                              /* Only rows you have FINISHED with get a close button. A warning
+                               * you can dismiss is a warning you can dismiss without fixing,
+                               * so this is opt-in per subject rather than on by default. */
+                              dismiss: !!dismissable };
         }
         renderRail();
     }
@@ -557,6 +581,17 @@
             d.setAttribute("data-k", keys[i]);
             if (r.title) d.title = r.title;
             d.textContent = r.text;
+            if (r.dismiss) {
+                var x = document.createElement("button");
+                x.type = "button";
+                x.className = "msgx";
+                x.setAttribute("data-x", keys[i]);
+                x.setAttribute("aria-label", "close this message");
+                x.title = "close";
+                x.textContent = "\u00d7";
+                d.appendChild(x);
+                d.className += " hasx";
+            }
             el.railmsgs.appendChild(d);
         }
     }

@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.54"
+VERSION = "3.55"
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's

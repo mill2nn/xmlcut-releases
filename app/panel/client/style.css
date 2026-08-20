@@ -1466,3 +1466,23 @@ body { position: relative; }
     box-shadow: 0 12px 32px -12px rgba(0, 0, 0, .75);
 }
 .gearmenu[hidden] { display: none; }
+
+/* The close button on a dismissable rail row. Sits in the row's own top-right rather than
+   on a line of its own, so dismissing costs no height. Only rows that opt in get one. */
+.msg.hasx { position: relative; padding-right: 26px; }
+.msgx {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    line-height: 16px;
+    font-size: 14px;
+    color: var(--dim);
+    background: transparent;
+    border: 0;
+    border-radius: 3px;
+    cursor: pointer;
+}
+.msgx:hover { color: var(--fg); background: var(--card); }

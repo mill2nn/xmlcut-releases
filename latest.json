@@ -1,6 +1,6 @@
 {
-  "version": "3.54",
-  "notes": "Nest thanh 1 clip khi render timeline; so track audio khop Premiere (chon lai track audio giup minh); panel bao track nao that su duoc mix; clip chia raw/ va edited/; _renders tu xoa sau khi chay sach; them nut mo folder canh Export; gom thong bao ve mot cho.",
+  "version": "3.55",
+  "notes": "Them nut x de tat thong bao changelog; giu nguyen changelog cua 3.54 cho ai nhay thang len 3.55.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
