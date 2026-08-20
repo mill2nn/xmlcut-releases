@@ -1,6 +1,6 @@
 {
-  "version": "3.25",
-  "notes": "New look and a size estimate you can trust. Measured, not guessed: the old estimate scaled each source's bitrate and read ProRes up to 186x too high. Plus a resolution slider, a flag for oversized clips, one quality control instead of two, a line that always says what to do next, and green ticks as each clip lands.",
+  "version": "3.53",
+  "notes": "Export with effects: render each cut through Premiere with its effects baked in. Master track plus a per-track include set, cross-dissolves split at the midpoint, graphics and offline media no longer skipped.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

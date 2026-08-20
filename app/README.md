@@ -6,6 +6,22 @@ manifest row describing exactly where it came from.
 
 In Premiere it appears as **Window → Extensions → Raw-cutter**.
 
+## Install
+
+Two commands, in this order. Both one-time.
+
+```bash
+brew install ffmpeg                                                                    # 1
+curl -fsSL https://raw.githubusercontent.com/mill2nn/xmlcut-releases/main/install.sh | bash   # 2
+```
+
+Then **quit Premiere completely** (Cmd-Q) and reopen it — a panel that was already open will
+not see the install until it restarts.
+
+⚠️ **This repository is PRIVATE.** To give it to somebody, send them
+**<https://github.com/mill2nn/xmlcut-releases>** — the public download and update channel,
+whose front page is those same steps. They cannot see this page at all.
+
 > The engine file is still called `xmlcut.py`, the extension's bundle ID is still
 > `com.bom.xmlcutreader`, and the release channel is still `xmlcut-releases`. Those are
 > identifiers, not names: renaming them would break every installed copy's updater, leave a
@@ -714,15 +730,24 @@ Every row in the clip list has a tick. Untick one and it leaves the run: the num
 the remaining clips are still `01..N`, the count updates, and the row dims. The header tick selects or
 clears everything, and shows a mixed state when only some are on.
 
-That travels to the cutter as `--pick FILE`, one clip per line as `TRACKTYPE TRACKINDEX TIMELINEIN`:
+That travels to the cutter as `--pick FILE`, one clip per line as
+`TRACKTYPE TRACKINDEX TIMELINEIN TIMELINEOUT`:
 
 ```
-video 1 0
-video 1 135
+video 1 0 135
+video 1 448 458
+video 1 448 536
 ```
 
 Matched on timeline position rather than an index, because an index shifts whenever anything else is
 filtered, and a file rather than command-line arguments because a long timeline is hundreds of clips.
+
+The last two lines are why the **out-point** is in there. A cross-dissolve leaves the outgoing clip's
+overlap sitting on exactly the frame the incoming clip starts, so two clips really can begin on the
+same frame of the same track. Identified by the in-point alone they were one clip to the panel and to
+the cutter: unticking either dropped both, and retrying one failed clip re-cut two. Three fields are
+still accepted and still mean "any cut starting there", so a file written by hand or by an older panel
+keeps working.
 The manifest records `picked_from` and `picked_count`, so a partial run says it was one — a dataset
 built from a manifest that claimed to be complete would silently be missing whatever you unticked.
 

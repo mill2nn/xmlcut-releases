@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.25"
+VERSION = "3.53"
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -168,6 +168,35 @@ BPP_INTER = {6: 0.759, 14: 0.290, 18: 0.144, 23: 0.066, 28: 0.032}
 BPP_INTRA = {6: 0.261, 14: 0.069, 18: 0.030, 23: 0.013, 28: 0.006}
 SRC_SHARE = {6: 2.806, 14: 1.074, 18: 0.598, 23: 0.288, 28: 0.144}
 
+# ⚠️ CRF IS NOT THE SAME NUMBER IN BOTH ENCODERS, and the difference is not the flat "HEVC
+# is half the size" that every comparison chart promises. Those charts hold QUALITY equal;
+# this panel holds the CRF NUMBER equal, because that is the knob on screen, and the two
+# are not the same question.
+#
+# Every table above is x264's. This is what x265 costs as a multiple of it, measured on 19
+# real clips — 14 h264 from a production timeline plus 5 of them rewrapped to ProRes — both
+# encoders, same slices, same preset, PAIRED PER CLIP so content cancels out:
+#
+#     crf  6   1.01x   (0.77-1.09)   <- NO SAVING AT ALL at the near-lossless end
+#     crf 14   0.72x   (0.53-1.02)
+#     crf 18   0.70x   (0.48-0.96)
+#     crf 23   0.78x   (0.53-0.99)
+#     crf 28   0.82x   (0.54-1.04)   <- and the saving shrinks again as crf climbs
+#
+# Predicting the direct x265 measurements from the x264 ones through this table lands
+# within 0.97-1.11x, so the ratio carries; it is the LEVEL that is inherited from the x264
+# fit, which had more clips behind it than these 19.
+#
+# It scales the source ceiling as well as bpp. Both are the same measured rate over a
+# per-clip constant, so the paired ratio is arithmetically identical for either.
+#
+# ⚠️ STILLS ARE NOT SCALED BY IT. A real jpeg at the same five values came out
+# 1.13/1.00/1.00/1.01/1.06x — x265's win is prediction BETWEEN frames and a still has none
+# to do. The saving is a property of moving pictures, not of the encoder.
+CODEC_BPP_RATIO = {
+    "libx265": {6: 1.01, 14: 0.72, 18: 0.70, 23: 0.78, 28: 0.82},
+}
+
 
 def _interp(table: dict, crf: float) -> float:
     keys = sorted(table)
@@ -181,6 +210,17 @@ def _interp(table: dict, crf: float) -> float:
             return table[a] + f * (table[b] - table[a])
     return table[keys[-1]]
 
+def codec_ratio(vcodec: str, crf: float) -> float:
+    """How this encoder's output compares with x264's at the SAME crf number.
+
+    x264 is 1.0 by definition — the tables were fitted to it. An encoder with no measured
+    ratio is also 1.0, which keeps a future --vcodec honest: it shows the x264 figure it
+    actually has evidence for rather than a discount nobody measured.
+    """
+    t = CODEC_BPP_RATIO.get(str(vcodec or ""))
+    return _interp(t, crf) if t else 1.0
+
+
 
 # A STILL is not a rate. Almost all of its file is the one keyframe; every frame after that
 # is a few bytes of "nothing changed", so its cost barely moves with duration. Modelling it
@@ -193,39 +233,66 @@ def _interp(table: dict, crf: float) -> float:
 STILL_FRAMES = 1.5
 
 
-def estimate_bytes_for(cut: Cut, crf: float, pct: float, secs: float) -> float:
+def encode_input(cut: Cut) -> tuple:
+    """(width, height, fps, codec, bitrate) of the file ffmpeg will actually read.
+
+    ONE definition, because in render mode every one of these differs from the source's:
+    a 4K 60p clip placed in a 1080 25p sequence is read back as 1080 25p H.264. Pricing
+    or measuring it from the source clip would be wrong on all five counts, and the four
+    call sites had no business each deciding that for themselves.
+    """
+    if cut.render_path:
+        return (cut.render_width, cut.render_height, cut.render_fps,
+                cut.render_codec, cut.render_bitrate)
+    return (cut.width, cut.height, cut.source_fps, cut.codec, cut.bitrate)
+
+
+def estimate_bytes_for(cut: Cut, crf: float, pct: float, secs: float,
+                       vcodec: str) -> float:
     """Expected output size in BYTES. Stills and video price differently, so the one
-    function that callers use returns bytes rather than a rate."""
-    if cut.media_kind == "still":
+    function that callers use returns bytes rather than a rate.
+
+    vcodec is REQUIRED rather than defaulted. A default would let a caller quietly price an
+    x265 export at x264 rates, which is the whole bug this parameter exists to fix; missing
+    it should be a TypeError the first time the tests run, not a number that looks fine.
+    """
+    if cut.media_kind == "still" and not cut.render_path:
         w, h = scaled_dims(cut.width, cut.height, pct)
         if not w or not h:
             return 0.0
+        # NOT scaled by codec_ratio, and that is measured, not an oversight — see
+        # CODEC_BPP_RATIO. A still gives x265 no inter prediction to be better at, and a
+        # real jpeg encoded both ways came out the same size to within a percent.
         return _interp(BPP_INTER, crf) * w * h * STILL_FRAMES / 8 + CONTAINER_FIXED
-    bps = estimate_bps(cut, crf, pct)
+    bps = estimate_bps(cut, crf, pct, vcodec)
     return (bps * secs / 8 + CONTAINER_FIXED) if bps > 0 else 0.0
 
 
-def estimate_bps(cut: Cut, crf: float, pct: float) -> float:
+def estimate_bps(cut: Cut, crf: float, pct: float, vcodec: str) -> float:
     """Expected OUTPUT bits per second for this cut, from metadata alone.
 
     Needs width, height and a frame rate; without them there is nothing to scale and the
     caller falls back or shows nothing rather than inventing a figure.
     """
-    w, h = scaled_dims(cut.width, cut.height, pct)
-    fps = cut.source_fps or 0.0
+    in_w, in_h, in_fps, in_codec, in_rate = encode_input(cut)
+    w, h = scaled_dims(in_w, in_h, pct)
+    fps = in_fps or 0.0
     if not w or not h or fps <= 0:
         return 0.0
     px = w * h * fps
-    intra = (cut.codec or "").lower() in INTRAFRAME_CODECS
-    bpp = _interp(BPP_INTRA if intra else BPP_INTER, crf)
-    if not intra and cut.bitrate:
-        # The source's own bits per pixel, as a CEILING. A downscale reduces the pixels but
-        # not the source's detail per pixel, so the ceiling is computed at the SOURCE's
+    intra = (in_codec or "").lower() in INTRAFRAME_CODECS
+    # One ratio, applied to whichever table and to the ceiling below, because the encoders
+    # differ by a factor of the RATE and everything here is a rate.
+    ratio = codec_ratio(vcodec, crf)
+    bpp = _interp(BPP_INTRA if intra else BPP_INTER, crf) * ratio
+    if not intra and in_rate:
+        # The input's own bits per pixel, as a CEILING. A downscale reduces the pixels but
+        # not the input's detail per pixel, so the ceiling is computed at the INPUT's
         # dimensions and then applied to the output's.
-        spx = (cut.width or 1) * (cut.height or 1) * fps
+        spx = (in_w or 1) * (in_h or 1) * fps
         if spx > 0:
-            src_bpp = float(cut.bitrate) / spx
-            bpp = min(bpp, src_bpp * _interp(SRC_SHARE, crf))
+            src_bpp = float(in_rate) / spx
+            bpp = min(bpp, src_bpp * _interp(SRC_SHARE, crf) * ratio)
     return bpp * px
 
 
@@ -268,6 +335,15 @@ def crf_text(v: Union[int, float]) -> str:
     """The same value as ffmpeg is given it and as the summary prints it: 18, or 18.5."""
     f = float(v)
     return str(int(f)) if f == int(f) else str(round(f, 2))
+
+
+def vcodec_of(args) -> str:
+    """ONE reading of --vcodec, for the reason crf_of exists. The encoder flags, the size
+    estimate, the printed summary and the manifest all consult it, and five separate
+    `getattr(args, "vcodec", None) or "libx264"` expressions were five chances for the
+    panel to show one encoder while ffmpeg was handed another.
+    """
+    return str(getattr(args, "vcodec", None) or "libx264")
 
 
 # Output resolution, as a percentage of each source's own. 100 = untouched.
@@ -364,7 +440,12 @@ def load_presets() -> dict:
         return {}
 
 
-PRESET_FIELDS = ("container", "crf", "bitrate", "x264_preset", "fps", "scale")
+# The encoder belongs here for the same reason crf and scale do: it DETERMINES THE
+# SIZE. It was missed when the encoder dropdown shipped in v3.26, so a preset saved
+# at H.265 came back as H.264 — the panel then named one encode and ran another,
+# under a name the person had chosen precisely to stop having to remember it.
+PRESET_FIELDS = ("container", "vcodec", "crf", "bitrate", "x264_preset", "fps",
+                 "scale")
 
 
 def save_preset(name: str, settings: dict) -> None:
@@ -373,6 +454,30 @@ def save_preset(name: str, settings: dict) -> None:
     all_ = load_presets()
     all_[name] = {k: settings.get(k) for k in PRESET_FIELDS}
     p.write_text(json.dumps(all_, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def preset_from_args(args) -> dict:
+    """What a preset records, read off one parsed command line.
+
+    ONE function for TWO callers — a --presets-only run, and an export that also saves.
+    Both used to spell this dict out by hand, which is how "vcodec" went missing: naming a
+    field in PRESET_FIELDS does nothing if the caller never puts it in the dict, and no
+    panel-side test can see that, because the panel only ever sees what came back out.
+    Adding a field now means adding it here, once, for both callers.
+    """
+    return {
+        "container": args.container,
+        # vcodec_of, not args.vcodec: --vcodec has no argparse default, so a preset saved on
+        # the default encoder would otherwise record None and leave a reader guessing.
+        "vcodec": vcodec_of(args),
+        # A preset cannot mean both a quality and a rate, so targeting a bitrate drops
+        # the crf rather than storing two settings that contradict each other.
+        "crf": (None if parse_bitrate(args.bitrate or "") else args.crf),
+        "bitrate": args.bitrate or None,
+        "x264_preset": args.x264_preset,
+        "fps": args.fps,
+        "scale": args.scale,
+    }
 
 
 # What libx264 can encode directly. Anything outside this has to be converted, which is
@@ -1081,11 +1186,41 @@ class Cut:
     duration_frames: int = 0          # length on the timeline
     duration_seconds: float = 0.0
     source_consumed_frames: int = 0   # source material used (differs when speed != 100)
+    # Frames dropped by --whole-frames, and from which end. 0 when the range already landed on
+    # frame boundaries, which is most cuts on most timelines.
+    frames_trimmed: int = 0
 
     # source media
     source_path: str = ""
     source_exists: bool = False
     file_id: str = ""
+
+    # A pre-rendered TIMELINE RANGE for this cut, when --render-dir supplied one.
+    # In render mode the cut is encoded from THIS instead of from source_path, which is
+    # the whole point: Premiere has already baked in the colour, the titles, the Motion
+    # and the speed ramp, none of which exist in the raw source file.
+    #
+    # Its dimensions and rate are the SEQUENCE's, not the source clip's — a 4K clip in a
+    # 1080 sequence renders at 1080 — so they are probed and recorded separately rather
+    # than being assumed to match the source. Everything downstream that needs to know
+    # what ffmpeg will actually read goes through encode_input().
+    render_path: str = ""
+    render_frames: int = 0
+    render_width: Optional[int] = None
+    render_height: Optional[int] = None
+    render_fps: float = 0.0
+    render_codec: str = ""
+    render_bitrate: Optional[int] = None
+    # A render is COMING but does not exist yet — set on a scan that ran with
+    # --render-planned. Kept apart from render_path, which is a file that is there: the
+    # scan has to say what will be cuttable so the panel can offer it, while run_cut must
+    # still refuse anything that has no actual render behind it.
+    render_planned: bool = False
+    # Frames this cut gave up to a dissolve, and to which end: a cut that ends in a
+    # transition loses its tail to the midpoint, one that begins in a transition loses its
+    # head. 0 for the great majority of cuts, which have no transition on them.
+    transition_split: int = 0
+    transition_split_end: str = ""
 
     # edit metadata
     speed_percent: float = 100.0   # always positive; a reverse shows in `reversed`
@@ -1161,6 +1296,9 @@ class Timeline:
         self.select = select
         self.files: dict[str, dict] = {}
         self.cuts: list[Cut] = []
+        # The timeline's AUDIO clipitems, kept whatever --tracks does to the cut list — the
+        # voice-over mix reads them as a source rather than writing them as files of their own.
+        self.audio_items: list[Cut] = []
         self.markers: list[dict] = []
         # Things the caller must be told rather than left to discover: keyframed ramps
         # flattened, nests that resolved to nothing, nesting too deep to follow.
@@ -1566,21 +1704,39 @@ class Timeline:
         # sequence — its timeline positions are counted in the NEST's rate, not the
         # parent's, and conflating the two shifts every nested cut.
         seq_fps = self.sequence_fps if seq_fps is None else seq_fps
+        # ⚠️ NO MEDIA IS NOT THE SAME AS NOTHING TO CUT — that depends on the mode, and
+        # the parser cannot know it. Both cases below used to `return None` here, which is
+        # why one real timeline of 40 clipitems produced 17 cuts and the reason lived in
+        # a warning nobody had to read:
+        #
+        #   an ADJUSTMENT LAYER or an Essential Graphics TITLE carries a <file> id with no
+        #   pathurl, because there is no file on disk. Undecodable, so source mode is right
+        #   to refuse it — but Premiere renders it perfectly, and on the master track a
+        #   title used as a shot IS a shot.
+        #
+        #   a SYNTHETIC item (Black Video, Slug, a colour matte) has no <file> at all, and
+        #   renders just as happily.
+        #
+        # So they become cuts marked `unsupported`, which every one of the sixteen places
+        # that tests media_kind already handles correctly: refused with a reason in source
+        # mode, cuttable once a render exists. Listed and explained instead of silently
+        # absent — which is exactly what _skip's own docstring complains about.
         file_node = clip.find("file")
+        fid = ""
+        finfo = {}
+        no_media = ""
         if file_node is None:
-            # Premiere's synthetic items — Black Video, Slug, colour mattes. There is no
-            # media to cut, which is correct, but it should not happen invisibly.
-            self._skip("no media behind them (synthetic items such as Black Video or Slug)",
-                       txt(clip, "name"))
-            return None
-        fid = self._register_file(file_node)
-        finfo = self.files.get(fid, {})
-        if not finfo.get("path"):
-            # An id-only <file> whose full definition is nowhere in the document. This is
-            # the same shape as the bug fixed in 3.10, where files defined under another
-            # sequence were never registered — so if it fires, say so loudly.
-            self._skip("a <file> reference the XML never defines", txt(clip, "name"))
-            return None
+            no_media = "synthetic (Black Video, Slug or a colour matte)"
+        else:
+            fid = self._register_file(file_node)
+            finfo = self.files.get(fid, {})
+            if not finfo.get("path"):
+                # Also the shape of the bug fixed in 3.10, where files defined under
+                # another sequence were never registered. Counted either way.
+                no_media = "no media file (an adjustment layer, a graphic or a title)"
+        if no_media:
+            self._skip(no_media + " — listed as needing a render", txt(clip, "name"))
+            finfo = {"path": "", "fps": 0.0}
 
         start = num(clip, "start", 0) or 0
         end = num(clip, "end", 0) or 0
@@ -1645,7 +1801,10 @@ class Timeline:
             end = start + dur_frames
 
         ext = Path(finfo["path"]).suffix.lower()
-        if ext in UNSUPPORTED_EXT:
+        if no_media:
+            # Nothing to decode, whatever the mode thinks about it.
+            kind = "unsupported"
+        elif ext in UNSUPPORTED_EXT:
             kind = "unsupported"
         elif ext in STILL_EXT:
             kind = "still"
@@ -1772,6 +1931,9 @@ class DumpTimeline:
     def __init__(self, dump_path: Path):
         self.xml_path = dump_path
         self.cuts: list[Cut] = []
+        # Same attribute as the XML timeline carries, so the voice-over mix does not have to
+        # know which of the two it was handed. Filled only if the dump has audio items in it.
+        self.audio_items: list[Cut] = []
         self.markers: list[dict] = []
         self.warnings: list[str] = []
         self.available_sequences: list[dict] = []
@@ -2280,7 +2442,8 @@ def codec_flags(cut: Cut, args) -> list[str]:
     crf = crf_of(args)
     preset = getattr(args, "x264_preset", None) or X264_PRESET
     rate = parse_bitrate(getattr(args, "bitrate", None) or "")
-    out = ["-c:v", args.vcodec]
+    vcodec = vcodec_of(args)
+    out = ["-c:v", vcodec]
     if rate:
         # Target-rate mode: the point of it is a predictable file size, so cap the peak
         # and give it a buffer rather than letting the average drift.
@@ -2288,13 +2451,51 @@ def codec_flags(cut: Cut, args) -> list[str]:
                 "-bufsize", str(int(rate * 2))]
     else:
         out += ["-crf", crf_text(crf)]
-    out += ["-preset", preset, "-profile:v", X264_PROFILE,
-            "-pix_fmt", cut.pix_fmt_out]
+    out += ["-preset", preset]
+    # ⚠️ "high" is an H.264 PROFILE NAME. x265 has its own set (main, main10, …) and errors
+    # out on this one, so the pin that keeps x264 off High 4:4:4 Predictive — the profile no
+    # Mac will play — applies only to x264. x265's 8-bit main profile is chosen by pix_fmt
+    # anyway, which is set just below.
+    if vcodec == "libx264":
+        out += ["-profile:v", X264_PROFILE]
+    out += ["-pix_fmt", cut.pix_fmt_out]
+    # HEVC in an mp4 needs the hvc1 tag to play in QuickTime and Premiere; without it the
+    # file is technically valid and macOS refuses to preview it.
+    if vcodec == "libx265":
+        out += ["-tag:v", "hvc1"]
     return out
 
 
 def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+
+    # RENDER MODE, and it comes first because it replaces everything below rather than
+    # adding to it. The input IS this cut's timeline range: Premiere rendered from the
+    # in-point to the out-point, so there is nothing to seek to and nothing to trim.
+    #
+    # Every trick the source path needs is not just unnecessary here but WRONG. The
+    # speed ramp is already in the pixels; re-applying setpts would apply it twice. The
+    # reverse is already reversed. The half-frame -ss nudge has no frame to nudge onto.
+    # A still is no longer a still — it is however many frames it occupied on screen.
+    #
+    # -frames:v still pins the count, so a render that came back a frame long is
+    # trimmed here rather than quietly lengthening the clip. The one exception is a
+    # --fps override, which resamples: the frame count is deliberately left to ffmpeg
+    # there, because pinning the sequence's own count at a different rate would change
+    # the clip's duration instead of preserving it.
+    if cut.render_path:
+        cmd += ["-i", cut.render_path]
+        out_fps = getattr(args, "fps", None)
+        if out_fps:
+            cmd += ["-r", f"{float(out_fps):.6f}"]
+        else:
+            cmd += ["-frames:v", str(max(1, cut.duration_frames))]
+        sf = scale_filter(args)
+        if sf:
+            cmd += ["-filter:v", sf]
+        cmd += [*codec_flags(cut, args), "-movflags", "+faststart", "-an",
+                str(out_path)]
+        return cmd
 
     if cut.media_kind == "still":
         # A still has no timeline to seek into — loop it for the on-screen duration.
@@ -2440,6 +2641,171 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     return cmd
 
 
+def write_timeline_audio(tl, args) -> dict:
+    """ONE mp3 for the whole timeline: every selected audio item at its timeline position, over
+    silence, for the sequence's full length.
+
+    "also make it as one single mp3 file" — 18 Aug, alongside the per-cut files rather than
+    instead of them: a continuous track is what you hand a transcriber or line up against the
+    edit, and the per-cut files are what pair with the clips. Nothing is lost by having both.
+
+    Built by the SAME mixer as a cut's own audio, on a stand-in Cut that spans frame 0 to the end
+    of the sequence — so the overlap arithmetic, the silence base and the level handling are one
+    implementation with one set of tests, not two that can drift.
+    """
+    items = getattr(tl, "audio_items", None) or []
+    frames = int(getattr(tl, "sequence_duration_frames", 0) or 0)
+    fps = tl.sequence_fps or 25.0
+    if not items or frames <= 0:
+        return {}
+    whole = Cut(track_type="video", timeline_in_frames=0, timeline_out_frames=frames)
+    parts, note = vo_contributions(whole, items, fps)
+    if not parts:
+        return {"note": note or "no audio items to mix"}
+    total = frames / fps
+    out_path = args.out / "_timeline_audio.mp3"
+    try:
+        r = subprocess.run(vo_mix_command(whole, parts, total, out_path),
+                           capture_output=True, text=True, timeout=args.timeout)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"note": f"timeline audio failed: {e}"}
+    if r.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+        tail = (r.stderr or "").strip().splitlines()
+        return {"note": "timeline audio failed: " + (tail[-1][:120] if tail else "no output")}
+    return {"file": out_path.name, "bytes": out_path.stat().st_size,
+            "seconds": round(total, 6), "parts": len(parts), "note": note}
+
+
+def parse_track_list(raw) -> set[int]:
+    """"2" or "1,2" or "A2" -> {2} / {1, 2}. Empty means every track, which is the default: a
+    flag that had to be given before audio worked at all would be a second switch."""
+    if not raw:
+        return set()
+    out = set()
+    for part in str(raw).replace(" ", "").split(","):
+        if not part:
+            continue
+        try:
+            n = int(part.lstrip("Aa"))
+        except ValueError:
+            continue
+        if n > 0:
+            out.add(n)
+    return out
+
+
+VO_RATE = 48000
+VO_BITRATE = "192k"
+
+
+def vo_contributions(cut: Cut, items: list[Cut], seq_fps: float) -> tuple[list[dict], str]:
+    """Which audio clipitems play across this cut, and where inside it they land.
+
+    Everything is computed in TIMELINE frames, because that is the only clock the video track
+    and the audio tracks share. A cut occupies [timeline_in, timeline_out); an audio item
+    overlaps when its own span does, and the overlap's offset from the cut's start is where it
+    belongs in the output.
+    """
+    out: list[dict] = []
+    skipped = 0
+    c_in = cut.timeline_in_frames
+    c_out = cut.timeline_out_frames or (c_in + max(1, cut.duration_frames))
+    for a in items:
+        a_in = a.timeline_in_frames
+        a_out = a.timeline_out_frames or (a_in + max(1, a.duration_frames))
+        start = max(a_in, c_in)
+        end = min(a_out, c_out)
+        if end <= start:
+            continue
+        if not a.source_exists:
+            skipped += 1
+            continue
+        # ⚠️ A RETIMED AUDIO ITEM IS LEFT OUT, and said so rather than placed wrong. Putting it
+        # in means reading a scaled source range and atempo-ing it back into its timeline slot;
+        # getting that subtly wrong would slide the voice against the picture, which is worse
+        # than a documented omission. Voice-over is not normally retimed.
+        if abs((a.speed_percent or 100.0) - 100.0) > 0.01 or a.reversed:
+            skipped += 1
+            continue
+        out.append({
+            "path": a.source_path,
+            # Where in the SOURCE the overlap begins: the item's own in-point plus however far
+            # into the item the overlap starts.
+            "src_in": max(0.0, a.source_in_seconds + (start - a_in) / seq_fps),
+            "dur": (end - start) / seq_fps,
+            # Where in the OUTPUT it goes. Silence everywhere else, which is the gap.
+            "at": (start - c_in) / seq_fps,
+        })
+    out.sort(key=lambda d: d["at"])
+    note = ""
+    if skipped:
+        note = (f"{skipped} audio item(s) left out of the mix "
+                f"(retimed, reversed, or the source is missing)")
+    return out, note
+
+
+def vo_mix_command(cut: Cut, parts: list[dict], total: float, out_path: Path) -> list[str]:
+    """One MP3, exactly `total` seconds long, holding every contribution at its own offset.
+
+    The base input is SILENCE of the full length, and `amix=duration=first` pins the result to
+    it — so a cut the voice-over does not cover comes out silent for that stretch instead of
+    short. "contain all the VO, and the silince gap too": the gaps are the base showing through.
+
+    ⚠️ `normalize=0` matters. amix divides by the number of inputs by default, so mixing one
+    voice against the silent base would halve the voice, and a second overlapping line would
+    halve it again — the level would depend on how many things happened to overlap.
+    """
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+           "-f", "lavfi", "-t", f"{total:.6f}",
+           "-i", f"anullsrc=r={VO_RATE}:cl=stereo"]
+    for p in parts:
+        cmd += ["-ss", f"{p['src_in']:.6f}", "-t", f"{p['dur']:.6f}", "-i", p["path"]]
+    chains = []
+    labels = ["[0:a]"]
+    for i, p in enumerate(parts, start=1):
+        ms = int(round(p["at"] * 1000))
+        chains.append(f"[{i}:a]aresample={VO_RATE},"
+                      f"adelay=delays={ms}:all=1[v{i}]")
+        labels.append(f"[v{i}]")
+    chains.append("".join(labels)
+                  + f"amix=inputs={len(labels)}:duration=first:normalize=0[out]")
+    cmd += ["-filter_complex", ";".join(chains), "-map", "[out]",
+            "-t", f"{total:.6f}",
+            "-c:a", "libmp3lame", "-b:a", VO_BITRATE, "-ar", str(VO_RATE), "-ac", "2",
+            str(out_path)]
+    return cmd
+
+
+def audio_sidecar_command(cut: Cut, out_path: Path, seq_fps: float) -> list[str]:
+    """The VOICE of a video cut, as its own file, covering exactly the frames the video holds.
+
+    "có nút xuất voice ra y như track audio, y như video lenght" — the AI Product team, 18 Aug.
+    A sidecar rather than a soundtrack, and that is not a shortcut: build_command pins `-an` on
+    every video exit on purpose, because an AAC track made each container declare a duration one
+    frame longer than its own video stream, and a frame-exact dataset cannot have its own
+    manifest disagree with its files. Muxing the audio back in would undo that.
+
+    ⚠️ NO atempo, EVEN ON A RETIMED CLIP. A retimed cut's video is written at the SOURCE's own
+    speed — a 200% clip comes out twice as long as it looks on the timeline, which is documented
+    everywhere in this tool — so re-timing the audio would make the pair disagree. Same source
+    range, same length, both untouched.
+    """
+    fps = cut.source_fps or seq_fps or 25.0
+    n_frames = max(1, cut.source_consumed_frames
+                   or consumed_frames(cut.source_in_seconds,
+                                      cut.source_duration_seconds, fps))
+    # The same half-frame-early seek the video uses, so both files start on the same frame.
+    ss = max(0.0, (cut.source_in_seconds - 0.5 / fps))
+    # Length from the FRAME COUNT the video will hold, not from the clip's own duration
+    # field: those differ by a rounding on roughly half of real clips, and "y như video
+    # lenght" is the requirement.
+    t = n_frames / fps
+    return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{ss:.6f}", "-t", f"{t:.6f}", "-i", cut.source_path,
+            "-vn", "-map", "0:a:0",
+            "-c:a", "aac", "-b:a", "192k", str(out_path)]
+
+
 PROBE_SECONDS = 1.0
 PROBE_SLICES = 3
 PROBE_TIMEOUT = 25
@@ -2580,6 +2946,10 @@ def estimate_sizes(cuts: list[Cut], args) -> None:
     """
     rate = parse_bitrate(getattr(args, "bitrate", None) or "")
     ratio = size_ratio_for_crf(crf_of(args))
+    # The encoder's own factor, for the last-resort branch below. The modelled branch gets
+    # it inside estimate_bytes_for; this one is a bare rate x ratio and would otherwise be
+    # the one place an x265 export was still priced as x264.
+    crat = codec_ratio(vcodec_of(args), crf_of(args))
     pct = scale_of(args)
     # Bytes track PIXEL COUNT, so the factor is the scale SQUARED — measured across three
     # real cuts at 75/50/33%, where it held to within about a third and undershot on
@@ -2588,9 +2958,17 @@ def estimate_sizes(cuts: list[Cut], args) -> None:
     # mode, and multiplying there would promise a saving the mode does not give.
     area = (pct / 100.0) ** 2
     for c in cuts:
-        secs = c.source_duration_seconds or 0.0
-        c.output_width, c.output_height = scaled_dims(c.width, c.height, pct)
-        if secs <= 0 or c.media_kind == "unsupported" or not c.source_exists:
+        # A RENDER is a timeline range, so it is as long as the clip LOOKED and as big as
+        # the sequence. A 2x sped-up 4K clip in a 1080 sequence eats two seconds of 4K
+        # source and renders to one second of 1080; pricing that from the source would be
+        # wrong on both counts, and the resolution readout would name the wrong pixels.
+        in_w, in_h, _fps, _codec, _rate = encode_input(c)
+        secs = (c.duration_seconds if c.render_path else c.source_duration_seconds) or 0.0
+        c.output_width, c.output_height = scaled_dims(in_w, in_h, pct)
+        # In render mode the source's own state no longer disqualifies a cut: the pixels
+        # come from Premiere, so an offline clip or a Dynamic Link comp still has a file.
+        unusable = (c.media_kind == "unsupported" or not c.source_exists)
+        if secs <= 0 or (unusable and not c.render_path):
             continue
         if rate:
             c.estimated_bytes = int(rate * secs / 8)
@@ -2602,12 +2980,214 @@ def estimate_sizes(cuts: list[Cut], args) -> None:
             c.estimated_bytes = int(c.probe_bps * secs / 8 + CONTAINER_FIXED)
         else:
             # The default: metadata only, so it costs nothing and a slider can follow it.
-            modelled = estimate_bytes_for(c, crf_of(args), pct, secs)
+            modelled = estimate_bytes_for(c, crf_of(args), pct, secs,
+                                          vcodec_of(args))
             if modelled > 0:
                 c.estimated_bytes = int(modelled)
             elif c.bitrate:
                 # No dimensions to work from — the last resort, and the unreliable one.
-                c.estimated_bytes = int(float(c.bitrate) * ratio * area * secs / 8)
+                c.estimated_bytes = int(float(c.bitrate) * ratio * crat * area * secs / 8)
+
+
+RENDER_EXTS = (".mp4", ".mov", ".m4v", ".mxf", ".mkv")
+
+# How far a render's length may sit from the cut it covers before it is refused. A real
+# range can land a frame either side of the arithmetic; a render of the wrong range is
+# out by hundreds, so this does not need to be tight to do its job.
+RENDER_FRAME_SLACK = 2
+
+
+def render_name(cut: Cut) -> str:
+    """The basename a pre-rendered range for this cut must carry.
+
+    (track type, track index, timeline IN, timeline OUT).
+
+    ⚠️ THE OUT-POINT IS LOAD-BEARING, and it is here because a real timeline proved it.
+    --pick identifies a clip by (type, track, in-point) on the reasoning that "two clips
+    cannot start on the same frame of the same track". Under a TRANSITION they can: a
+    cross-dissolve leaves the outgoing clip's overlap sitting at exactly the frame the
+    incoming clip starts on. On one real client timeline that put a 10-frame tail of
+    "K8 (before)" and an 88-frame "K8 (after)" both at frame 448 of V1.
+
+    With the in-point alone, both cuts named the same render, so one of them was handed a
+    file 78 frames longer than its own range. That was caught — the engine measures a
+    render before it encodes it — but caught is not the same as correct, and the fix is
+    for the name to say which range it covers rather than only where it starts.
+    """
+    return (f"{cut.track_type}-{int(cut.track_index)}-"
+            f"{int(cut.timeline_in_frames)}-{int(cut.timeline_out_frames)}")
+
+
+def attach_renders(cuts: list[Cut], render_dir: Path) -> tuple[int, list[Cut]]:
+    """Point each cut at its pre-rendered timeline range, and probe what arrived.
+
+    A render is Premiere's own output: the clip as it LOOKED, at the sequence's size and
+    rate, with everything on it baked in. So its dimensions, rate, codec and length are
+    the encoder's input and none of them can be inferred from the source clip — they are
+    probed and recorded, one file at a time.
+
+    Returns (matched, missing). A cut with no render is NOT quietly cut from its source
+    instead: half a folder with effects and half without, all named alike, is a worse
+    outcome than a clip that fails and says why. run_cut refuses them.
+    """
+    cache: dict = {}
+    matched, missing = 0, []
+    for c in cuts:
+        found = None
+        for ext in RENDER_EXTS:
+            p = render_dir / (render_name(c) + ext)
+            if p.is_file() and p.stat().st_size > 0:
+                found = p
+                break
+        if found is None:
+            missing.append(c)
+            continue
+        c.render_path = str(found)
+        matched += 1
+
+        key = str(found)
+        if key not in cache:
+            cache[key] = probe(key)
+        data = cache[key]
+        for st in data.get("streams", []):
+            if st.get("codec_type") != "video":
+                continue
+            c.render_width = st.get("width")
+            c.render_height = st.get("height")
+            c.render_codec = st.get("codec_name", "")
+            try:
+                n, d = st.get("r_frame_rate", "0/1").split("/")
+                if float(d):
+                    c.render_fps = round(float(n) / float(d), 6)
+            except Exception:
+                pass
+            try:
+                c.render_frames = int(st.get("nb_frames") or 0)
+            except (TypeError, ValueError):
+                c.render_frames = 0
+            break
+        br = data.get("format", {}).get("bit_rate")
+        c.render_bitrate = int(br) if br else None
+        if not c.render_frames:
+            # nb_frames is missing from some containers. Duration x rate lands within a
+            # frame, which is all this figure is used for — reporting a GROSS mismatch,
+            # not deciding an encode. build_command pins the exact count regardless.
+            dur = data.get("format", {}).get("duration")
+            if dur and c.render_fps:
+                try:
+                    c.render_frames = int(round(float(dur) * c.render_fps))
+                except ValueError:
+                    pass
+    return matched, missing
+
+
+def split_transition_overlaps(cuts: list[Cut], seq_fps: float) -> int:
+    """Where two cuts on one track OVERLAP, move the boundary to the middle of the overlap.
+
+    Premiere represents a cross-dissolve as the two clips overlapping by the transition's
+    length, so both of them genuinely occupy those frames. In source mode that is harmless:
+    each clip is cut from its own camera file and the overlap shows its own un-blended
+    footage. In render mode it is not, because a render IS the timeline — on a real
+    client edit, cut 18 (1051-1071) and cut 19 (1058-1152) came out holding the same
+    thirteen frames, pixel for pixel, both showing the dissolve mid-blend.
+
+    Splitting at the midpoint keeps every frame exactly once and puts the cut where the
+    blend is half done, which is roughly where the eye reads it. The alternative — dropping
+    the overlap from both — loses every transition frame in the dataset.
+
+    Per TRACK, and for every video track rather than only the master: overlaps can only
+    happen within a track, and doing them all means the scan and the export compute the
+    same ranges without the scan needing to know which track is master. They must agree
+    exactly, because the render's FILENAME is built from these numbers on one side and
+    looked up by them on the other.
+
+    Returns the number of boundaries moved.
+    """
+    groups: dict = {}
+    for c in cuts:
+        if c.track_type != "video":
+            continue
+        groups.setdefault((c.track_type, int(c.track_index)), []).append(c)
+
+    moved = 0
+    for key in sorted(groups):
+        row = sorted(groups[key], key=lambda c: (c.timeline_in_frames, c.timeline_out_frames))
+        for a, b in zip(row, row[1:]):
+            if b.timeline_in_frames >= a.timeline_out_frames:
+                continue                            # no overlap: an ordinary cut
+            # floor, so the result is the same on every run and on both sides
+            mid = (b.timeline_in_frames + a.timeline_out_frames) // 2
+            # A boundary that would leave either side shorter than a frame is left alone:
+            # a cut with no frames in it is worse than a duplicated one.
+            if mid - a.timeline_in_frames < 1 or b.timeline_out_frames - mid < 1:
+                continue
+            a.transition_split += a.timeline_out_frames - mid
+            a.transition_split_end = "both" if a.transition_split_end == "head" else "tail"
+            b.transition_split += mid - b.timeline_in_frames
+            b.transition_split_end = "both" if b.transition_split_end == "tail" else "head"
+            a.timeline_out_frames = mid
+            b.timeline_in_frames = mid
+            moved += 1
+
+    if moved:
+        for c in cuts:
+            if c.track_type != "video" or not c.transition_split:
+                continue
+            # Everything derived from the range follows it. The timecodes especially: they
+            # are what the sheet and the tooltip print, and a cut whose timecode disagreed
+            # with its own frames would be unreadable.
+            c.duration_frames = max(1, c.timeline_out_frames - c.timeline_in_frames)
+            c.duration_seconds = round(frames_to_seconds(c.duration_frames, seq_fps), 6)
+            c.timeline_in_tc = frames_to_tc(c.timeline_in_frames, seq_fps)
+            c.timeline_out_tc = frames_to_tc(c.timeline_out_frames, seq_fps)
+    return moved
+
+
+def trim_to_whole_frames(cuts: list[Cut]) -> int:
+    """Pull every cut in to the frames that lie WHOLLY inside its own source range.
+
+    "for any cut that the start frame land on an non rounded integer you move it up by 1 (+1) and
+    end frame that not rounded you move it down by 1 (-1) so the cut dont get move outside each
+    safe source range" — 18 Aug.
+
+    A tick-derived in-point almost never lands on a frame boundary. The default takes the frame
+    that CONTAINS the in-point, which is partly before the range the timeline actually used, and
+    counts frames whose start falls inside it — so a cut can hold a frame at each end that the
+    editor never saw at that position. This moves a fractional start up to the next whole frame
+    and a fractional end down to the previous one.
+
+    ⚠️ APPLIED TO THE CUT, not inside build_command, and that is the whole reason it is a
+    separate pass. The manifest reports source_consumed_frames as the file's label and verify.py
+    checks the file against it; the filename carries the (in-out) range. Trimming only the ffmpeg
+    command would have left all three describing a file that no longer matched.
+
+    Skipped for stills (no source frames to speak of), for audio (no frames at all) and for any
+    cut a trim would leave shorter than one frame — losing a clip entirely to a rounding rule
+    would be a worse answer than keeping its edges.
+    """
+    e = 1e-4
+    n_touched = 0
+    for c in cuts:
+        fps = c.source_fps or 0.0
+        if fps <= 0 or c.track_type == "audio" or c.media_kind == "still":
+            continue
+        in_f = c.source_in_seconds * fps
+        out_f = (c.source_in_seconds + c.source_duration_seconds) * fps
+        first = math.ceil(in_f - e)             # a fractional start moves UP
+        last = math.floor(out_f + e)            # a fractional end moves DOWN
+        n = last - first
+        if n < 1:
+            continue
+        before = c.source_consumed_frames or consumed_frames(
+            c.source_in_seconds, c.source_duration_seconds, fps)
+        if n == before and abs(in_f - first) < e:
+            continue                            # already whole frames; nothing to do
+        c.source_in_seconds = first / fps
+        c.source_duration_seconds = n / fps
+        c.source_consumed_frames = n
+        c.frames_trimmed = max(0, before - n)
+        n_touched += 1
+    return n_touched
 
 
 def assign_output_names(cuts: list[Cut], container: str, seq_fps: float) -> None:
@@ -2639,12 +3219,41 @@ def say(line: str) -> None:
 
 
 def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
-    if cut.media_kind == "unsupported":
+    # A render is Premiere's output, so neither of the next two disqualifications
+    # applies to it. An After Effects comp has no decodable file on disk and is refused
+    # below — but Premiere resolves it through Dynamic Link while rendering, so in render
+    # mode it exports like anything else. So does a clip whose media has gone offline
+    # since the render was made.
+    if getattr(args, "render_dir", None) and not cut.render_path:
+        cut.status = "no_render"
+        cut.error = ("no render for this cut — Premiere did not produce "
+                     f"{render_name(cut)}")
+        return cut
+    # ⚠️ THE RENDER IS MEASURED, NOT TRUSTED.
+    #
+    # The panel confirms Premiere moved its in/out points before rendering, but that is
+    # a statement of intent — it does not prove the exporter honoured the range. When it
+    # did not, every render came back as the WHOLE TIMELINE, and `-frames:v` dutifully
+    # trimmed each one to its cut's length: seventeen files, all of them the opening of
+    # the sequence, all the right duration, all wrong. Nothing downstream could tell.
+    #
+    # A render's frame count is the one thing that cannot lie about this. Two frames of
+    # slack, because a real range can land a frame either side of the arithmetic; beyond
+    # that the file is not the range it claims to be and the cut fails.
+    if cut.render_path and cut.render_frames and cut.duration_frames:
+        off = cut.render_frames - cut.duration_frames
+        if abs(off) > RENDER_FRAME_SLACK:
+            cut.status = "render_mismatch"
+            cut.error = (f"the render holds {cut.render_frames} frames but this cut is "
+                         f"{cut.duration_frames} ({off:+d}) — it is not the range it "
+                         f"should be, so it was not encoded")
+            return cut
+    if cut.media_kind == "unsupported" and not cut.render_path:
         cut.status = "unsupported"
         cut.error = (f"{Path(cut.source_path).suffix} is a project/comp file "
                      f"(Dynamic Link), not decodable media — render it out first")
         return cut
-    if not cut.source_exists:
+    if not cut.source_exists and not cut.render_path:
         cut.status = "missing_source"
         cut.error = f"Source not found: {cut.source_path}"
         return cut
@@ -2666,6 +3275,41 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
         cut.status = "dry_run"
         return cut
 
+    # Announced BEFORE the encode, not after. With JOBS clips running at once, reporting
+    # only on completion means nothing is said for the entire length of the first encode —
+    # and a single long clip on network media can hold that silence for minutes.
+    #
+    # ⚠️ ABOVE the resume check, so a clip this run SKIPS still identifies itself. The panel
+    # marks its rows from these lines, and a resumed run announced nothing for the clips it
+    # skipped — so their rows sat showing an estimate for a file that already existed, right
+    # up until the manifest landed at the very end. Announcing then immediately reporting
+    # HAVE costs one line and makes the run legible while it happens.
+    #
+    # The KEY as well as the name. The panel has to put this clip's progress on the row it is
+    # already showing, and a filename cannot get it there: the index in the name comes from
+    # the picked set, so it changes when a tick changes, and the run's manifest — the only
+    # other place the two are tied together — is not written until every clip has finished.
+    # These four fields are what --pick matches on, so they are already the identity of a cut
+    # everywhere else in the panel.
+    #
+    # ⚠️ FOUR FIELDS, NOT THREE — the out-point joined the key here for the reason it joined
+    # pick_key() and render_name(): two cuts under a cross-dissolve start on the same frame of
+    # the same track, and with the in-point alone both announced the SAME key. The panel put
+    # the second one's "encoding" state, elapsed time and result on the first one's row, so one
+    # row was told two stories and the other stayed dark for the whole run.
+    #
+    # Name stays LAST so an older panel's `>>\s+(.+)` still reads something sensible, and a
+    # newer panel treats the key as optional for the same reason in reverse. The cost of the
+    # fourth field is paid THERE and it is worth knowing exactly: a panel older than this
+    # engine cannot match `[a-z]+/\d+/\d+` against `video/1/448/458`, so it takes the whole
+    # tail as the filename — its rows stay dark (which is already what it does with a line
+    # carrying no key at all) and its live tally over-counts what is still encoding. The bar,
+    # the log and the report off the manifest are all unaffected, and both halves are
+    # installed together. No single-line format can do better: the old pattern's name group
+    # runs to the end of the line, so ANY field added anywhere is swallowed by it.
+    say(f"  >> {cut.track_type}/{cut.track_index}/{cut.timeline_in_frames}"
+        f"/{cut.timeline_out_frames} {cut.output_file}")
+
     # --resume: a long run that died halfway shouldn't re-encode what it already wrote.
     # Only a non-empty file counts; a truncated 0-byte leftover gets redone.
     if getattr(args, "resume", False) and out_path.exists() and out_path.stat().st_size > 0:
@@ -2673,10 +3317,6 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
         return cut
 
     cmd = build_command(cut, out_path, args, seq_fps)
-    # Announced BEFORE the encode, not after. With JOBS clips running at once, reporting
-    # only on completion means nothing is said for the entire length of the first encode —
-    # and a single long clip on network media can hold that silence for minutes.
-    say(f"  >> {cut.output_file}")
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=args.timeout)
         if r.returncode != 0:
@@ -2709,15 +3349,65 @@ SECONDS_FIELDS = ("source_in_seconds", "source_duration_seconds", "duration_seco
 def pick_key(cut: Cut) -> tuple:
     """What identifies a clip for --pick.
 
-    (track type, track index, timeline in-point in frames). Stable against filtering
-    and re-indexing, and unique — two clips cannot start on the same frame of the same
-    track. An index would not do: it shifts whenever anything else is filtered out.
+    (track type, track index, timeline IN, timeline OUT). Stable against filtering and
+    re-indexing, which is why it is not an index: an index shifts whenever anything else
+    is filtered out.
+
+    ⚠️ THE OUT-POINT IS LOAD-BEARING, and it is here for the reason render_name() carries
+    it. This used to be a triple, on the reasoning that "two clips cannot start on the same
+    frame of the same track". Under a TRANSITION they can: a cross-dissolve leaves the
+    outgoing clip's overlap sitting at exactly the frame the incoming clip starts on. One
+    real client timeline put a 10-frame tail of "K8 (before)" and an 88-frame "K8 (after)"
+    both at frame 448 of V1.
+
+    With the in-point alone those two cuts answered to ONE selector, so unticking either
+    one dropped both from the run, and a retry of one failed clip re-encoded two. The
+    out-point separates them, because a cut cannot both start and end where another one
+    does without being that cut.
     """
-    return (cut.track_type, int(cut.track_index), int(cut.timeline_in_frames))
+    return (cut.track_type, int(cut.track_index), int(cut.timeline_in_frames),
+            int(cut.timeline_out_frames))
+
+
+def pick_matches(cut: Cut, keys: set) -> bool:
+    """Whether a --pick selection names this cut.
+
+    Four fields match exactly. THREE match any cut starting there — the old format, kept
+    working on purpose; see read_pick_file().
+    """
+    k = pick_key(cut)
+    return k in keys or k[:3] in keys
+
+
+def unmatched_picks(keys: set, cuts: list) -> int:
+    """How many selectors in a --pick file named no clip in the run.
+
+    Counted as SELECTORS THAT MATCHED NOTHING, not as a difference of two lengths. An old
+    three-field selector legitimately matches two cuts under a transition, and subtracting
+    lengths reads that as -1 missing — so a file where one selector was genuinely stale and
+    another matched twice came out at zero and said nothing at all. `cuts` is the list
+    AFTER pick_matches() has filtered it, so every one of them matched something.
+    """
+    matched = set()
+    for c in cuts:
+        k = pick_key(c)
+        matched.add(k if k in keys else k[:3])
+    return len(keys - matched)
 
 
 def read_pick_file(path: Path) -> set:
-    """Selectors from a --pick file. Blank lines and # comments ignored."""
+    """Selectors from a --pick file. Blank lines and # comments ignored.
+
+    'TRACKTYPE TRACKINDEX TIMELINEIN TIMELINEOUT', one per line — pick_key() spelled out.
+
+    THREE FIELDS ARE STILL ACCEPTED and mean "any cut starting there". This file is an
+    internal protocol between the panel and the engine and the two ship together, so a
+    panel of this vintage always writes four; three arrives from a file written by hand,
+    or by a panel older than this engine, and refusing it would turn a version mismatch
+    into a run that will not start at all. A three-field line behaves exactly as it did
+    before the out-point existed — on the one timeline where two cuts share an in-point it
+    selects both — which is no worse than what it replaced.
+    """
     keys = set()
     try:
         text = Path(path).read_text(encoding="utf-8")
@@ -2728,13 +3418,13 @@ def read_pick_file(path: Path) -> set:
         if not line or line.startswith("#"):
             continue
         parts = line.split()
-        if len(parts) != 3:
-            raise SystemExit(f"error: {path}:{n}: expected "
-                             f"'TRACKTYPE TRACKINDEX TIMELINEIN', got {line!r}")
+        if len(parts) not in (3, 4):
+            raise SystemExit(f"error: {path}:{n}: expected 'TRACKTYPE TRACKINDEX "
+                             f"TIMELINEIN TIMELINEOUT', got {line!r}")
         try:
-            keys.add((parts[0], int(parts[1]), int(parts[2])))
+            keys.add((parts[0], *(int(f) for f in parts[1:])))
         except ValueError:
-            raise SystemExit(f"error: {path}:{n}: track index and timeline in-point "
+            raise SystemExit(f"error: {path}:{n}: track index and timeline points "
                              f"must be whole numbers, got {line!r}")
     if not keys:
         raise SystemExit(f"error: {path} selected no clips — nothing would be cut")
@@ -2752,21 +3442,60 @@ def describe(cut: Cut) -> dict:
     Returns {"status", "notes", "kind", "cuttable"}. `kind` is one of "", "ok", "ramp",
     "warn", "bad" — a class name in both front ends.
     """
-    cuttable = cut.source_exists and cut.media_kind != "unsupported"
+    # A render makes a cut cuttable whatever the source is doing: the pixels come from
+    # Premiere, so offline media and Dynamic Link comps both export.
+    #
+    # ⚠️ render_planned COUNTS HERE, and that is the whole point of it. At SCAN time no
+    # render exists yet, so an .aep and an offline clip both reported cuttable=false — and
+    # the panel dropped them into its "cannot be cut" group with the tick box DISABLED. The
+    # engine's support for them was real and completely unreachable: the panel never asked
+    # Premiere to render what it had already decided could not be cut.
+    #
+    # Video only. An audio cut has no render coming, so promising one would put a clip in
+    # the list that nothing can produce.
+    cuttable = bool(cut.render_path) or (
+        cut.render_planned and cut.track_type == "video") or (
+        cut.source_exists and cut.media_kind != "unsupported")
 
     if cut.status == "pending":
         # Unsupported is checked FIRST, matching run_cut: an .aep is a Dynamic Link comp
         # whether or not it happens to be on disk, and "missing source" would send you
         # hunting for a path when the fix is to render it out.
-        status = ("AE comp — render it" if cut.media_kind == "unsupported"
-                  else "missing source" if not cut.source_exists
-                  else "ready")
+        if cut.render_planned or cut.render_path:
+            # In render mode neither of the two below is a problem: Premiere resolves a
+            # Dynamic Link comp while rendering, and never opens the source file at all.
+            status = ("ready — from render" if cut.track_type == "video"
+                      else "missing source" if not cut.source_exists
+                      else "ready")
+        else:
+            status = (("AE comp — render it"
+                       if cut.source_path.lower().endswith((".aep", ".prproj", ".aet"))
+                       else "graphic — needs a render")
+                      if cut.media_kind == "unsupported"
+                      else "missing source" if not cut.source_exists
+                      else "ready")
     else:
         status = {"ok": "written", "skipped_existing": "already there",
                   "no_audio": "silent source",
+                  "no_render": "no render",
+                  # Short on purpose: this is a table cell in a panel that can be
+                  # 320px wide. "wrong range rendered" measured 106px of text in a
+                  # 104px column and was clipped. The numbers are in `error`.
+                  "render_mismatch": "wrong range",
                   "missing_source": "missing source"}.get(cut.status, cut.status)
 
     notes = []
+    if cut.render_path:
+        # The ramp and the reverse are IN the pixels here, so the notes below that warn
+        # about them would be describing work Premiere has already done correctly.
+        notes.append("from render")
+    if cut.transition_split:
+        notes.append(f"{cut.transition_split}f to a dissolve"
+                     + (f" ({cut.transition_split_end})" if cut.transition_split_end else ""))
+        if cut.render_frames and cut.duration_frames:
+            d = cut.render_frames - cut.duration_frames
+            if abs(d) > 1:
+                notes.append(f"render {d:+d} frame(s) vs the timeline")
     if cut.reversed:
         notes.append("reversed")
     if cut.speed_varies:
@@ -2782,7 +3511,9 @@ def describe(cut: Cut) -> dict:
     if cut.pix_fmt_out and cut.pix_fmt and cut.pix_fmt_out != cut.pix_fmt:
         notes.append(f"{cut.pix_fmt} → {cut.pix_fmt_out}")
 
-    kind = ("bad" if cut.status in ("failed", "missing_source") or not cut.source_exists
+    kind = ("bad" if cut.status in ("failed", "missing_source", "no_render",
+                                    "render_mismatch")
+            or (not cut.source_exists and not cut.render_path)
             else "warn" if cut.media_kind == "unsupported" or cut.status == "no_audio"
             else "ok" if cut.status in ("ok", "skipped_existing")
             else "ramp" if is_retimed(cut.speed_percent) or cut.reversed
@@ -2838,7 +3569,9 @@ def describe_encode(args) -> str:
     """One line naming what was actually used, for the manifest and the sheet."""
     rate = getattr(args, "bitrate", None)
     q = f"bitrate {rate}" if parse_bitrate(rate or "") else f"crf {crf_text(crf_of(args))}"
-    bits = [f"libx264 {q}", f"profile {X264_PROFILE}",
+    vcodec = vcodec_of(args)
+    bits = [f"{vcodec} {q}",
+            f"profile {X264_PROFILE}" if vcodec == "libx264" else "profile main",
             f"preset {getattr(args, 'x264_preset', None) or X264_PRESET}"]
     pct = scale_of(args)
     if pct < 100.0:
@@ -2870,6 +3603,41 @@ def export_summary(tl: Timeline, args) -> dict:
         },
         "settings": {
             "encode": describe_encode(args),
+            # ⚠️ The panel reads this back to decide whether measured sizes still describe
+            # the settings on screen. crf and scale_percent were already here; the encoder
+            # was not, so switching to x265 left every measured size claiming to describe
+            # an x264 encode and no re-measure was offered.
+            "vcodec": vcodec_of(args),
+            # Whether this run was ASKED for sidecar audio. Without it, "no sidecars in the
+            # manifest" is indistinguishable from "none were wanted" — and a verifier cannot
+            # fail a run for producing nothing it was told to produce.
+            "whole_frames": bool(getattr(args, "whole_frames", False)),
+            # What the pixels came from. A dataset reader cannot tell a clip cut from
+            # source from one cut from a render by looking at it, and they are different
+            # things: one is the camera original, the other is the edit as it played.
+            "cut_from": "render" if getattr(args, "render_dir", None) else "source",
+            "render_planned": bool(getattr(args, "render_planned", False)),
+            "transitions_split": int(getattr(args, "transitions_split", 0) or 0),
+            "render_dir": str(getattr(args, "render_dir", "") or ""),
+            "video_track": int(getattr(args, "video_track", 0) or 0),
+            "renders_matched": int(getattr(args, "render_matched", 0) or 0),
+            "renders_missing": int(getattr(args, "render_missing", 0) or 0),
+            "audio": bool(getattr(args, "audio", False)),
+            # HOW MANY audio clipitems the timeline had for the mix to read. Without this, "every
+            # cut came out silent" is indistinguishable from "the timeline had no voice-over" —
+            # and a run that dropped the audio items on the floor verified clean.
+            # From the TIMELINE, not from args: the plumbing that carries these to the mix is
+            # exactly what a bug would break, and a count taken from the broken end reports 0 and
+            # agrees with the silence it caused.
+            "audio_items": len(getattr(tl, "audio_items", None) or []),
+            # Every audio track the TIMELINE has, with how many items sits on each — this is
+            # what the panel builds its Audio dropdown from, so it offers the tracks that exist
+            # rather than a fixed list. Taken before selection; `audio_tracks` is what was used.
+            "audio_tracks_available": getattr(args, "audio_tracks_available", []),
+            "audio_tracks": getattr(args, "audio_tracks_used", []),
+            "audio_tracks_requested": getattr(args, "audio_tracks_requested", []),
+            # The single whole-timeline mp3: its name, size, length and how many items it holds.
+            "timeline_audio": getattr(args, "timeline_audio", {}) or {},
             "crf": (None if parse_bitrate(getattr(args, "bitrate", None) or "")
                     else crf_of(args)),
             "bitrate": (getattr(args, "bitrate", None) or None),
@@ -3152,9 +3920,11 @@ def main():
                          "(omit it to be walked through step by step)")
     ap.add_argument("--pick", type=Path, metavar="FILE",
                     help="cut only the clips listed in FILE, one per line as "
-                         "'TRACKTYPE TRACKINDEX TIMELINEIN' (e.g. 'video 1 0'). Written "
-                         "by the Premiere panel when individual clips are unticked; a "
-                         "long timeline is too many clips for the command line.")
+                         "'TRACKTYPE TRACKINDEX TIMELINEIN TIMELINEOUT' (e.g. "
+                         "'video 1 448 536'). Written by the Premiere panel when "
+                         "individual clips are unticked; a long timeline is too many "
+                         "clips for the command line. Three fields still work and mean "
+                         "any cut starting there.")
     ap.add_argument("--panel", type=Path, metavar="DUMP.json",
                     help="overlay a panel dump on the XML: adds real speed-ramp "
                          "keyframes and repairs stale media paths, and cross-checks "
@@ -3169,7 +3939,17 @@ def main():
                          "every sequence in the project into one XML)")
     ap.add_argument("--list-sequences", action="store_true",
                     help="list the sequences in the XML and exit")
-    ap.add_argument("--vcodec", default="libx264", help="video encoder (default libx264)")
+    # NO default here, deliberately. vcodec_of() supplies libx264 for every reader, and
+    # leaving this None is what lets --export-preset below tell "the encoder was not given"
+    # from "the encoder was given as libx264": with a default of "libx264" the stored
+    # encoder never passed that loop's `in (None, "")` test, so a preset saved at H.265
+    # loaded from a terminal exported H.264 without saying so. Same trap --container is
+    # still special-cased for, one line further down.
+    ap.add_argument("--vcodec", default=None, choices=["libx264", "libx265"],
+                    help="video encoder. libx264 (H.264, default) plays everywhere; "
+                         "libx265 (H.265/HEVC) makes roughly half the file at the same "
+                         "crf and is slower to encode and to decode. The two crf scales "
+                         "are NOT the same number — x265 crf 28 is about x264 crf 23.")
     ap.add_argument("--container", default="mp4",
                     help="output container: mp4 (default) or mov. The video is identical "
                          "in both — H.264 High, 4:2:0, no audio; only the wrapper "
@@ -3184,6 +3964,47 @@ def main():
     ap.add_argument("--bitrate", metavar="RATE",
                     help="target an average bitrate instead of a quality (e.g. 8M, "
                          "5000k). Makes file size predictable; ignores --crf.")
+    ap.add_argument("--whole-frames", dest="whole_frames", action="store_true",
+                    help="keep only the frames that lie WHOLLY inside each cut's source range: "
+                         "a fractional start moves up to the next frame, a fractional end down "
+                         "to the previous one. A tick-derived in-point rarely lands on a frame "
+                         "boundary, and without this a cut can hold one frame at each end that "
+                         "the editor never saw there. Costs at most one frame per end.")
+    ap.add_argument("--render-dir", dest="render_dir", type=Path, metavar="DIR",
+                    help="cut from PRE-RENDERED TIMELINE RANGES in DIR instead of from the "
+                         "raw source media, so everything done on the timeline comes out "
+                         "with the clip: colour, titles, Motion, transitions, speed ramps. "
+                         "Each file must be named for the cut it covers, "
+                         "'TRACKTYPE-TRACKINDEX-TIMELINEIN-TIMELINEOUT.mp4' — the same "
+                         "geometry --pick matches on. The Premiere panel writes them; a "
+                         "cut with no render "
+                         "fails rather than falling back to its source, because a folder "
+                         "half with effects and half without is worse than a clear failure.")
+    ap.add_argument("--render-planned", dest="render_planned", action="store_true",
+                    help="a SCAN flag, meaningless on an export: report the cut list as it "
+                         "will be once Premiere has rendered it. Without this a scan marks "
+                         "an After Effects comp and an offline clip as uncuttable — true of "
+                         "the source, false of a render — and a front end that trusts it "
+                         "never asks for the render that would have worked.")
+    ap.add_argument("--video-track", dest="video_track", type=int, default=0,
+                    metavar="N",
+                    help="with --render-dir, which video track defines the shots. A render "
+                         "is the whole picture at that instant, so a title on V2 over a "
+                         "clip on V1 would otherwise produce two files of identical pixels: "
+                         "one track supplies the cut list and everything above it is IN the "
+                         "picture rather than in the list. 0 keeps every video track.")
+    ap.add_argument("--audio", action="store_true",
+                    help="write ONE mp3 for the whole timeline: everything the chosen audio "
+                         "tracks were playing, at their timeline positions, with the gaps as "
+                         "silence, exactly as long as the sequence. Lands as "
+                         "_timeline_audio.mp3 in the output folder. Narrow it with "
+                         "--audio-tracks.")
+    ap.add_argument("--audio-tracks", dest="audio_tracks", metavar="LIST",
+                    help="which audio tracks the voice-over mix reads, as timeline track "
+                         "numbers: \"2\" for A2 alone, \"1,2\" for both, omitted for all of "
+                         "them. Only meaningful with --audio. A timeline usually has the "
+                         "clips' own linked audio on A1 and the voice-over above it, and a "
+                         "dataset of what was SAID wants one of those and not the other.")
     ap.add_argument("--size-probe", dest="size_probe", action="store_true",
                     help="MEASURE the size estimate instead of modelling it, by encoding "
                          "about a second of each clip at the chosen settings. Accurate to "
@@ -3266,14 +4087,7 @@ def main():
     # record four numbers.
     if args.presets_only:
         if args.save_preset:
-            save_preset(args.save_preset, {
-                "container": args.container,
-                "crf": (None if parse_bitrate(args.bitrate or "") else args.crf),
-                "bitrate": args.bitrate or None,
-                "x264_preset": args.x264_preset,
-                "fps": args.fps,
-                "scale": args.scale,
-            })
+            save_preset(args.save_preset, preset_from_args(args))
         print(json.dumps({"ok": True, "saved": args.save_preset,
                           "presets": load_presets()}))
         return
@@ -3412,6 +4226,36 @@ def main():
             merge_notes = ["--tracks audio: the panel overlay adds nothing to audio "
                            "cuts, so it was skipped"]
 
+    # ⚠️ THE AUDIO ITEMS ARE KEPT even when --tracks drops them as outputs. They are the SOURCE
+    # of the voice-over mix, and "should audio clipitems become files of their own" is a different
+    # question from "what was playing over this shot". Taken before the filter, because after it
+    # they are gone.
+    tl.audio_items = [c for c in tl.cuts if c.track_type == "audio"]
+    # WHICH of those tracks the mix may read. Parsed here, once, so every later reader sees a
+    # set of ints rather than re-parsing a string — and an unknown number is dropped with a
+    # warning rather than silently selecting nothing.
+    want = parse_track_list(getattr(args, "audio_tracks", None))
+    have = sorted({a.track_index for a in tl.audio_items})
+    if want:
+        missing = [n for n in sorted(want) if n not in have]
+        if missing:
+            tl.warnings.append(
+                f"--audio-tracks names A{', A'.join(str(n) for n in missing)}, which this "
+                f"timeline does not have (it has "
+                + (", ".join(f"A{n}" for n in have) if have else "no audio tracks") + ")")
+        tl.audio_items = [a for a in tl.audio_items if a.track_index in want]
+    args.audio_tracks_used = sorted({a.track_index for a in tl.audio_items})
+    # ⚠️ WHAT WAS ASKED FOR, kept apart from what was used. A filter that fails to apply reports
+    # every track as "used" and so looks exactly like "all tracks were requested" — the two have
+    # to be separate numbers for a verifier to tell them apart.
+    args.audio_tracks_requested = sorted(want)
+    args.audio_tracks_available = [
+        {"index": n, "items": sum(1 for a in tl.cuts
+                                  if a.track_type == "audio" and a.track_index == n)}
+        for n in have]
+    # Carried on args because that is what every run_cut() call already takes. Not a module
+    # global: two sequences in one process would then share one timeline's voice-over.
+    args.vo_items = tl.audio_items
     if args.tracks != "all":
         tl.cuts = [c for c in tl.cuts if c.track_type == args.tracks]
     tl.cuts = [c for c in tl.cuts if c.duration_frames >= args.min_frames]
@@ -3428,6 +4272,20 @@ def main():
         tl.cuts = [c for c in tl.cuts
                    if Path(c.source_path).suffix.lower().lstrip(".") in want]
         print(f"  --ext {','.join(sorted(want))}: kept {len(tl.cuts)} of {before} cuts")
+    # ⚠️ THIS MUST RUN BEFORE --pick, and it did not.
+    #
+    # pick_key is (track type, track index, timeline IN, timeline OUT). The SCAN writes
+    # split ranges into the manifest, the panel builds its selectors from those, and the
+    # export then matched them against ranges the split had not touched yet — so every cut
+    # a transition had moved failed to match and was filtered away. Reported as "it miss
+    # all the clip with transition", which is exactly that set.
+    if getattr(args, "render_planned", False) or getattr(args, "render_dir", None):
+        n_split = split_transition_overlaps(tl.cuts, tl.sequence_fps)
+        args.transitions_split = n_split
+        if n_split:
+            print(f"\n  split {n_split} cross-dissolve overlap(s) at the midpoint, so no "
+                  f"two cuts hold the same frame")
+
     if args.pick:
         # Also before indices are assigned, for the same reason --ext is: a run limited
         # to a handful of clips should number them 01..N, not leave gaps.
@@ -3435,19 +4293,50 @@ def main():
         # Selectors are read from a FILE rather than the command line because a long
         # timeline is hundreds of clips and that is a lot of argv. One per line:
         #
-        #     video 1 0          track type, track index, timeline in-point in frames
+        #     video 1 448 536    track type, track index, timeline in and out, in frames
         #
-        # Matching on (type, track, timeline-in) rather than an index, because an index
-        # depends on what else was filtered and would silently select the wrong clip.
+        # Matching on the geometry rather than an index, because an index depends on what
+        # else was filtered and would silently select the wrong clip. The OUT-POINT is in
+        # there because two cuts under a cross-dissolve share an in-point — see pick_key().
         want_keys = read_pick_file(args.pick)
         before = len(tl.cuts)
-        tl.cuts = [c for c in tl.cuts if pick_key(c) in want_keys]
+        tl.cuts = [c for c in tl.cuts if pick_matches(c, want_keys)]
         args.picked = len(tl.cuts)
         print(f"  --pick: kept {len(tl.cuts)} of {before} cuts")
-        missing = len(want_keys) - len(tl.cuts)
+        missing = unmatched_picks(want_keys, tl.cuts)
         if missing > 0:
             print(f"  !! {missing} selection(s) in {Path(args.pick).name} matched no clip "
                   f"— the timeline may have changed since it was written")
+
+    if getattr(args, "render_dir", None):
+        # BEFORE indices are assigned, for the same reason --pick is: a run limited to one
+        # track should number its clips 01..N rather than leave gaps where V2 used to be.
+        want = int(getattr(args, "video_track", 0) or 0)
+        before = len(tl.cuts)
+        tl.cuts = [c for c in tl.cuts
+                   if c.track_type == "video" and (not want or int(c.track_index) == want)]
+        dropped = before - len(tl.cuts)
+        matched, missing = attach_renders(tl.cuts, Path(args.render_dir))
+        args.render_matched = matched
+        args.render_missing = len(missing)
+        print(f"\n  --render-dir: {matched} of {len(tl.cuts)} cut(s) have a render"
+              + (f" ({dropped} not on video track {want} left out)" if dropped else ""))
+        if missing:
+            # Named, not counted. "3 cuts have no render" sends you looking through the
+            # whole timeline; the filenames say exactly which ranges Premiere skipped.
+            print(f"  !! {len(missing)} cut(s) have no render and will NOT be cut from "
+                  f"their source instead:")
+            for c in missing[:10]:
+                print(f"       {render_name(c)}  {c.clip_name}")
+            if len(missing) > 10:
+                print(f"       ... and {len(missing) - 10} more")
+
+    if getattr(args, "render_planned", False) and not getattr(args, "render_dir", None):
+        # Scan only. On an export --render-dir is what decides, and attach_renders has
+        # already said which cuts really have a file.
+        for c in tl.cuts:
+            if c.track_type == "video":
+                c.render_planned = True
 
     for i, c in enumerate(tl.cuts, start=1):
         c.index = i
@@ -3455,6 +4344,18 @@ def main():
             c.frame_exact = False
     # Named now, while the list is final — so --manifest-only and the sheet can show the
     # filenames without a single frame being encoded.
+    # BEFORE the names and the manifest: both are built from the ranges this may change.
+    if getattr(args, "whole_frames", False) and getattr(args, "render_dir", None):
+        # A timeline range starts and ends on whole frames by construction — there is no
+        # fractional source position left to pull in from. Said out loud rather than
+        # ignored, so a tick that stopped doing anything does not look like it still is.
+        print("\n  --whole-frames has nothing to do in render mode: a timeline range "
+              "already starts and ends on frame boundaries")
+    elif getattr(args, "whole_frames", False):
+        n_trim = trim_to_whole_frames(tl.cuts)
+        if n_trim:
+            print(f"\n  --whole-frames: pulled {n_trim} cut(s) in to frame boundaries "
+                  f"({sum(c.frames_trimmed for c in tl.cuts)} frame(s) dropped in total)")
     assign_output_names(tl.cuts, args.container, tl.sequence_fps)
 
     print(f"{NAME} {VERSION}")
@@ -3574,14 +4475,7 @@ def main():
         print()
 
     if args.save_preset:
-        save_preset(args.save_preset, {
-            "container": args.container,
-            "crf": (None if parse_bitrate(args.bitrate or "") else args.crf),
-            "bitrate": args.bitrate or None,
-            "x264_preset": args.x264_preset,
-            "fps": args.fps,
-            "scale": args.scale,
-        })
+        save_preset(args.save_preset, preset_from_args(args))
         print(f"  saved export preset {args.save_preset!r} to {presets_path()}")
 
     print(f"\nCutting with {JOBS} parallel job(s) ...")
@@ -3598,6 +4492,16 @@ def main():
             print(f"  [{done}/{len(tl.cuts)}] {flag} {c.output_file}")
             if c.error:
                 print(f"        {c.error.splitlines()[0][:160]}")
+
+    # The single whole-timeline mp3, after the cuts and before the manifest that records it.
+    if getattr(args, "audio", False):
+        args.timeline_audio = write_timeline_audio(tl, args)
+        if args.timeline_audio.get("file"):
+            print(f"\n  one file for the whole timeline: {args.timeline_audio['file']} "
+                  f"({args.timeline_audio['seconds']:.2f}s, "
+                  f"{args.timeline_audio['parts']} item(s))")
+        elif args.timeline_audio.get("note"):
+            print(f"\n  no whole-timeline audio: {args.timeline_audio['note']}")
 
     csv_p, json_p, sheet_p = write_manifest(tl, args.out, args)
     tally = collections.Counter(c.status for c in tl.cuts)

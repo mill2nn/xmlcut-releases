@@ -9,9 +9,19 @@
  * "notice"; nothing said which to use, so each new message invented another. 9px was being
  * used for information that mattered.
  *
- *   --fs-head  13px   the panel title
- *   --fs-base  11px   body text, controls, table cells
- *   --fs-small 10px   secondary text: hints, notes, meta
+ *   --fs-head  14px   the panel title
+ *   --fs-base  12px   body text, controls, table cells
+ *   --fs-small 11px   secondary text: hints, notes, meta
+ *
+ * ⚠️ THE SCALE WAS UPSIDE DOWN, and it was measured that way: 94 rendered elements at the
+ * SECONDARY size against 8 at the base one. The size reserved for hints and meta was
+ * carrying almost all the content, and the size meant for content was nearly unused — which
+ * is why the panel read as flat and busy at the same time. "it look kinda all over the
+ * place", 19 Aug.
+ *
+ * Everything moved up one step rather than being re-tagged element by element: the ~90
+ * elements sitting at --fs-small are mostly RIGHT to be there, they were just being drawn
+ * two steps below the title instead of one. 9px labels went with them.
  */
 /* NEON ON NEAR-BLACK. EVERY RATIO BELOW WAS COMPUTED, NONE WAS ESTIMATED.
  *
@@ -70,9 +80,9 @@
      * off is one edit rather than fifteen. */
     --glow: 0 0 10px;
 
-    --fs-head: 13px;
-    --fs-base: 11px;
-    --fs-small: 10px;
+    --fs-head: 14px;
+    --fs-base: 12px;
+    --fs-small: 11px;
 }
 
 * { box-sizing: border-box; }
@@ -92,7 +102,12 @@
 body {
     margin: 0;
     padding: 12px;
-    max-width: 780px;
+    /* 1400, not 780. The old cap was written when this was one narrow column and a wide
+     * window only stretched a button; the two-column layout then raised it to 1200 in a rule
+     * of its own. Both are gone, and 780 would now waste 200px of his actual undocked width
+     * (~985 CSS px, measured). 1400 does not bite at any width he uses and still stops the
+     * action bar from putting its estimate and its button a metre apart on a 2000px window. */
+    max-width: 1400px;
     background: var(--bg);
     color: var(--fg);
     font: var(--fs-base)/1.5 -apple-system, "Segoe UI", sans-serif;
@@ -100,29 +115,107 @@ body {
     user-select: none;
 }
 
-/* Two columns once there is room: the cut list on the left where it can use the width,
- * the export controls in a fixed column beside it. The whole block stays left-aligned
- * rather than centred — it is a panel, and a centred island reads as a web page.
+/* ─────────────────────────────────────────── ONE COLUMN, and a strip
  *
- * Only #step3 moves. Progress and the report stay full width because they replace the
- * chooser rather than sitting beside it, and the report is a long list. */
-@media (min-width: 920px) {
-    body {
-        max-width: 1200px;
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
-        gap: 0 26px;
-        align-items: start;
-        align-content: start;
-    }
-
-    header, .nextline, .gearmenu, #updbar, #prog, #report, #err, #adv {
-        grid-column: 1 / -1;
-    }
-
-    .step { grid-column: 1; }
-    #step3 { grid-column: 2; }
+ * The two-column grid is GONE, and with it `body.cols`, `.pane`, and the pair of layout bugs
+ * it produced. Both of them were the same bug in different clothes: a fixed 380px column of
+ * settings, permanently holding a third of the width for the content that changes least,
+ * while the clip list — the thing that grows with every timeline — was squeezed into the
+ * rest and its rows split their data to opposite edges.
+ *
+ * What it cost while it existed, measured in headless Chrome:
+ *   380px reserved even when the column was empty  (the empty-gutter bug, v3.26)
+ *   #step3 auto-placed into the row after the list, so the whole area right of TIMELINE
+ *     was dead space and EXPORT began 215px below it  (v3.27)
+ *   everything past 1200px wasted, because the grid capped there
+ *
+ * Now: sequence, then the settings strip, then the list, then the action bar. Each spans the
+ * panel. Nothing is reserved for anything, so nothing can be reserved and empty. There is no
+ * width above which the panel stops using the space, and no breakpoint at all — the strip's
+ * fields wrap on their own, which is why this section has no media query. */
+/* THE STRIP. Fields side by side, each showing its label and its current value, wrapping
+ * when there is not room rather than scrolling or squeezing. Docked at 320px it becomes a
+ * single column of fields, which is what the settings used to be everywhere. */
+.strip {
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 5px;
 }
+/* A GRID of equal tracks, not a flex row.
+ *
+ * Flex wrapping sized each field to its own content, so the fields on the second row did not
+ * line up with the ones above them — "Frame rate" started 39px left of "Encoder" — and the
+ * strip read as ragged rather than as a set of settings. Worse, a field that wrapped ALONE
+ * onto a row grew to fill it: measured at a 1000px panel, the destination field was 950px
+ * wide holding an 840px path box.
+ *
+ * auto-fit does the responsive work: as many ~150px tracks as fit, one track at a 320px dock.
+ * Columns line up on every row by construction. There is one breakpoint in the whole layout
+ * and it is below — a span has to be switched off for the single-track case, because a span
+ * forces tracks into existence whether they fit or not. */
+.fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+    gap: 12px 18px;
+    align-items: start;
+}
+.field {
+    min-width: 0;
+    display: grid;
+    gap: 5px;
+    align-content: start;
+}
+/* Two tracks each for the only field holding a slider and the only one holding a path — but
+ * ONLY once two tracks can exist.
+ *
+ * ⚠️ `span 2` FORCES the repetition count up. auto-fit fits as many tracks as the space allows
+ * and then raises that count to accommodate the largest span, so at a 320px dock the strip got
+ * two tracks whether or not they fitted: computed `148px 104px`, a 104px track holding a
+ * select, and the fields never reached one column. Measured with the body constrained to 320
+ * border-box: 6 fields in 4 rows, narrowest select 104px.
+ *
+ * Two 148px tracks plus their 18px gap need 314px of field area, which is a ~364px panel. The
+ * query sits at 420 to leave the cramped end out of it. It is the ONE breakpoint in the
+ * layout, and it is here rather than around the grid itself because the grid needs none. */
+@media (min-width: 420px) {
+    .f-qual, .f-dest { grid-column: span 2; }
+    /* Audio names a track and a count — "A2 only · 3 items" — which needs more than a track. */
+    .f-audio { grid-column: span 2; }
+}
+
+/* The field's own label line: name, its tooltip, and the readout that used to sit in a row
+ * of its own inside the control. One label per control, not two. */
+.flbl {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.flbl .crfread { margin-left: auto; color: var(--fg); }
+/* Secondary controls ride under their field's main one — the preset's Save and Delete, the
+ * destination's resume tick — so they stay attached to what they act on. */
+.fsub { display: flex; gap: 6px; align-items: center; font-size: 11px; }
+.fsub .mini { margin: 0; }
+
+/* Inside a field, a select and a path row fill it rather than sitting at some inherited
+ * width. `.sel` is margin-left:auto elsewhere in the panel, which would push it off the end
+ * of a field. */
+.field .sel, .field select { margin: 0; max-width: none; width: 100%; }
+/* ⚠️ min-width: 0 IS LOAD-BEARING HERE. A grid item's automatic minimum is min-content, and
+ * the path row's min-content includes the path box — so the row sized itself to the path and
+ * overflowed its own field, pushing the Change button off the right edge of the panel.
+ * Measured at a 700px panel: field 306px, row 331px, Change ending exactly on the edge.
+ * The path already shrinks (flex + overflow hidden); what it needed was permission to. */
+.field .pathrow { margin: 0; min-width: 0; }
+.field .pathrow .mini { flex: 0 0 auto; }
+.field .qblock { margin: 0; }
+.field .tick { margin: 0; }
 
 /* ---------------------------------------------------------- scrollbars */
 
@@ -380,10 +473,6 @@ button.mini.wide { width: 100%; margin-top: 8px; }
  * added to the heading rather than replacing anything — the same rule as the sliders: mark
  * the state by ADDING, never by degrading what is already there. */
 .step.done { margin-bottom: 12px; }
-.step.done .stepnum {
-    background: var(--ok);
-    box-shadow: var(--glow) rgba(63, 240, 138, .32);
-}
 .step.done .stephead::after {
     content: "✓";
     color: var(--ok);
@@ -408,22 +497,11 @@ button.mini.wide { width: 100%; margin-top: 8px; }
     letter-spacing: .04em;
 }
 
-/* The step badge. Named `stepnum`, NOT `num`: the table's numeric cells use `class="num"`,
+/* The step badge is gone with the numbering — settings are not a stage you pass through, so
+ * numbering the other two implied a sequence the panel does not have. Kept in this comment
+ * only because the naming lesson still applies to anything added here: `stepnum`, NOT `num`,
+ * because the table's numeric cells use `class="num"`,
  * and that collision turned every frame count into a blue circle on the column header. */
-.stepnum {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex: 0 0 auto;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: var(--accent);
-    color: #07121a;
-    font-weight: 700;
-    font-size: var(--fs-small);
-    box-shadow: var(--glow) rgba(0, 180, 255, .3);
-}
 
 .lbl {
     display: flex;
@@ -478,11 +556,28 @@ button.mini.wide { width: 100%; margin-top: 8px; }
 
 .tablewrap[hidden] { display: none; }
 
+/* The list stays on screen while it is being re-read, dimmed rather than removed. Blanking
+ * it left a hole the width of a column, and everything beside it went on quoting numbers
+ * for a list that was no longer there — see scanClips(). Dimming says "this is the last
+ * list read, a new one is coming" without taking it away.
+ *
+ * Opacity only: no pointer-events change, because the ticks are keyed by clip and survive
+ * the replacement, so there is nothing to protect the reader from. */
+.tablewrap.rescanning {
+    opacity: 0.5;
+    transition: opacity 120ms linear;
+}
+
 table {
     width: 100%;
     table-layout: fixed;
     border-collapse: collapse;
-    font-size: var(--fs-small);
+    /* ⚠️ THE CLIP LIST IS CONTENT, not meta. It sat at --fs-small, which measured as 32 of
+     * the 94 elements drawn at the SECONDARY size — the thing you read most, one step below
+     * where it belongs, on a surface where almost everything else was secondary too. That
+     * is the inversion, not the absolute sizes: the 22 question marks and 16 mini buttons
+     * alongside it are correctly small and stay where they are. */
+    font-size: var(--fs-base);
 }
 
 thead th {
@@ -528,8 +623,6 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 th.pick, td.pick { width: 20px; padding-right: 0; text-align: center; }
 th.pick input, td.pick input { margin: 0; accent-color: var(--accent); }
 th.idx, td.idx { width: 22px; }
-th.spd, td.spd { width: 40px; }
-th.frm, td.frm { width: 38px; }
 th.siz, td.siz { width: 50px; }
 th.sts, td.sts { width: 54px; }
 
@@ -540,9 +633,7 @@ th.sts, td.sts { width: 54px; }
  *
  * 460px is where the widened set (302px) still leaves the name over 130px. */
 @media (min-width: 460px) {
-    th.idx, td.idx { width: 24px; }
-    th.spd, td.spd { width: 44px; }
-    th.frm, td.frm { width: 52px; }     /* the heading is 40px before its ? */
+    th.idx, td.idx { width: 24px; }     /* the heading is 40px before its ? */
     th.siz, td.siz { width: 78px; }     /* "▲ 41.2 MB" */
     th.sts, td.sts { width: 84px; }     /* "missing source" */
 }
@@ -810,6 +901,115 @@ body.scrubbing, body.scrubbing * {
 tr.over td { background: rgba(217, 164, 65, .09); }
 td.siz.over, .repcount.hit { color: var(--warn); }
 
+/* The spacer takes all the slack, so the six data columns keep their measured widths and sit
+ * together on the left however wide the panel gets. Without it the clip-name column absorbed
+ * everything: 266px of column for 101px of name at a 1000px panel, and 165px of empty row
+ * between each clip and its size. */
+
+/* ─────────────────────────────────────────────── the run, on the rows
+ *
+ * One rail down the left edge of the row, in the state's colour. This is what replaced two
+ * separate lists: the panel used to hide this table during an export, draw #joblist in its
+ * place, then hide that and draw #rows for the report — the same clips three times, in three
+ * visual languages, with the ticks and the type colours only in the first.
+ *
+ * The rail is on the FIRST cell rather than a row border, because a border on a <tr> does
+ * not paint in a border-collapse table. Precedence is decided in renderClips() and only one
+ * class arrives here; the order below is a safety net for the day two do.
+ *
+ * The tint is deliberately fainter than the rail: nineteen rows of solid colour is a
+ * barcode, and what you scan for is the one row that is not like the others. */
+tbody tr.st-run td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+tbody tr.st-ok td:first-child { box-shadow: inset 2px 0 0 var(--ok); }
+tbody tr.st-over td:first-child { box-shadow: inset 2px 0 0 var(--warn); }
+tbody tr.st-bad td:first-child { box-shadow: inset 2px 0 0 var(--bad); }
+tbody tr.st-kept td:first-child { box-shadow: inset 2px 0 0 var(--off); }
+
+tbody tr.st-run td { background: rgba(0, 180, 255, .07); }
+tbody tr.st-bad td { background: rgba(255, 84, 112, .09); }
+/* Left alone by --resume: nothing happened to it this run, and it should read that way
+ * rather than as a result. */
+tbody tr.st-kept td { color: var(--off); }
+
+/* The size cell in each of its three lives. `actual` is a fact — the file is on disk — and
+ * it replaces the estimate in the same cell, so there is never a moment where two numbers
+ * for one clip are on screen inviting you to read the wrong one. */
+td.siz.running { color: var(--accent); }
+td.siz.actual { color: var(--ok); }
+td.siz.actual.over { color: var(--warn); }
+td.sts.why { color: var(--bad); }
+
+/* ─────────────────────────────────────────────── the action bar
+ *
+ * One bar along the bottom, and the rule it exists to keep: THE NUMBER AND THE NEXT ACTION
+ * ARE ALWAYS TOGETHER. An estimate beside Export, progress beside Cancel, the result beside
+ * Export again. Before this the estimate sat at the foot of the settings column while
+ * progress and the report arrived as new sections lower down the page — on a wide panel the
+ * first was in a different column from the other two, and each of the three appeared
+ * somewhere the last one had not been.
+ *
+ * Raised off the ground and separated by a rule, so it reads as the panel's floor rather
+ * than as one more block in the scroll. Not `position: sticky`: the page is short, four
+ * scroll regions already compete inside it, and a sticky footer over a scrolling table is
+ * how the clip you were reading ends up behind a button. */
+.actionbar {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+    display: grid;
+    gap: 9px;
+}
+
+/* Facts left, buttons right, and it collapses to two stacked rows before either half has to
+ * squeeze — a wrapped row of buttons under the number it belongs to still reads as one
+ * statement. */
+.abrow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px 14px;
+    flex-wrap: wrap;
+}
+.abstack { display: grid; gap: 8px; }
+.abfacts {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 190px;
+    min-width: 0;
+    flex-wrap: wrap;
+}
+.abacts {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+/* The estimate is a plain line inside the bar now, not a boxed note stacked above a button:
+ * the box drew a border around the one thing that did not need separating from what it was
+ * describing. */
+.actionbar #sizeest {
+    background: none;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    color: var(--dim);
+}
+.actionbar #sizeest.warn { color: var(--warn); }
+/* The primary keeps its weight but stops being a full-width slab — it sits at the end of the
+ * bar, where the eye lands after reading the number. */
+.actionbar .primary { width: auto; min-width: 132px; margin: 0; }
+.actionbar .mini { margin: 0; }
+.actionbar .bar { margin: 0; }
+.actionbar .tally { margin: 0; }
+.actionbar .repbar { margin: 0; }
+
+/* Locked, not hidden. The settings stay readable while a run is going — you cannot change
+ * them mid-encode, and that is what dimming says. Pointer events go too, so a click cannot
+ * land on a control that looks inert. */
+body.running #step3 { opacity: .55; pointer-events: none; }
+body.running #types { opacity: .55; pointer-events: none; }
+
 .sel {
     margin-left: auto;
     max-width: 150px;
@@ -825,15 +1025,7 @@ td.siz.over, .repcount.hit { color: var(--warn); }
 .sel.wide { margin-left: 0; max-width: none; width: 100%; }
 
 /* Two labelled fields on one row: the quality mode and its value. */
-.row2cols {
-    display: grid;
-    grid-template-columns: auto 1fr auto 1fr;
-    align-items: center;
-    gap: 6px;
-    margin-top: 4px;
-}
 
-.row2cols .tick { margin-top: 0; white-space: nowrap; }
 
 input.num {
     min-width: 0;
@@ -913,43 +1105,15 @@ input.num:disabled { color: var(--off); border-color: #1a1f27; }
 .repbar .tick { margin-top: 0; }
 .repcount { color: var(--dim); font-size: var(--fs-small); }
 
-.rows {
-    max-height: 300px;
-    overflow-y: auto;
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    background: var(--card);
-}
 
 .rows[hidden] { display: none; }
 
 /* ONE line per clip: the name truncates, the facts sit right. It used to be two lines, with
  * the source range restated in seconds when the filename already carries it and "on the
  * timeline" repeated on every retimed row. */
-.row2 {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    padding: 4px 8px;
-    border-bottom: 1px solid #242b36;
-    font-size: var(--fs-small);
-}
 
-.row2:last-child { border-bottom: 0; }
 
-.row2 .nm {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--fg);
-    font: var(--fs-small)/1.4 ui-monospace, Menlo, monospace;
-    -webkit-user-select: text;
-    user-select: text;
-}
 
-.row2 .facts { flex: 0 0 auto; color: var(--dim); font-variant-numeric: tabular-nums; }
 /* FOUR outcomes, one visual language, used identically by the live job list and by the
  * report. Each is a coloured rail plus a marker in the row's own text — added, never taken
  * away from the others, so a list of nineteen is read by running down the rail:
@@ -965,38 +1129,22 @@ input.num:disabled { color: var(--off); border-color: #1a1f27; }
  *
  * padding-left drops by the width of the rail on every state, so the rows do not shift
  * sideways as their outcomes arrive. */
-.row2.isbad { background: #2a1218; border-left: 2px solid var(--bad); padding-left: 6px; }
-.row2.isbad .nm { color: var(--bad); }
-.row2.iswarn .facts { color: var(--warn); }
 
-.row2.isok {
-    border-left: 2px solid var(--ok);
-    padding-left: 6px;
-    background: rgba(63, 240, 138, .05);
-}
 
 /* The filename stays --fg for readability; the TICK carries the colour. A column of green
  * filenames is harder to read than a column of white ones, and the thing being reported is
  * the outcome, not the name. */
-.row2.isok .nm { color: var(--fg); }
-.row2.isok .facts { color: var(--ok); }
 
 /* Kept by --resume: correct, present, and not this run's work. Neither green nor a problem. */
-.row2.iskept { border-left: 2px solid var(--off); padding-left: 6px; }
-.row2.iskept .nm { color: var(--dim); }
 
 /* Still encoding. No rail colour yet — an unfinished clip has no outcome to report, and
  * guessing one green before ffmpeg has closed the file is how a truncated write gets
  * reported as fine. */
-.row2.isrun { border-left: 2px solid var(--accent); padding-left: 6px; }
-.row2.isrun .facts { color: var(--accent); }
 
 /* Over the size flag. A rule down the left rather than a background, so it reads as a
  * separate axis from isbad/iswarn and a row can carry both at once. padding-left drops by
  * exactly the width of the rule: without it, flagged rows sit 2px right of their
  * neighbours and the list looks ragged for a reason nobody can name. */
-.row2.isover { border-left: 2px solid var(--warn); padding-left: 6px; }
-.row2.isover .facts { color: var(--warn); }
 
 .mergeline { color: var(--dim); font-size: var(--fs-small); line-height: 1.45; }
 .mergeline + .mergeline { margin-top: 2px; }
@@ -1075,3 +1223,215 @@ code, .log {
 }
 
 .tip[hidden] { display: none; }
+
+/* ==========================================================================
+   ZERO CHROME — the settings strip, chosen 19 Aug over seven other layouts.
+   "it bit too much on the eye is there any way to make it more readable"
+
+   The count was the symptom, not the cause. Nine fields each carried a label, a
+   question mark, a control, usually a sub-line and sometimes a note, so the eye met
+   nine different SHAPES rather than one rhythm. This removes shapes, not settings —
+   every one of them is still on screen, which is the standing rule.
+
+   Three moves:
+     controls look like TEXT until touched — no border until hover or focus
+     labels go quiet and small; the VALUE is what you are looking for
+     every tick and every consequence leaves the fields, so a field is label + control
+   ========================================================================== */
+
+/* A field is two things now. `gap: 1px` deliberately: the label belongs to its value
+   rather than floating between two of them. */
+.strip .fields { gap: 14px 16px; align-items: end; }
+.strip .field { gap: 1px; }
+
+.strip .flbl {
+    font-size: 10px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--dim);
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+}
+/* The readout sits at the right end of its own label, so a value and its name are one
+   line rather than two things at different heights. */
+.strip .flbl .crfread { margin-left: auto; color: var(--fg); font-weight: 600; }
+
+/* ⚠️ NINE BRIGHT QUESTION MARKS were nine dots competing with the values. Present,
+   still hoverable, not part of the scan until looked for. */
+.strip .flbl .q { opacity: .3; transition: opacity .12s, color .12s; }
+.strip .flbl:hover .q, .strip .flbl .q:focus { opacity: 1; color: var(--accent); }
+
+/* A control that reads as text. The bottom border is transparent rather than absent so
+   nothing moves by a pixel when it appears. */
+.strip .field .sel {
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid transparent;
+    border-radius: 0;
+    color: var(--fg);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 0;
+}
+.strip .field .sel:hover { border-bottom-color: var(--line); }
+.strip .field .sel:focus { border-bottom-color: var(--accent); outline: none; }
+
+/* THE MODE. Not a box and not a tint — one hairline under it says everything below is
+   downstream of it. Its own value is the only thing in the strip at accent colour. */
+.strip .f-mode { grid-column: 1 / -1; }
+.strip .f-mode .sel { color: var(--accent); font-size: 13px; }
+.strip .f-mode .sel:hover { border-bottom-color: var(--accent); }
+
+/* Every tick in one row, under a rule. */
+.strip .opts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    margin-top: 14px;
+    padding-top: 11px;
+    border-top: 1px solid var(--line);
+}
+.strip .opts .tick { margin: 0; font-size: var(--fs-small); color: var(--dim); }
+/* Inert, and shown as inert. A tick that cannot do anything must not look clickable. */
+.strip .opts .tick.inert { opacity: .45; }
+.strip .opts .tickwhy { font-style: normal; color: var(--off); }
+
+.strip .stripfoot {
+    margin-top: 11px;
+    font-size: var(--fs-small);
+    color: var(--dim);
+    line-height: 1.6;
+}
+.strip .stripfoot b { color: var(--fg); font-weight: 600; }
+.strip .stripfoot[hidden] { display: none; }
+
+/* ==========================================================================
+   GROUPED BY OUTCOME — the cut list, chosen 19 Aug.
+
+   The list and the report were two lists describing one run in two visual languages.
+   Grouping the list by what happened is the half of that the last revamp left undone:
+   the two failures on a 23-cut timeline sat at rows 6 and 20, which is a poor place to
+   keep the only rows you have to act on.
+
+   Nothing is hidden. Every group is open, always — the standing rule.
+   ========================================================================== */
+tbody tr.grouphead td {
+    padding: 13px 0 5px;
+    border-bottom: 1px solid var(--line);
+    color: var(--dim);
+}
+tbody tr.grouphead:first-child td { padding-top: 2px; }
+tbody tr.grouphead td .ghtitle {
+    font-size: 10px;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+}
+/* The count belongs to the heading, right-aligned, so a group's size reads without
+   counting rows. `float` rather than flex: a td set to flex stops being a table cell and
+   the colspan collapses. */
+tbody tr.grouphead td b { float: right; color: var(--fg); letter-spacing: 0; }
+tbody tr.grouphead.g-bad td { color: var(--bad); }
+tbody tr.grouphead.g-bad td b { color: var(--bad); }
+tbody tr.grouphead.g-run td { color: var(--accent); }
+tbody tr.grouphead.g-run td b { color: var(--accent); }
+tbody tr.grouphead.g-ok td b { color: var(--ok); }
+tbody tr.grouphead.g-kept td, tbody tr.grouphead.g-kept td b { color: var(--off); }
+tbody tr.grouphead.g-dead td, tbody tr.grouphead.g-dead td b { color: var(--warn); }
+
+/* With Speed and Frames gone the clip name takes their width. The reason the numbers
+   still sit beside the names is the pad spacer — see the <th class="pad"> note. */
+th.clipname, td.clipname { min-width: 0; }
+
+/* ── fixes from the 19 Aug screenshots ─────────────────────────────────────── */
+
+/* ⚠️ EVERY GROUP HEADING WAS MAROON. The headings reuse the `divider` class — deliberately,
+   so everything that skips dividers still skips them — and inherited the old
+   "cannot be cut" band: `background: #2a1218`. Only that one group is a warning. */
+tbody tr.grouphead td { background: transparent; text-transform: none; letter-spacing: 0; }
+tbody tr.grouphead.g-dead td { background: #2a1218; }
+
+/* ⚠️ DARK TEXT ON A DARK POPUP. A chromeless select needs its options coloured explicitly:
+   `background: transparent` on the control leaves the native menu with no ground of its
+   own, so "Half / Quarter / Eighth" rendered nearly invisible under the highlighted row. */
+.strip .field .sel option { background: var(--card); color: var(--fg); }
+
+/* Spacing. 1px between a 9px label and its value read as one clenched block, and a 16px
+   column gap let a full-width select butt into the next field's buttons. */
+.strip .fields { gap: 17px 20px; }
+.strip .field { gap: 4px; }
+.strip .opts { gap: 8px 18px; margin-top: 16px; padding-top: 12px; }
+.strip .stripfoot { margin-top: 13px; }
+
+th.sts, td.sts { width: 76px; }
+@media (min-width: 420px) {
+    /* Sized by MEASUREMENT, not by eye. The longest status the panel prints is
+       "AE comp — render it"; at 11px it needs 106px of text plus 8px of cell
+       padding. 104px clipped it by two pixels, which is how "ready — from …"
+       came to appear on 39 rows at once. */
+    th.sts, td.sts { width: 120px; }
+}
+
+/* The name takes the middle; Size and Status sit at the right edge.
+ *
+ * The old spacer column and the `max-width` cap on the name are both gone: max-width does
+ * not size a column under `table-layout: fixed`, so the cap never bound, and the browser
+ * split the slack equally between the name and the spacer — a void on the right exactly as
+ * wide as the clip name. Nothing to distribute now: the name is the only auto column. */
+td.clipname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ⚠️ THE TABLE STOPS GROWING. Two bad ends were tried before this one.
+ *
+ *   A spacer column absorbing the slack: `max-width` does not size a column under
+ *   table-layout: fixed, so the browser split the slack EQUALLY between the name and the
+ *   spacer — a void on the right exactly as wide as the clip name, 424px of it at 1100px.
+ *
+ *   No spacer, name takes everything: at 1600px the name column runs to ~1400px and the
+ *   size sits a screen away from the clip it belongs to, which is the original complaint
+ *   the spacer was invented to answer.
+ *
+ * Capping the TABLE answers both. 620px holds the longest real clip name this project has
+ * (38 characters of "Linked Comp 03 — long source name.mp4", ~250px at 11px) plus four
+ * fixed columns with headroom. Past that the area to the right is outside the table, so
+ * nothing draws in it: no row tint, no separator, no empty column. */
+#cliptable { max-width: 620px; }
+
+/* WHICH TRACKS ARE IN THE PICTURE. A row of ticks rather than one all-or-nothing switch:
+   an adjustment layer above the footage is on an upper track too, and hiding it threw away
+   grading meant for the shot. The master is ticked and locked — a render without the track
+   the cuts come from is a folder of black files. */
+.vinclude { display: flex; flex-wrap: wrap; gap: 4px 12px; padding-top: 2px; }
+.vintick {
+    display: flex; align-items: center; gap: 5px;
+    font-size: var(--fs-small); color: var(--dim);
+}
+.vintick input { margin: 0; accent-color: var(--accent); }
+.vintick.vinmaster { color: var(--fg); }
+.vinnone { font-size: var(--fs-small); color: var(--off); }
+.strip .flbl.vinclbl { margin-top: 7px; }
+
+/* ⚠️ THE GEAR MENU COVERS, IT NO LONGER DISPLACES.
+ *
+ * It sits ABOVE Read timeline in document order, so opening it pushed every region below
+ * it down by 215px — checking which engine is loaded moved the thing you were about to
+ * click. Measured at 620px: inserted at 75px, 215px tall.
+ *
+ * Absolute against the document rather than a wrapper, because the header is a flex row of
+ * three items and giving it a positioning context would have made the gear button's
+ * `margin-left: auto` the only thing holding the layout together. `left`/`right` match the
+ * body's own 12px padding so it lines up with everything else; `top` clears the header and
+ * the next-step line, which are both single lines of known height. */
+body { position: relative; }
+.gearmenu {
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    top: 62px;
+    z-index: 40;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 11px 12px;
+    box-shadow: 0 12px 32px -12px rgba(0, 0, 0, .75);
+}
+.gearmenu[hidden] { display: none; }

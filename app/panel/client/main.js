@@ -24,7 +24,7 @@
                "outpath", "pickout", "export", "prog", "barfill", "progtext",
                "cancel", "reveal", "again", "err", "adv", "scriptpath",
                "pickscript", "cmd", "log", "tip", "ver", "mode", "step3",
-               "report", "tally", "rows", "onlyprob", "repcount", "copyrep",
+               "report", "tally", "onlyprob", "repcount", "copyrep",
                "readhint", "scanning", "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
                "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn",
@@ -32,14 +32,18 @@
                "readprog", "readfill", "readtext", "pickall", "checkupd", "outdest",
                "gear", "gearmenu", "enginestat", "recheck",
                "repcomplete", "repdestrow", "repdest", "repdestlbl", "mergedet", "mergesum",
-               "jobtally", "joblist", "stalled", "copyout", "copydest",
+               "jobtally", "stalled", "copyout", "copydest",
                "preset", "crf", "fps", "fpswarn",
                "sizeest", "savepreset", "delpreset", "crfread", "sweetcrf",
                "crfblock", "cap", "capnote", "presetwarn",
                "nextline", "step1", "step1body", "readagain",
-               "remeasure",
-               "scale", "scaleread", "scaleblock",
-               "onlyproblab"];
+               "remeasure", "vcodec",
+               "scale", "scaleread",
+               "onlyproblab",
+               "actionbar", "barready", "retry", "audiosel", "wholeframes",
+               "pocrender", "pocnote",
+               "cutfrom", "vtrack", "vtrackfield",
+               "stripfoot", "wfwrap", "wfwhy", "vinclude"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -56,6 +60,53 @@
         total: 0,
         clips: [],       // the cut list, from a --manifest-only scan
         report: [],      // rows built from the manifest after a run
+        /* THE RUN, ON THE ROWS. clipKey -> {st, t0, t1, bytes, note}, where st is one of
+         * run · ok · over · bad · kept. This is what makes the table you planned with the
+         * table you watch and then read: three separate lists used to be built here — the
+         * plan, the job rows, the report rows — each hiding the one before it, in three
+         * different visual languages, and none of them keeping your ticks or the type
+         * colours. One list with a state per row replaces all of it. */
+        rowState: {},
+        /* An EXPORT is running. Kept apart from `busy`, which a scan also sets: a scan
+         * deliberately leaves the settings live, because it records the settings it ran at
+         * and the panel reports the difference as stale. A run cannot do that — the flags
+         * are already on ffmpeg's command line — so its settings lock instead. */
+        running: false,
+        // What the finished read said, held for the sequence card to print. The progress bar
+        // used to keep saying it, at 100%, for the rest of the session.
+        readDone: "",
+        // Every audio track this timeline has: [{index, items}], straight from the manifest.
+        audioTracks: [],
+        // What he last chose, remembered across sessions: "" · "all" · a track number.
+        audioWant: "",
+        /* WHERE THE PIXELS COME FROM: "source" cuts the camera originals, "render" cuts
+         * ranges Premiere rendered from the timeline, with the effects already in them.
+         * Held here as well as on the select because renderVideoTracks() rebuilds the
+         * track menu on every read and the choice has to survive that — the same reason
+         * audioWant is not read off the select either. */
+        cutFrom: "source",
+        // The MASTER track: the one whose clips become files.
+        vtrackWant: "",
+        /* Which tracks are IN THE PICTURE, as "1,3". Separate from the master because they
+         * answer different questions — where the cuts are, and what is visible in them.
+         * Empty means "not chosen yet"; renderVideoTracks fills it from the timeline. */
+        vIncludeWant: "",
+        // The render phase's own progress, read off a file Premiere writes as it goes:
+        // {done, total, current, failed}. Null when no render phase is running.
+        renderProg: null,
+        renderTimer: null,
+        /* The clips a RETRY is limited to, as clipKeys. Empty for an ordinary export. It is
+         * read once, when the pick file is written, and cleared there — a leftover here would
+         * silently narrow the next full export to the last failures. */
+        retryKeys: [],
+        // A report that has just been built, so "only problems" may tick itself once. Cleared
+        // as it is used — see renderReport().
+        reportFresh: false,
+        /* output filename -> clipKey. The engine announces a start by name AND key; the
+         * completion line carries only the name, so the key is remembered here as each
+         * clip starts. Empty for a clip that never starts (resume skipped it, or its
+         * source is missing) — those are filled in from the manifest after the run. */
+        jobKey: {},
         presets: {},     // named export settings, owned by the engine
         crfVal: 1,       // the one quality setting there is
         cap: 0,          // MB above which a clip is flagged as large; 0 = no flagging
@@ -63,9 +114,11 @@
         // the probe actually ran at, so the panel can say when the two have parted.
         probeCrf: 1,
         probeScale: 100,
+        probeVcodec: "libx264",
         // Set for ONE scan by the Re-measure button, then cleared. The default scan must
         // stay free, so this is never sticky.
         wantProbe: false,
+        scrubbing: false,   // composed into body's class by paintBody(), not written raw
         scale: 100,      // output resolution, percent of each source's own
         merge: [],       // the '++' lines xmlcut printed about the merge
         busy: false,
@@ -143,17 +196,36 @@
             .replace(/\n/g, "\\n") + '"';
     }
 
+    /* Reading happens WHERE THE SEQUENCE CARD WILL BE, not below a disabled button.
+     *
+     * The button and its hint used to stay on screen for the whole read — a full-width
+     * primary reading "Reading…" that could not be pressed, with the real progress in a bar
+     * underneath it. Two things claiming to be what you were waiting on, and when the card
+     * finally arrived it pushed everything down. Now the button steps aside for the duration
+     * and the card takes the same slot when it lands.
+     *
+     * n < 0 is a FAILED read, and it has to put the button back — there is no other way to
+     * try again from that state. */
     function readStage(n, extra) {
         if (n < 0) {
             show(el.readprog, false);
+            show(el.step1body, true);
+            return;
+        }
+        if (n >= READ_STEPS.length) {
+            /* Done. The bar goes rather than sitting at 100% under a card that already says
+             * what was read — it stayed on screen two states later, above the clip list,
+             * reporting a step that had finished long before. What it had to say that the
+             * card did not is folded into the card by renderSequence(). */
+            show(el.readprog, false);
+            state.readDone = extra || "";
             return;
         }
         var pct = Math.round((n / READ_STEPS.length) * 100);
         el.readfill.style.width = pct + "%";
-        el.readtext.textContent = (n >= READ_STEPS.length)
-            ? (extra || "Done")
-            : ("Step " + (n + 1) + " of " + READ_STEPS.length + " · "
-               + READ_STEPS[n] + (extra ? " — " + extra : "") + " …");
+        el.readtext.textContent = "Step " + (n + 1) + " of " + READ_STEPS.length + " · "
+            + READ_STEPS[n] + (extra ? " — " + extra : "") + " …";
+        show(el.step1body, false);
         show(el.readprog, true);
     }
 
@@ -162,6 +234,25 @@
      * Re-enabling the Read button inside the evalScript callback left it live while the
      * XML export and the scan were still running, so a second click started a second
      * export and a second --manifest-only process writing the same scan folder. */
+    /* The settings stay on SCREEN during a run and stop being editable.
+     *
+     * They used to be hidden outright, along with the clip list, and replaced by a progress
+     * section. Hiding them answered the same question — you cannot change the encoder half
+     * way through an encode — by removing the evidence of what the run is doing, which is
+     * exactly what you want to look at while waiting. Locked and legible beats gone. */
+    var LOCK_WHILE_RUNNING = ["preset", "savepreset", "delpreset", "vcodec", "crf",
+                              "fps", "scale", "cap", "remeasure", "pickout", "pickall",
+                              "readagain", "read"];
+
+    function setRunning(on) {
+        state.running = !!on;
+        for (var i = 0; i < LOCK_WHILE_RUNNING.length; i++) {
+            var e = el[LOCK_WHILE_RUNNING[i]];
+            if (e) e.disabled = state.running;
+        }
+        paintBody();
+    }
+
     function setBusy(on, label) {
         state.busy = !!on;
         el.read.disabled = state.busy;
@@ -321,6 +412,26 @@
     /* ------------------------------------------------------------ helpers */
 
     function show(node_, on) { node_.hidden = !on; }
+
+    /* THE ONE WRITER of body's class, because two of them fought.
+     *
+     * A scrub sets a cursor for the whole page and the wide layout needs a class of its own;
+     * each was assigning document.body.className directly, so whichever ran last erased the
+     * other — drag the size flag while the export column was up and the layout collapsed to
+     * one column mid-drag. Both are state now, and this composes them. */
+    function paintBody() {
+        var c = [];
+        if (state.scrubbing) c.push("scrubbing");
+        // Only claim the second column once there is something IN it. A grid reserves the
+        // column regardless of whether its child is hidden.
+        /* `cols` is gone with the two-column grid. It existed only to keep a CSS grid from
+         * reserving a column for #step3 before there was anything in it — there is no grid
+         * now, and no column to reserve. */
+        // Dims the settings strip and mutes the row ticks. One writer for body's class —
+        // this function — so a run cannot silently drop `scrubbing`.
+        if (state.running) c.push("running");
+        document.body.className = c.join(" ");
+    }
 
     function log(line) {
         if (el.log.textContent === "—") el.log.textContent = "";
@@ -597,6 +708,7 @@
         // different sequence is being read.
         state.types = {};
         state.typesReset = "";
+        state.readDone = "";
         el.clipbody.innerHTML = "";
         el.types.innerHTML = "";
         el.listnote.textContent = "";
@@ -747,7 +859,11 @@
             if (!state.types[ext]) {
                 var on;
                 if (remembered.hasOwnProperty(ext)) on = !!remembered[ext];
-                else on = !DEAD_TYPES[ext];   // project files start off
+                // A project file is only dead when its own bytes are what get cut. In
+                // render mode Premiere resolves the Dynamic Link, so .aep is live like
+                // anything else — otherwise the one mode that can export it starts with
+                // it switched off.
+                else on = !DEAD_TYPES[ext] || state.cutFrom === "render";
                 state.types[ext] = { count: 0, on: on };
             }
             return state.types[ext];
@@ -830,7 +946,10 @@
         // stops the two numbers looking like a contradiction.
         el.seqmeta.textContent = (Math.round(r.fps * 1000) / 1000) + " fps · "
             + r.video_clips + " video clip" + (r.video_clips === 1 ? "" : "s")
-            + " as Premiere counts them";
+            + " as Premiere counts them"
+            // What the finished read had to say, on the card rather than on a progress bar
+            // left at 100%: "37 cut(s) read · XML + Premiere".
+            + (state.readDone ? " · " + state.readDone : "");
         show(el.seqbox, true);
         // A finished step 1 folds away. Its full-width blue button competed with the
         // one you actually want next, and took a third of the panel to say a line's
@@ -995,7 +1114,27 @@
              + " — tick one of those. A type showing 0 has none on this timeline.";
     }
 
+    /* WHICH MODE THE BOTTOM BAR IS IN, derived from what is already true rather than
+     * tracked in a flag of its own. #prog and #report keep the ids the old sections had, so
+     * every show() that used to reveal a section now reveals a row of the bar; this is the
+     * one line that keeps the third row — the ready one — out of their way.
+     *
+     * Derived, because a tracked mode is a fourth thing to keep in step with the other
+     * three, and the run already has two flags. */
+    function barMode() {
+        if (!el.barready) return;
+        var running = el.prog.hidden === false, done = el.report.hidden === false;
+        show(el.barready, !running && !done);
+        /* ⚠️ NO BAR UNTIL THERE IS SOMETHING TO DO WITH IT. Before a read the panel's floor
+         * held a disabled "Export clips" — a second, dead call to action under the one button
+         * that actually did anything, on a screen whose whole job is to say "read a timeline
+         * first". The bar earns its place once there is a list, and comes back for a run's
+         * progress or its result whatever the list is doing. */
+        show(el.actionbar, running || done || state.clips.length > 0);
+    }
+
     function refreshExportEnabled() {
+        barMode();
         var n = selectedCount();
         if (el.typehint) {
             var h = typeHint();
@@ -1043,6 +1182,22 @@
         } else if (!state.script) {
             msg = "The cut script is missing. Open ⚙ and press Re-check to fetch it.";
             cls += " bad";
+        } else if (el.report && el.report.hidden === false && failedRows().length) {
+            /* THE FAILURE HEADLINE, in the line that is already at the top of the panel. The
+             * rows carry their own reasons and the bar carries the count, but both are below a
+             * table that can be nineteen rows long — and "some of your clips are missing" is
+             * not something to scroll for. When every failure shares a reason, it is said
+             * once here rather than read off each row. */
+            var bad = failedRows();
+            var why = bad[0].facts || "";
+            var same = true;
+            for (var b = 1; b < bad.length; b++) {
+                if ((bad[b].facts || "") !== why) { same = false; break; }
+            }
+            msg = bad.length + " clip" + (bad.length === 1 ? "" : "s") + " did not write"
+                + (same && why ? " — " + why : "")
+                + ". Retry them below, or open Advanced for the log.";
+            cls += " bad";
         } else if (!state.dump) {
             msg = "Open a sequence in Premiere, then read it.";
         } else if (!state.out) {
@@ -1057,6 +1212,9 @@
         }
         el.nextline.textContent = msg;
         el.nextline.className = cls;
+        // renderNext runs from refreshExportEnabled, which fires on every transition that
+        // shows or hides step 3 — so the layout follows without a second hook to forget.
+        paintBody();
     }
 
     /* -------------------------------------------------- live per-clip state */
@@ -1070,7 +1228,7 @@
      * indistinguishable from a hang. */
     var STALL_AFTER = 25000;
 
-    function jobsReset(total) {
+    function jobsReset(total, only) {
         state.jobs = {};
         state.jobOrder = [];
         state.jobTotal = total || 0;
@@ -1079,8 +1237,20 @@
         if (state.jobTimer) clearInterval(state.jobTimer);
         // Ticks whether or not the engine says anything, so the elapsed times keep moving.
         // A number that advances is the difference between "slow" and "dead".
-        state.jobTimer = setInterval(renderJobs, 1000);
-        el.joblist.innerHTML = "";
+        state.jobTimer = setInterval(renderRun, 1000);
+        /* The rows start clean too. Without this a second run showed the FIRST run's greens
+         * and reds until each clip reported again — a row claiming a size from a run that
+         * had been abandoned.
+         *
+         * ⚠️ A RETRY clears only the clips it is about to re-run. It exports two of nineteen,
+         * so wiping all of them would throw away seventeen results this run is not touching
+         * and cannot restore — the retry's own manifest holds only the two. */
+        if (only && only.length) {
+            for (var z = 0; z < only.length; z++) delete state.rowState[only[z]];
+        } else {
+            state.rowState = {};
+        }
+        state.jobKey = {};
         el.jobtally.textContent = "";
         show(el.stalled, false);
     }
@@ -1098,11 +1268,51 @@
         return (new Date()).getTime();
     }
 
-    function jobStart(name) {
+    /* The key the engine sent, converted to the one this panel keys cuts by. The engine
+     * writes it with slashes because space-separated fields inside a line that also
+     * carries a filename cannot be parsed back apart.
+     *
+     * FOUR FIELDS is the current engine: type, track, in, out — clipKey() exactly.
+     *
+     * THREE is an engine OLDER than this panel, from before the out-point was in the key.
+     * It is resolved against the clip list rather than dropped, because the out-point is
+     * the only thing that changed and the list already holds it: on a timeline where the
+     * triple is unique — nearly all of them — a version mismatch then costs nothing.
+     *
+     * ⚠️ AMBIGUOUS MEANS DARK. Where two cuts share an in-point, an old engine cannot say
+     * which of them it started. Lighting one anyway would put a running clip's elapsed time
+     * and result on a clip that is not running, and there would be nothing on screen to say
+     * so. Showing nothing is the honest failure; the manifest sets both rows right when the
+     * run ends. */
+    function keyFromEngine(k) {
+        var p = String(k || "").split("/");
+        if (p.length === 4) return p[0] + " " + p[1] + " " + p[2] + " " + p[3];
+        if (p.length !== 3) return "";
+        var hit = "", n = 0;
+        for (var i = 0; i < state.clips.length; i++) {
+            var c = state.clips[i];
+            if (String(c.trackType) === p[0] && String(c.trackIndex) === p[1]
+                && String(c.timelineIn) === p[2]) { hit = clipKey(c); n++; }
+        }
+        return n === 1 ? hit : "";
+    }
+
+    function setRow(key, patch) {
+        if (!key) return;
+        var r = state.rowState[key] || (state.rowState[key] = {});
+        for (var f in patch) if (patch.hasOwnProperty(f)) r[f] = patch[f];
+    }
+
+    function jobStart(name, engineKey) {
         if (!state.jobs[name]) state.jobOrder.push(name);
         state.jobs[name] = { status: "run", t0: nowMs() };
+        var key = keyFromEngine(engineKey);
+        if (key) {
+            state.jobKey[name] = key;
+            setRow(key, { st: "run", t0: nowMs(), t1: 0, bytes: 0, note: "" });
+        }
         state.lastEvent = nowMs();
-        renderJobs();
+        renderRun();
     }
 
     function jobDone(name, flag) {
@@ -1112,8 +1322,22 @@
         j.flag = flag;
         j.t1 = nowMs();
         state.jobDone++;
+        /* HAVE is not a failure and not a write: --resume found the file already there.
+         * It gets its own row state so the row can say so instead of going green as
+         * though this run had produced it. */
+        var key = state.jobKey[name] || "";
+        if (key) {
+            setRow(key, { st: flag === "HAVE" ? "kept" : (j.status === "ok" ? "ok" : "bad"),
+                          t1: nowMs(),
+                          // Done as far as stdout knows. The SIZE is still unknown at this
+                          // point — the manifest carries it and is not written until the
+                          // whole run ends — so `bytes` stays 0 and the size cell says so
+                          // with a tilde rather than promising a measurement.
+                          done: true,
+                          note: flag === "HAVE" ? "already there" : "" });
+        }
         state.lastEvent = nowMs();
-        renderJobs();
+        renderRun();
     }
 
     function secs(ms) {
@@ -1121,54 +1345,41 @@
         return s < 60 ? (s + "s") : (Math.floor(s / 60) + "m " + (s % 60) + "s");
     }
 
-    function renderJobs() {
-        var now = nowMs(), running = [], finished = [];
+    /* The run, drawn on the list that is already on screen.
+     *
+     * This replaced renderJobs(), which built a SECOND list — #joblist — of the clips the
+     * table above it was already showing: running ones first, then the last eight finished,
+     * name and elapsed only. It appeared where the table had been hidden, so the ticks, the
+     * type colours, the frame counts and the size column all went away for the length of the
+     * run, and the rows were in a different order from the ones you had just been reading.
+     *
+     * Now the table stays and its rows carry the state. What is left here is the tally and
+     * the quiet-run note, which are about the run as a whole rather than any one clip. */
+    function renderRun() {
+        var now = nowMs(), running = 0, finished = 0;
         for (var i = 0; i < state.jobOrder.length; i++) {
-            var nm = state.jobOrder[i], j = state.jobs[nm];
-            (j.status === "run" ? running : finished).push({ nm: nm, j: j });
+            if (state.jobs[state.jobOrder[i]].status === "run") running++;
+            else finished++;
         }
-        var queued = Math.max(0, state.jobTotal - running.length - finished.length);
-        el.jobtally.textContent = running.length + " encoding · " + finished.length
-            + " done" + (queued ? (" · " + queued + " queued") : "");
-
-        // Running first — those are the ones you are waiting on. Then the most recently
-        // finished, capped: a 94-clip run does not need 94 rows of "done".
-        var rows = running.concat(finished.slice(-8).reverse());
-        el.joblist.innerHTML = "";
-        for (var k = 0; k < rows.length; k++) {
-            var r = rows[k], d = document.createElement("div");
-            // Live, and the same three-colour language as the report: a clip goes green the
-            // moment it lands rather than only once the whole run finishes. On a 94-clip
-            // export that is the difference between watching a list and waiting for one.
-            d.className = "row2" + (r.j.status === "bad" ? " isbad"
-                : r.j.status === "run" ? " isrun" : " isok");
-            var nm2 = document.createElement("span");
-            nm2.className = "nm";
-            nm2.textContent = (r.j.status === "bad" ? "✕ "
-                : r.j.status === "run" ? "· " : "✓ ") + r.nm;
-            d.appendChild(nm2);
-            var f = document.createElement("span");
-            f.className = "facts";
-            f.textContent = r.j.status === "run"
-                ? secs(now - r.j.t0)
-                : (r.j.flag || "done") + " " + secs((r.j.t1 || now) - r.j.t0);
-            d.appendChild(f);
-            el.joblist.appendChild(d);
-        }
+        var queued = Math.max(0, state.jobTotal - running - finished);
+        el.jobtally.textContent = running + " encoding · " + finished + " done"
+            + (queued ? (" · " + queued + " queued") : "");
+        renderClips();          // the rows are the progress display now
 
         /* Said out loud rather than left to be inferred from a still bar. Not called
          * "frozen": several clips encoding at once on network media legitimately go quiet
          * for a while, and crying wolf would make the message worthless. */
         var quiet = now - (state.lastEvent || now);
-        if (quiet > STALL_AFTER && running.length) {
+        if (quiet > STALL_AFTER && running) {
             var longest = 0;
-            for (var q = 0; q < running.length; q++) {
-                longest = Math.max(longest, now - running[q].j.t0);
+            for (var q = 0; q < state.jobOrder.length; q++) {
+                var jj = state.jobs[state.jobOrder[q]];
+                if (jj.status === "run") longest = Math.max(longest, now - jj.t0);
             }
             el.stalled.textContent = "No clip has finished for " + secs(quiet)
                 + ". Still working — the longest running clip has been going "
                 + secs(longest) + ". Large or Drive-backed media takes this long; "
-                + "the times above keep moving while it is alive.";
+                + "the times on the rows keep moving while it is alive.";
             show(el.stalled, true);
         } else {
             show(el.stalled, false);
@@ -1264,20 +1475,164 @@
         refreshExportEnabled();
     }
 
+    /* THE EXPORT, in one or two phases.
+     *
+     * Cutting from source is one phase: the engine reads the camera files. Cutting from a
+     * timeline render is two: Premiere renders each cut first, with everything on it
+     * baked in, and then the engine encodes those instead. The second phase is identical
+     * either way — same naming, same manifest, same resume, same per-row retry — because
+     * all that changes is which file ffmpeg opens.
+     */
     function doExport() {
+        if (state.cutFrom !== "render") return runEngineExport(null);
+        renderThenExport();
+    }
+
+    function stopRenderPoll() {
+        if (state.renderTimer) {
+            clearInterval(state.renderTimer);
+            state.renderTimer = null;
+        }
+    }
+
+    /* exportAsMediaDirect blocks until it finishes, so one evalScript across sixty cuts
+     * would say nothing at all for minutes. Premiere writes its position to a file after
+     * every render and this reads it off disk while that call is still running. */
+    function pollRenderProgress(dir, total) {
+        var f = path.join(dir, "_render_progress.json");
+        stopRenderPoll();
+        state.renderTimer = setInterval(function () {
+            var o = null;
+            try { o = JSON.parse(fs.readFileSync(f, "utf8")); } catch (e) { return; }
+            if (!o || !o.total) return;
+            state.renderProg = o;
+            var pct = Math.max(0, Math.min(100, (o.done / o.total) * 100));
+            el.barfill.style.width = pct.toFixed(1) + "%";
+            el.progtext.textContent = "Rendering " + Math.min(o.done + 1, o.total)
+                + " of " + o.total
+                + (o.current ? " · " + o.current : "")
+                + (o.failed ? " · " + o.failed + " failed" : "");
+        }, 400);
+        el.progtext.textContent = "Asking Premiere to render " + total + " cut(s)…";
+    }
+
+    function renderThenExport() {
+        var spec = renderSpec();
+        if (!spec.length) {
+            fail("Nothing to render: no ticked video clips on V"
+                + (state.vtrackWant || "?") + ".\nPick a different track under "
+                + "\u201cShots from\u201d, or tick some clips.");
+            return;
+        }
+        var dir = renderDir();
+        clearError();
+        show(el.report, false);
+        show(el.prog, true);
+        setRunning(true);
+        setBusy(true, "Rendering…");
+        el.barfill.style.width = "0";
+        log("render: " + spec.length + " cut(s) -> " + dir);
+        pollRenderProgress(dir, spec.length);
+
+        cs.evalScript("renderCuts(" + jsStr(dir) + ", " + jsStr(spec.join(";"))
+            + ", " + renderMbps() + ", 1, " + jsStr(includeList().join(",")) + ")",
+            function (raw) {
+                stopRenderPoll();
+                var r, i, t;
+                try {
+                    r = JSON.parse(raw);
+                } catch (e) {
+                    log("render: unreadable reply: " + raw);
+                    show(el.prog, false);
+                    setRunning(false);
+                    setBusy(false);
+                    fail("Premiere did not return a readable reply from the render."
+                        + "\nThe raw text is in the log, under the gear.");
+                    return;
+                }
+                for (i = 0; i < (r.tried || []).length; i++) log("render: " + r.tried[i]);
+                for (i = 0; i < (r.renders || []).length; i++) {
+                    for (t = 0; t < (r.renders[i].tried || []).length; t++) {
+                        log("render: " + r.renders[i].label + ": " + r.renders[i].tried[t]);
+                    }
+                }
+                if (!r.ok) {
+                    show(el.prog, false);
+                    setRunning(false);
+                    setBusy(false);
+                    fail((r.error || "Premiere rendered none of the cuts.")
+                        + "\nEvery attempt it made is in the log, under the gear.");
+                    return;
+                }
+                log("render: " + r.written + " written, " + (r.failed || 0)
+                    + " failed, in " + r.folder);
+
+                /* Carried into the run's own notes rather than shown and lost: the report
+                 * is what he reads afterwards, and both of these change what it means. */
+                var notes = [];
+                for (i = 0; i < (r.warnings || []).length; i++) {
+                    notes.push("⚠ " + r.warnings[i]);
+                    log("render: " + r.warnings[i]);
+                }
+                if (r.bitrate) {
+                    log("render: " + r.bitrate.target + " Mbps target / "
+                        + r.bitrate.max + " max, pass mode " + r.bitrate.pass);
+                }
+                /* The one number that makes two runs comparable, and it goes in the NOTES
+                 * rather than only the log — rendering was measured at about two thirds of
+                 * a second a cut at two passes, and this is what says whether one pass
+                 * moved it. The pass mode is named beside it, because a run that fell back
+                 * has a different number for a reason. */
+                if (r.tracks_hidden) {
+                    log("render: hid " + r.tracks_hidden + " other video track(s)");
+                }
+                if (r.written && r.total_ms) {
+                    var rsecs = r.total_ms / 1000;
+                    notes.push("Premiere rendered " + r.written + " cut(s) in "
+                        + rsecs.toFixed(1) + "s — "
+                        + (rsecs / r.written).toFixed(2) + "s each, at "
+                        + (r.one_pass_used ? "one pass" : "two passes"));
+                }
+                if (r.failed) {
+                    notes.push("⚠ Premiere did not render " + r.failed + " cut(s) — those "
+                        + "are marked 'no render' below and were NOT cut from their source "
+                        + "instead");
+                }
+                if (!r.restored) {
+                    notes.push("⚠ your sequence's in/out points could not be put back — "
+                        + "check the timeline");
+                }
+                runEngineExport(dir, notes, spec.length);
+            });
+    }
+
+    function runEngineExport(renderDirPath, notes, renderCount) {
         clearError();
         // Reset so the report shows THIS run's notes. The scan already ran the same merge,
         // so keeping its lines would print every one of them twice.
         state.merge = [];
+        // …except anything the render phase found, which belongs to this run and has just
+        // been thrown away by the line above.
+        if (notes && notes.length) state.merge = notes.slice();
         // The sequence's own folder inside the chosen root. xmlcut mkdir -p's whatever it
         // is given, so there is nothing to create here.
         var args = argsFor(outDir(), false);
+        if (renderDirPath) {
+            args.push("--render-dir", renderDirPath);
+            // Which track defined the shots. The engine drops every other video track and
+            // every audio cut, so this and renderSpec() must agree or the run would ask
+            // for renders it never made.
+            if (state.vtrackWant) args.push("--video-track", String(state.vtrackWant));
+        }
         if (state.resume) args.push("--resume");
         // Only when something is actually unticked; otherwise the flag is noise.
-        var pickPath = writePickFile(workDir());
+        var retry = state.retryKeys.slice();
+        state.retryKeys = [];          // consumed here, so it cannot narrow the next run
+        var pickPath = writePickFile(workDir(), retry);
         if (pickPath) {
             args.push("--pick", pickPath);
-            log("selection: " + pickedClips().length + " clip(s) via " + pickPath);
+            log("selection: " + (retry.length || pickedClips().length)
+                + " clip(s) via " + pickPath + (retry.length ? " (retry)" : ""));
         }
 
         // Remember the manifest's mtime BEFORE starting. Cancelling used to leave the
@@ -1285,13 +1640,16 @@
         // the run that was just abandoned.
         state.manifestBefore = manifestMtime();
 
-        show(el.opts, false);
-        show(el.step3, false);
+        /* ⚠️ The list STAYS. This used to hide #opts and #step3 and show a progress
+         * section in their place — see renderRun() for what that cost. */
         show(el.report, false);
         show(el.prog, true);
+        setRunning(true);
         el.barfill.style.width = "0";
         el.progtext.textContent = "Starting…";
-        jobsReset(selectedCount());
+        // In render mode the run is limited to one video track, so the ticked total —
+        // which counts every track — would leave the bar short of the end.
+        jobsReset(retry.length || renderCount || selectedCount(), retry);
         setBusy(true, "Exporting…");
 
         log("$ " + state.python + " " + args.join(" "));
@@ -1301,8 +1659,7 @@
             proc = spawn(state.python, args, spawnOpts());
         } catch (e) {
             show(el.prog, false);
-            show(el.opts, true);
-            show(el.step3, true);
+            setRunning(false);
             setBusy(false);
             fail("Could not start python3:\n" + e);
             return;
@@ -1331,10 +1688,19 @@
                 state.merge.push("⚠ " + mw[1]);
                 return;
             }
-            // "  >> name.mp4" — a clip has STARTED encoding.
-            var ms = line.match(/^\s*>>\s+(.+)$/);
+            /* "  >> video/1/1234/1290 name.mp4" — a clip has STARTED encoding.
+             *
+             * The key is optional in the pattern on purpose: an engine older than this
+             * panel emits the name alone, and then the tally and the log still work while
+             * the row simply does not light up. Silently showing nothing is the right
+             * failure for a version mismatch; throwing away the line is not.
+             *
+             * The fourth field — the out-point — is optional for the same reason in the
+             * same direction: an engine from before it existed sends three, and
+             * keyFromEngine() resolves those against the clip list. */
+            var ms = line.match(/^\s*>>\s+(?:([a-z]+\/\d+\/\d+(?:\/\d+)?)\s+)?(.+)$/);
             if (ms) {
-                jobStart(ms[1]);
+                jobStart(ms[2], ms[1] || "");
                 return;
             }
             // xmlcut prints "  [7/18] OK  name.mp4" per clip.
@@ -1366,8 +1732,7 @@
         proc.on("error", function (e) {
             jobsStop();
             show(el.prog, false);
-            show(el.opts, true);
-            show(el.step3, true);
+            setRunning(false);
             setBusy(false);
             fail("python3 could not run:\n" + e);
         });
@@ -1377,6 +1742,7 @@
             if (tail) onLine(tail);
             jobsStop();
             setBusy(false);
+            setRunning(false);
             show(el.prog, false);
 
             if (stderr) log("stderr: " + stderr);
@@ -1386,22 +1752,20 @@
             // when knowing which clips made it matters most.
             var built = buildReport();
             if (built) {
-                renderReport();
-                renderMerge();          // this run's '++' and '!!' lines, above the rows
+                /* Revealed BEFORE it is rendered, because renderReport() ends by deciding
+                 * which row of the action bar belongs on screen and that decision reads
+                 * #report's own visibility. Rendering first left the bar offering an export
+                 * and reporting a finished run at the same time — two next actions. */
                 show(el.report, true);
+                renderReport();
+                renderMerge();          // this run's '++' and '!!' lines
             }
 
             if (code === 0) {
                 if (!built) fail("The run finished but wrote no manifest to report on.");
             } else if (code === null) {
                 log("cancelled");
-                if (!built) {
-                    show(el.opts, true);
-                    show(el.step3, true);
-                }
             } else {
-                show(el.opts, true);
-                show(el.step3, true);
                 fail("xmlcut exited with code " + code
                      + (stderr ? ("\n" + stderr.split("\n").slice(-6).join("\n")) : "")
                      + "\nOpen Advanced for the full log.");
@@ -1416,24 +1780,55 @@
      * second implementation of the tick maths, drifting from the one that is tested —
      * so the preview is produced by exactly the code that will do the cutting. */
     function scanClips() {
-        state.clips = [];
-        show(el.tablewrap, false);
+        /* ⚠️ DO NOT EMPTY THE LIST TO RE-READ IT.
+         *
+         * This used to clear state.clips and hide the table on every scan, including a
+         * Re-measure, which does not change WHICH clips exist — only what they cost. Two
+         * things went wrong at once, and both are worse the wider the panel is:
+         *
+         *   the clip column went BLANK for as long as the scan took, which for a probing
+         *   scan over Google Drive is not brief. Undocked wide, the two-column layout put
+         *   that hole beside a full export column and read as a broken panel.
+         *
+         *   everything derived from the list went STALE without saying so: the button
+         *   still offered "Export 19 clips" and the estimate still priced 19 clips, out of
+         *   a state.clips of length zero. Numbers describing a list that had been emptied.
+         *
+         * So a re-read keeps the list it already has until the new one arrives. The rows
+         * were never thrown away — they stayed in the DOM behind `hidden` the whole time.
+         * Per-clip ticks live in state.unpicked, keyed by clip, so they survive a replaced
+         * list and the table can stay live rather than being frozen. */
+        var rescan = state.clips.length > 0;
+        if (!rescan) {
+            state.clips = [];
+            show(el.tablewrap, false);
+        }
+        el.tablewrap.className = rescan ? "tablewrap rescanning" : "tablewrap";
+        el.scanning.textContent = rescan
+            ? "Re-reading the cut list… the list below is the last one read."
+            : "Reading the cut list…";
         show(el.scanning, true);
-        el.listnote.textContent = "";
+        if (!rescan) el.listnote.textContent = "";
 
         var scanDir = path.join(workDir(), "scan");
         var args = argsFor(scanDir, /* allTypes */ true);
         args.push("--manifest-only");
+        /* ⚠️ NOT --render-dir. No render exists at scan time, and handing the engine a
+         * folder of nothing would mark every clip as having none. This says only that one
+         * is COMING, so the cut list is reported as it will be — which is what makes an
+         * .aep and an offline clip tickable instead of greyed out. */
+        if (state.cutFrom === "render") args.push("--render-planned");
         log("$ " + state.python + " " + args.join(" "));
 
         var proc;
         try {
             proc = spawn(state.python, args, spawnOpts());
         } catch (e) {
-            show(el.scanning, false);
+            endRescan();
             setBusy(false);
             readStage(-1);
-            fail("Could not read the cut list:\n" + e);
+            fail("Could not read the cut list:\n" + e
+                 + (rescan ? "\nThe list shown is the one read before." : ""));
             return;
         }
         var errbuf = "";
@@ -1451,24 +1846,31 @@
         });
         proc.stderr.on("data", function (c) { errbuf += String(c); });
         proc.on("error", function (e) {
-            show(el.scanning, false);
+            endRescan();
             setBusy(false);
-            fail("Could not read the cut list:\n" + e);
+            fail("Could not read the cut list:\n" + e
+                 + (rescan ? "\nThe list shown is the one read before." : ""));
         });
         proc.on("close", function (code) {
-            show(el.scanning, false);
+            endRescan();
             if (errbuf) log("stderr: " + errbuf);
             if (code !== 0) {
                 setBusy(false);
                 readStage(-1);
                 fail("Reading the cut list failed (exit " + code + ")."
                      + (errbuf ? "\n" + errbuf.split("\n").slice(-4).join("\n") : "")
-                     + "\nYou can still export; the list just isn't shown.");
+                     + (rescan
+                        ? "\nThe list shown is the one read before; you can still export."
+                        : "\nYou can still export; the list just isn't shown."));
                 return;
             }
             if (loadClips(scanDir)) {
                 typesFromClips();
                 renderTypes();
+                // The Audio dropdown is built from what the scan just reported, so it is filled
+                // here — where the data arrives — rather than only on the next settings repaint.
+                renderAudioTracks();
+                renderVideoTracks();
                 renderClips();
                 show(el.tablewrap, true);
                 show(el.opts, true);
@@ -1476,10 +1878,20 @@
             }
             renderMerge();
             readStage(READ_STEPS.length,
-                      state.clips.length + " clip(s) read · "
+                      state.clips.length + " cut(s) read · "
                       + (state.xml ? "XML + Premiere" : "Premiere only"));
+            // The card was drawn before the scan had a count, so it is written again now that
+            // there is one. Cheap, and it keeps the count in one place.
+            if (state.info) renderSequence();
             setBusy(false);
         });
+    }
+
+    /* Both halves of "the scan is over", together. They were separate lines at four
+     * exits, which is four chances to hide the hint and leave the table dimmed. */
+    function endRescan() {
+        show(el.scanning, false);
+        el.tablewrap.className = "tablewrap";
     }
 
     function loadClips(dir) {
@@ -1499,6 +1911,14 @@
         state.probeCrf = (pset.crf === null || pset.crf === undefined)
             ? state.crfVal : Number(pset.crf);
         state.probeScale = Number(pset.scale_percent || 100);
+        // Manifests written before the engine recorded this are x264 by definition — it was
+        // the only encoder there was.
+        state.probeVcodec = String(pset.vcodec || "libx264");
+        // What the timeline actually has to offer. The scan reports it whether or not audio was
+        // asked for, so the dropdown is right before anything is exported.
+        state.audioTracks = (pset.audio_tracks_available || []).map(function (t) {
+            return { index: Number(t.index || 0), items: Number(t.items || 0) };
+        }).filter(function (t) { return t.index > 0; });
         var clips = data.clips || [];
         for (var i = 0; i < clips.length; i++) {
             var c = clips[i];
@@ -1521,6 +1941,9 @@
                 trackType: String(c.track_type || "video"),
                 trackIndex: Number(c.track_index || 1),
                 timelineIn: Number(c.timeline_in_frames || 0),
+                // The other end of the same range. Carried for the render probe, which
+                // asks Premiere for a timeline range rather than a source range.
+                timelineOut: Number(c.timeline_out_frames || 0),
                 ext: ext,
                 group: cuttable ? 0 : 1,
                 tc: String(c.timeline_in_tc || ""),
@@ -1566,8 +1989,19 @@
         return true;
     }
 
+    /* WHAT IDENTIFIES A CLIP, everywhere in this panel: the ticks, the row states, the
+     * pick file, the retry scope and the key the engine announces all use this string.
+     *
+     * ⚠️ THE OUT-POINT IS PART OF IT. It used to be type + track + in-point, on the
+     * assumption that two clips cannot start on the same frame of one track. A
+     * cross-dissolve breaks that — the outgoing clip's overlap sits on exactly the frame
+     * the incoming clip starts — and a real client timeline had a 10-frame "K8 (before)"
+     * and an 88-frame "K8 (after)" both at frame 448 of V1. Sharing a key, they shared a
+     * tick (unticking one dropped both from the export), shared a row state (one row told
+     * both stories while the other stayed dark), and shared a line in the pick file, so a
+     * retry of one failed clip re-encoded two. */
     function clipKey(c) {
-        return c.trackType + " " + c.trackIndex + " " + c.timelineIn;
+        return c.trackType + " " + c.trackIndex + " " + c.timelineIn + " " + c.timelineOut;
     }
 
     /* A clip is cut when its type is on, it can be cut at all, and it has not been
@@ -1582,11 +2016,27 @@
         return !state.unpicked[clipKey(c)];
     }
 
+    /* IS THIS CLIP IN THE RUN AT ALL?
+     *
+     * In timeline mode it is one video track and nothing else — the engine drops every
+     * other track and every audio cut, so a list showing them was describing a different
+     * export from the one about to happen. Ticks on those rows did nothing, their sizes
+     * were added into an estimate that would never include them, and the count above the
+     * button was wrong.
+     *
+     * In source mode nothing is excluded and this is always true. */
+    function inRun(c) {
+        if (state.cutFrom !== "render") return true;
+        if (c.trackType !== "video") return false;
+        var want = Number(state.vtrackWant || 0);
+        return !want || Number(c.trackIndex) === want;
+    }
+
     function pickedClips() {
         var out = [];
         for (var i = 0; i < state.clips.length; i++) {
             var c = state.clips[i];
-            if (c.group === 0 && typeOn(c) && isPicked(c)) out.push(c);
+            if (c.group === 0 && typeOn(c) && isPicked(c) && inRun(c)) out.push(c);
         }
         return out;
     }
@@ -1594,15 +2044,27 @@
     /* Write the selection for --pick. A file rather than argv, because a long timeline is
      * hundreds of clips. Returns the path, or "" when everything is selected and the flag
      * is not needed. */
-    function writePickFile(dir) {
-        var all = [], chosen = pickedClips();
+    function writePickFile(dir, onlyKeys) {
+        var all = [], chosen;
+        if (onlyKeys && onlyKeys.length) {
+            /* A RETRY. Not the ticked set — the clips that failed, whatever is ticked now.
+             * Re-ticking the list to express this would destroy a selection he made, and
+             * reading it back afterwards would be guesswork. */
+            chosen = [];
+            for (var q = 0; q < state.clips.length; q++) {
+                var cc = state.clips[q];
+                if (cc.group === 0 && onlyKeys.indexOf(clipKey(cc)) >= 0) chosen.push(cc);
+            }
+        } else {
+            chosen = pickedClips();
+        }
         for (var i = 0; i < state.clips.length; i++) {
             var c = state.clips[i];
             if (c.group === 0 && typeOn(c)) all.push(c);
         }
         if (chosen.length === all.length) return "";
         var lines = ["# written by the xmlcut panel — one clip per line",
-                     "# TRACKTYPE TRACKINDEX TIMELINEIN"];
+                     "# TRACKTYPE TRACKINDEX TIMELINEIN TIMELINEOUT"];
         for (var k = 0; k < chosen.length; k++) lines.push(clipKey(chosen[k]));
         /* The clips that CANNOT be cut go in too, even though they produce no file.
          *
@@ -1631,16 +2093,49 @@
      * That is not cosmetic: xmlcut filters by type and THEN assigns 1..N in the same
      * order, so renumbering the visible rows reproduces exactly the indices the
      * filenames will carry. */
+    /* WHICH GROUP A ROW BELONGS TO. Ranked by what needs attention, not by what is
+     * pleasant to report — the two failures on a 23-cut timeline were at rows 6 and 20,
+     * which is a poor place to keep the only things you have to act on.
+     *
+     * Before a run there are two groups: everything is Ready, and whatever cannot be cut
+     * is at the bottom. That is the old divider, generalised. */
+    var GROUPS = [
+        { key: "bad",   rank: 0, title: "Problems",       cls: "g-bad" },
+        { key: "run",   rank: 1, title: "Encoding now",   cls: "g-run" },
+        { key: "ready", rank: 2, title: "Ready",          cls: "" },
+        { key: "ok",    rank: 3, title: "Written",        cls: "g-ok" },
+        { key: "kept",  rank: 4, title: "Already there",  cls: "g-kept" },
+        { key: "dead",  rank: 5, title: "Cannot be cut — fix these or untick their type",
+          cls: "g-dead" }
+    ];
+    function groupOf(rail, rst, isDead) {
+        if (isDead) return "dead";
+        if (rail === "bad") return "bad";
+        if (rail === "run") return "run";
+        if (rst === "kept") return "kept";
+        // `over` is written, and says so on its own row. A clip is not a different KIND of
+        // outcome for being larger than a threshold somebody typed.
+        if (rst === "ok" || rail === "over") return "ok";
+        return "ready";
+    }
+    function groupDef(key) {
+        for (var i = 0; i < GROUPS.length; i++) if (GROUPS[i].key === key) return GROUPS[i];
+        return GROUPS[2];
+    }
+
     function renderClips() {
         var body = el.clipbody;
         body.innerHTML = "";
         // Read once for the whole table rather than per row.
         var qs = settings(), lim = capBytes();
+        /* "only problems" filters THIS table now, rather than a separate report list. It
+         * only bites once a run has produced something to have an opinion about. */
+        var onlyProb = !!(el.onlyprob && el.onlyprob.checked && state.report.length);
         var visible = [];
         for (var i = 0; i < state.clips.length; i++) {
             var r = state.clips[i];
             var on = state.types[r.ext] ? state.types[r.ext].on : true;
-            if (on) visible.push(r);
+            if (on && inRun(r)) visible.push(r);
         }
 
         // Numbered in TIMELINE order — the order the manifest is already in — because
@@ -1656,29 +2151,92 @@
             var vv = visible[q];
             vv.n = (vv.group === 0 && isPicked(vv)) ? (++n) : 0;
         }
-        visible = visible.slice().sort(function (a, b) { return a.group - b.group; });
+        /* Each row's group is worked out ONCE, here, and the list is sorted by it —
+         * stably, so timeline order survives inside every group. */
+        var qsLim = lim;
+        for (var g = 0; g < visible.length; g++) {
+            var gv = visible[g];
+            var grs = state.rowState[clipKey(gv)] || null;
+            var grst = grs ? String(grs.st || "") : "";
+            var gEb = clipBytes(gv, qs);
+            var gAct = (grs && grs.done && grs.bytes > 0) ? grs.bytes : 0;
+            var gOver = (qsLim > 0 && (gAct || gEb) > qsLim && isPicked(gv)
+                         && gv.group === 0 && grst !== "bad");
+            var gRail = grst === "bad" ? "bad" : grst === "run" ? "run"
+                : gOver && grst ? "over" : grst === "kept" ? "kept"
+                : grst === "ok" ? "ok" : "";
+            gv._grp = groupOf(gRail, grst, gv.group !== 0);
+            gv._rank = groupDef(gv._grp).rank;
+        }
+        visible = visible.slice().sort(function (a, b) { return a._rank - b._rank; });
 
-        var dividerDone = false;
+        // How many rows each group will actually SHOW, counted before any are built so a
+        // heading can carry its own total. Rows the filter removes are not counted.
+        var counts = {};
+        for (var cq = 0; cq < visible.length; cq++) {
+            var cv = visible[cq];
+            var crs = state.rowState[clipKey(cv)] || null;
+            var crst = crs ? String(crs.st || "") : "";
+            if (onlyProb && cv._grp !== "bad" && cv._grp !== "dead"
+                && !(crst && cv._grp === "ok" && capBytes() > 0
+                     && ((crs.bytes || clipBytes(cv, qs)) > capBytes()))) continue;
+            counts[cv._grp] = (counts[cv._grp] || 0) + 1;
+        }
+
+        var headed = {};
         for (var j = 0; j < visible.length; j++) {
             var v = visible[j];
-            if (v.group === 1 && !dividerDone) {
-                dividerDone = true;
-                var dr = document.createElement("tr");
-                dr.className = "divider";
-                var dc = document.createElement("td");
-                dc.setAttribute("colspan", "7");
-                dc.textContent = "cannot be cut — fix these or untick their type";
-                dr.appendChild(dc);
-                body.appendChild(dr);
-            }
             var tr = document.createElement("tr");
             var picked = isPicked(v);
             // Sized at the CURRENT settings, so both the number and the flag move with
             // the sliders. Computed before the row class, which needs to know.
             var eb = clipBytes(v, qs);
-            var over = (lim > 0 && eb > lim && picked && v.group === 0);
+            /* WHAT THIS ROW IS DOING, if a run has touched it. The same cell that held the
+             * estimate holds the finished size once the file exists — the estimate is not
+             * kept beside it, because two numbers in one column is how you end up reading
+             * the wrong one. The end-of-run comparison lives once, in the action bar. */
+            var rs = state.rowState[clipKey(v)] || null;
+            var rst = rs ? String(rs.st || "") : "";
+            var actual = (rs && rs.done && rs.bytes > 0) ? rs.bytes : 0;
+            var shown = actual || eb;
+            // The flag is re-applied to whichever number is on screen, so typing a new
+            // threshold re-marks a finished run as readily as a planned one.
+            var over = (lim > 0 && shown > lim && picked && v.group === 0
+                        && rst !== "bad");
+            /* One rail per row, and the precedence is what needs attention rather than what
+             * is nicest to report: failed, then running, then bigger than you asked for,
+             * then left alone, then written. A clip can be both written and over the flag;
+             * amber wins, because the flag is the half worth seeing. */
+            var rail = rst === "bad" ? "bad"
+                : rst === "run" ? "run"
+                : over && rst ? "over"
+                : rst === "kept" ? "kept"
+                : rst === "ok" ? "ok" : "";
+            /* Filtered AFTER numbering, never before: the numbers are the filenames the
+             * run produced, so hiding a row must not renumber the ones that remain. */
+            if (onlyProb && rst !== "bad" && !over && v.group === 0) continue;
+            /* ⚠️ AFTER the filter, never before: a heading built for a group whose every
+             * row is then filtered away is a heading over nothing. Class keeps "divider"
+             * in it so everything that already skips dividers still does. */
+            if (!headed[v._grp]) {
+                headed[v._grp] = true;
+                var gd = groupDef(v._grp);
+                var hr = document.createElement("tr");
+                hr.className = "divider grouphead " + gd.cls;
+                var hc = document.createElement("td");
+                hc.setAttribute("colspan", "5");
+                var ht = document.createElement("span");
+                ht.className = "ghtitle";
+                ht.textContent = gd.title;
+                var hn = document.createElement("b");
+                hn.textContent = String(counts[v._grp] || 0);
+                hc.appendChild(ht);
+                hc.appendChild(hn);
+                hr.appendChild(hc);
+                body.appendChild(hr);
+            }
             tr.className = "k-" + v.kind + (picked ? "" : " unpicked")
-                + (over ? " over" : "");
+                + (over ? " over" : "") + (rail ? " st-" + rail : "");
 
             // The tick lives in its own cell, built here rather than through the generic
             // cell loop because it holds a control rather than text.
@@ -1688,7 +2246,9 @@
                 var box = document.createElement("input");
                 box.type = "checkbox";
                 box.checked = picked;
-                box.disabled = (clip.group !== 0);   // nothing to include if it cannot cut
+                // Nothing to include if it cannot cut, and nothing to change once the
+                // run has the selection on its command line.
+                box.disabled = (clip.group !== 0) || state.running;
                 box.title = clip.clip;
                 box.addEventListener("change", function () {
                     if (box.checked) delete state.unpicked[clipKey(clip)];
@@ -1712,14 +2272,37 @@
                         v.notes, v.source,
                         over ? "over the " + state.cap + " MB flag" : ""
                        ].filter(function (s) { return !!s; }).join(" · ");
+            /* The size cell, in whichever of its three lives applies. A mark as well as a
+             * colour every time, because the row tint alone would be the only thing saying
+             * it to anyone who cannot rely on colour. */
+            var sizeText = rst === "run" ? "encoding"
+                : rst === "bad" ? "✕ —"
+                : actual ? ((over ? "▲ " : "✓ ") + humanBytes(actual))
+                : rst === "kept" ? "–"
+                /* Written, but not yet measured: the completion line says a file landed and
+                 * says nothing about its size, so the estimate stays and the tilde says it
+                 * is still an estimate. A tick beside a bare number here would present a
+                 * guess as a measurement for the length of the run. */
+                : rst === "ok" ? (eb > 0 ? "✓ ~" + humanBytes(eb) : "✓")
+                : (eb > 0 ? (over ? "▲ " : "") + humanBytes(eb) : "—");
+            /* The last column says the one thing worth saying at this moment: how long a
+             * running clip has been going, what a finished one took or why it did not
+             * write, and otherwise the status — except the plain "ready", which was the
+             * same word repeated down all nineteen rows and told nobody anything. */
+            /* ⚠️ "ready — from render" WAS THE SAME NINETEEN CHARACTERS ON EVERY ROW, and
+             * truncated on all of them because the column is 84px. That is exactly why
+             * plain "ready" is blanked here already: a word repeated down every row tells
+             * nobody anything. Where the pixels come from is a property of the RUN, not of
+             * each clip, and the strip's footer says it once. */
+            var lastText = rst === "run" ? secs(nowMs() - (rs.t0 || nowMs()))
+                : (rs && rs.done)
+                    ? (rs.note || ((rs.t1 && rs.t0) ? secs(rs.t1 - rs.t0) : ""))
+                    : (v.group === 0 && /^ready/i.test(v.status) ? "" : v.status);
             var cells = [
                 [v.n ? pad2(v.n) : "—", "idx num"], [v.clip, "clipname"],
-                [v.speed, "spd"], [String(v.frames), "frm num"],
-                // The caret marks the flagged ones for anyone who cannot rely on the
-                // colour — the row tint alone would be the only thing saying it.
-                [eb > 0 ? (over ? "▲ " : "") + humanBytes(eb) : "—",
-                 "siz num" + (over ? " over" : "")],
-                [v.status, "sts"]
+                [sizeText, "siz num" + (over ? " over" : "")
+                 + (rst === "run" ? " running" : "") + (actual ? " actual" : "")],
+                [lastText, "sts" + (rst === "bad" ? " why" : "")]
             ];
             for (var k = 0; k < cells.length; k++) {
                 var td = document.createElement("td");
@@ -2094,7 +2677,16 @@
         return {
             crf: state.crfVal,
             fps: el.fps.value ? parseFloat(el.fps.value) : null,
-            scale: state.scale
+            scale: state.scale,
+            vcodec: el.vcodec.value || "libx264",
+            // "" = no audio files · "all" = every audio track · "2" = that track alone
+            audio: String(el.audiosel.value || ""),
+            wholeFrames: !!el.wholeframes.checked,
+            // Not in settingArgs(): --render-dir is added by the EXPORT only. The scan
+            // runs before any render exists, and handing it a folder of nothing would
+            // report every clip as having no render.
+            cutFrom: state.cutFrom,
+            vtrack: state.cutFrom === "render" ? Number(state.vtrackWant || 0) : 0
         };
     }
 
@@ -2104,6 +2696,18 @@
         if (s.crf && s.crf !== 1) a.push("--crf", String(s.crf));
         if (s.fps) a.push("--fps", String(s.fps));
         if (s.scale && s.scale < 100) a.push("--scale", String(s.scale));
+        // Only when it differs from the engine's own default, so an ordinary export's
+        // command line stays as short as what it actually asks for.
+        if (s.vcodec && s.vcodec !== "libx264") a.push("--vcodec", s.vcodec);
+        /* The voice-over, and which tracks it reads. One control, two flags: --audio is the
+         * switch and --audio-tracks narrows it, so "every track" needs no second argument and
+         * the ordinary case stays a short command line. */
+        // Only the frames wholly inside each cut's source range.
+        if (s.wholeFrames) a.push("--whole-frames");
+        if (s.audio) {
+            a.push("--audio");
+            if (s.audio !== "all") a.push("--audio-tracks", s.audio);
+        }
         return a;
     }
 
@@ -2165,6 +2769,18 @@
     var BPP_INTER = [[6, 0.759], [14, 0.290], [18, 0.144], [23, 0.066], [28, 0.032]];
     var BPP_INTRA = [[6, 0.261], [14, 0.069], [18, 0.030], [23, 0.013], [28, 0.006]];
     var SRC_SHARE = [[6, 2.806], [14, 1.074], [18, 0.598], [23, 0.288], [28, 0.144]];
+    /* Every table above is x264's. This is what x265 costs as a multiple of it at the SAME
+     * CRF NUMBER — which is the knob on screen, and not the question the "HEVC is half the
+     * size" charts answer: those hold quality equal, not crf.
+     *
+     * Measured on 19 real clips, both encoders, same slices, paired per clip so content
+     * cancels. At crf 6 there is NO SAVING (1.01x, and it can come out larger); the saving
+     * peaks around crf 18 and shrinks again as crf climbs. Mirrors CODEC_BPP_RATIO in the
+     * engine — the two are diffed by tests/check_panel.js, because a panel promising one
+     * size while the engine plans another is the failure this whole model exists to avoid. */
+    var CODEC_RATIO = {
+        libx265: [[6, 1.01], [14, 0.72], [18, 0.70], [23, 0.78], [28, 0.82]]
+    };
     // A still is not a rate — almost all of its file is the one keyframe, so it is priced
     // as this many frames' worth of picture whatever its length.
     var STILL_FRAMES = 1.5;
@@ -2192,27 +2808,33 @@
         var crf = s.crf || 1, pct = s.scale || 100;
         var d = scaledDims(c.w, c.h, pct);
         var intra = !!INTRAFRAME[c.codec];
+        // 1.0 for x264 (the tables ARE x264) and for any encoder with no measured ratio,
+        // which shows the figure there is evidence for rather than an invented discount.
+        var ratio = CODEC_RATIO[s.vcodec] ? lerp(CODEC_RATIO[s.vcodec], crf) : 1;
         if (d && c.still) {
             // A still: one picture, not a per-second rate. Checked FIRST, so a video that
             // happens to be missing its frame rate cannot fall through into this branch —
             // which it did, and priced a 2-second clip as a single frame.
+            // No codec ratio here, and that is MEASURED rather than forgotten: a real
+            // jpeg encoded both ways came out the same size to within a percent. x265's
+            // win is prediction BETWEEN frames, and a still has none to do.
             return lerp(BPP_INTER, crf) * d[0] * d[1] * STILL_FRAMES / 8 + CONTAINER_FIXED;
         }
         if (d && c.srcFps > 0) {
             var px = d[0] * d[1] * c.srcFps;
-            var bpp = lerp(intra ? BPP_INTRA : BPP_INTER, crf);
+            var bpp = lerp(intra ? BPP_INTRA : BPP_INTER, crf) * ratio;
             if (!intra && c.srcBitrate > 0) {
                 // The source's own bits per pixel, as a CEILING — a genuinely low-bitrate
                 // source really does encode small. Computed at the SOURCE's dimensions,
                 // because a downscale removes pixels, not detail per pixel.
                 var sbpp = c.srcBitrate / (c.w * c.h * c.srcFps);
-                bpp = Math.min(bpp, sbpp * lerp(SRC_SHARE, crf));
+                bpp = Math.min(bpp, sbpp * lerp(SRC_SHARE, crf) * ratio);
             }
             return bpp * px * c.secs / 8 + CONTAINER_FIXED;
         }
         if (!(c.srcBitrate > 0)) return 0;
         // No dimensions at all — the last resort, and the unreliable one.
-        return c.srcBitrate * sizeRatio(crf) * Math.pow(pct / 100, 2) * c.secs / 8;
+        return c.srcBitrate * sizeRatio(crf) * ratio * Math.pow(pct / 100, 2) * c.secs / 8;
     }
 
     /* Are the measured sizes still describing the settings on screen?
@@ -2234,7 +2856,12 @@
      * model is the default: live, free, and never lying about which settings it describes. */
     function staleSizes() {
         return measured() && (state.crfVal !== state.probeCrf
-                              || state.scale !== state.probeScale);
+                              || state.scale !== state.probeScale
+                              // ⚠️ The encoder counts. Switching to x265 changes the size
+                              // of every clip by up to 30%, and without this the measured
+                              // numbers sat there describing an x264 export that is no
+                              // longer the one about to run — with no re-measure offered.
+                              || settings().vcodec !== state.probeVcodec);
     }
 
     /* The dimensions this scale will actually produce, computed the SAME way the engine's
@@ -2250,10 +2877,339 @@
 
     /* "50% · 540×960", or "50% · mixed sources" when the timeline holds more than one
      * resolution — naming one of them would be wrong for every clip of the other. */
+    /* THE AUDIO DROPDOWN, built from the timeline that was read.
+     *
+     * A fixed list would be a lie on two counts: it would offer tracks that are not there, and
+     * it would miss a third one when a project has it. The engine reports every audio track it
+     * found and how many items sit on each, so this offers exactly those and says plainly when
+     * there is nothing to offer.
+     *
+     * ⚠️ THE REMEMBERED CHOICE IS RE-CHECKED against each timeline. "A2" on one project is the
+     * voice-over and on the next it does not exist — keeping the number would silently export
+     * silence. When the remembered track is missing, this falls back to every track rather than
+     * to off, because "he asked for audio" is the durable half of the preference and "which
+     * track" is the part that belongs to a project. */
+    function renderAudioTracks() {
+        var have = state.audioTracks || [];
+        var sel = el.audiosel;
+        sel.innerHTML = "";
+        function opt(value, label) {
+            var o = document.createElement("option");
+            o.setAttribute("value", value);
+            o.value = value;
+            o.textContent = label;
+            sel.appendChild(o);
+            return o;
+        }
+        opt("", "No audio files");
+        if (!have.length) {
+            // Nothing to choose from, and the reason said out loud rather than an empty menu.
+            opt("none", state.clips.length
+                ? "— this timeline has no audio tracks —"
+                : "— read a timeline first —");
+            sel.value = "";
+            sel.disabled = true;
+            /* ⚠️ state.audioWant is NOT cleared here. This branch runs before anything has been
+             * read, and clearing it would throw away the choice he made last session — the menu
+             * has nothing to show yet, which is not the same as him having chosen nothing. */
+            return;
+        }
+        sel.disabled = false;
+        opt("all", have.length === 1
+            ? "The audio track"
+            : "All " + have.length + " audio tracks");
+        for (var i = 0; i < have.length; i++) {
+            var t = have[i];
+            opt(String(t.index), "A" + t.index + " only · " + t.items
+                + (t.items === 1 ? " item" : " items"));
+        }
+        var want = state.audioWant || "";
+        if (want && want !== "all") {
+            var known = false;
+            for (var k = 0; k < have.length; k++) {
+                if (String(have[k].index) === want) known = true;
+            }
+            if (!known) want = "all";
+        }
+        sel.value = want;
+        state.audioWant = want;
+    }
+
+    /* ------------------------------------------------------- cutting from a render
+     *
+     * A render is the finished picture at that instant, so ONE video track supplies the
+     * shot list and everything above it is in the pixels rather than in the list. Built
+     * from the timeline that was read, like the audio menu and for the same reason: V2
+     * on one project is not V2 on the next, and offering a track with nothing on it
+     * would be offering an empty export.
+     */
+    function videoTracksPresent() {
+        var seen = {}, out = [], i, c;
+        for (i = 0; i < state.clips.length; i++) {
+            c = state.clips[i];
+            if (c.trackType !== "video") continue;
+            if (!seen[c.trackIndex]) { seen[c.trackIndex] = 0; }
+            seen[c.trackIndex]++;
+        }
+        for (var k in seen) {
+            if (Object.prototype.hasOwnProperty.call(seen, k)) {
+                out.push({ index: Number(k), items: seen[k] });
+            }
+        }
+        out.sort(function (a, b) { return a.index - b.index; });
+        return out;
+    }
+
+    function renderVideoTracks() {
+        // The include ticks are built from the same list and must follow the master, so
+        // they are rebuilt here rather than at a second call site that could drift.
+        var rebuildInclude = true;
+        var sel = el.vtrack;
+        if (!sel) return;
+        var have = videoTracksPresent();
+        sel.innerHTML = "";
+        function opt(value, label) {
+            var o = document.createElement("option");
+            o.value = value;
+            o.textContent = label;
+            sel.appendChild(o);
+        }
+        if (!have.length) {
+            opt("", state.clips.length ? "— no video clips —" : "— read a timeline first —");
+            sel.disabled = true;
+            /* ⚠️ state.vtrackWant is NOT cleared. Nothing has been read yet, which is not
+             * the same as him having chosen nothing — same trap as the audio menu. */
+            return;
+        }
+        sel.disabled = false;
+        for (var i = 0; i < have.length; i++) {
+            opt(String(have[i].index), "V" + have[i].index + " · " + have[i].items
+                + (have[i].items === 1 ? " clip" : " clips"));
+        }
+        // Default to the LOWEST track, which is where the main footage sits on a normal
+        // timeline. His call, 19 Aug: "Pick the track, default V1".
+        var want = state.vtrackWant || "";
+        var known = false;
+        for (var k = 0; k < have.length; k++) {
+            if (String(have[k].index) === want) known = true;
+        }
+        if (!known) want = String(have[0].index);
+        sel.value = want;
+        state.vtrackWant = want;
+        if (rebuildInclude) renderIncludeTracks();
+    }
+
+    /* An intermediate has to be BETTER than the thing encoded from it.
+     *
+     * The final encode is crf — it targets a quality, not a rate — so if the render spends
+     * the bits the final would, the final faithfully reproduces the render's own
+     * artefacts and the export is two generations of the same loss. At twice the rate the
+     * render's artefacts sit below what the crf is looking for, and only the second
+     * encode decides how the clip looks. Hence 2, and hence it being written down. */
+    var RENDER_HEADROOM = 2;
+
+    /* What the quality slider asks for, in megabits, at the SEQUENCE's own size.
+     *
+     * Premiere's exporter has no crf, so this is the translation — the same measured
+     * bits-per-pixel table the size estimate uses, applied to the sequence's pixels
+     * rather than to any one clip's. 0 means the sequence's size is not known yet, and
+     * the caller falls back to the stock preset rather than inventing a figure.
+     *
+     * ⚠️ This is why the stock preset was not enough: "Match Source - High bitrate" is a
+     * fixed 10 Mbps whatever the sequence is, which is about right for 1080x1920 and well
+     * under crf 18 on anything 4K. */
+    function renderMbps() {
+        var info = state.info || {};
+        var w = Number(info.frame_width || 0);
+        var h = Number(info.frame_height || 0);
+        var fps = Number(info.fps || 0);
+        if (!(w > 0 && h > 0 && fps > 0)) return 0;
+        var bits = lerp(BPP_INTER, state.crfVal || 1) * w * h * fps * RENDER_HEADROOM;
+        // Floored so a very low quality setting cannot produce an intermediate that is
+        // itself the problem; capped so a near-lossless one cannot ask for a rate no
+        // sensible disk wants. Both are limits on the RENDER, never on the export.
+        return Math.max(4, Math.min(150, bits / 1e6));
+    }
+
+    /* The list only holds what the run will cut, so it has to say so — a list that
+     * suddenly shows a third of the clips otherwise reads as a fault. */
+    function renderListLabel() {
+        if (!el.listlbl) return;
+        var q = el.listlbl.querySelector ? null : null;
+        var txt = (state.cutFrom === "render" && state.vtrackWant)
+            ? ("Every cut on V" + state.vtrackWant + ", in timeline order")
+            : "Every cut, in timeline order";
+        // The tip marker is a child element; only the leading text node is replaced.
+        var first = el.listlbl.firstChild;
+        if (first && first.tagName === "#text") first.textContent = txt + " ";
+        else el.listlbl.insertBefore(document.createTextNode(txt + " "), first || null);
+    }
+
+    /* Which tracks are in the picture. Built from the timeline, and the MASTER is always
+     * in and cannot be unticked — a render without the track the cuts come from is a
+     * folder of black files. */
+    function includeSet() {
+        var out = {}, parts = String(state.vIncludeWant || "").split(",");
+        for (var i = 0; i < parts.length; i++) {
+            var v = parseInt(parts[i], 10);
+            if (v > 0) out[v] = true;
+        }
+        var m = Number(state.vtrackWant || 0);
+        if (m) out[m] = true;
+        return out;
+    }
+    function includeList() {
+        var set = includeSet(), out = [];
+        for (var k in set) {
+            if (Object.prototype.hasOwnProperty.call(set, k) && set[k]) out.push(Number(k));
+        }
+        out.sort(function (a, b) { return a - b; });
+        return out;
+    }
+    function rememberInclude() {
+        state.vIncludeWant = includeList().join(",");
+        try {
+            window.localStorage.setItem("xmlcut.vinclude", state.vIncludeWant);
+        } catch (e) {}
+    }
+
+    function renderIncludeTracks() {
+        var box = el.vinclude;
+        if (!box) return;
+        var have = videoTracksPresent();
+        box.innerHTML = "";
+        if (!have.length) {
+            var none = document.createElement("span");
+            none.className = "vinnone";
+            none.textContent = state.clips.length ? "no video tracks" : "read a timeline first";
+            box.appendChild(none);
+            return;
+        }
+        /* Default: everything the timeline has. Overlays are the exception, not the rule,
+         * and a default that silently dropped a track would be a default that changed the
+         * picture without being asked. */
+        if (!state.vIncludeWant) {
+            var all = [];
+            for (var d = 0; d < have.length; d++) all.push(have[d].index);
+            state.vIncludeWant = all.join(",");
+        }
+        var set = includeSet();
+        var master = Number(state.vtrackWant || 0);
+        for (var i = 0; i < have.length; i++) {
+            (function (t) {
+                var lab = document.createElement("label");
+                lab.className = "vintick" + (t.index === master ? " vinmaster" : "");
+                var box2 = document.createElement("input");
+                box2.type = "checkbox";
+                box2.checked = !!set[t.index];
+                // The master is in by definition, so its tick is on and cannot be moved.
+                box2.disabled = (t.index === master) || state.running;
+                box2.addEventListener("change", function () {
+                    var cur = includeSet();
+                    if (box2.checked) cur[t.index] = true;
+                    else delete cur[t.index];
+                    var keep = [];
+                    for (var k in cur) {
+                        if (Object.prototype.hasOwnProperty.call(cur, k) && cur[k]) {
+                            keep.push(Number(k));
+                        }
+                    }
+                    keep.sort(function (a, b) { return a - b; });
+                    state.vIncludeWant = keep.join(",");
+                    rememberInclude();
+                    renderIncludeTracks();
+                });
+                lab.appendChild(box2);
+                var txt = document.createElement("span");
+                txt.textContent = "V" + t.index
+                    + (t.index === master ? " · master" : "");
+                lab.appendChild(txt);
+                box.appendChild(lab);
+            })(have[i]);
+        }
+        rememberInclude();
+    }
+
+    /* Source media or a timeline render. The track field only exists in render mode. */
+    function applyCutFrom() {
+        var render = state.cutFrom === "render";
+        if (el.cutfrom) el.cutfrom.value = state.cutFrom;
+        show(el.vtrackfield, render);
+        /* whole-frames only means anything OUT of render mode. It stays on screen either
+         * way — dimmed and disabled rather than removed, because a control that vanishes
+         * is a control you go looking for. */
+        if (el.wholeframes) el.wholeframes.disabled = render;
+        if (el.wfwrap) el.wfwrap.className = "tick" + (render ? " inert" : "");
+        show(el.wfwhy, render);
+        renderStripFoot();
+    }
+
+    /* Every consequence of the current settings, in one place at the foot of the strip.
+     * These were four separate labels living inside four different fields, which is most
+     * of why the strip read as busy. */
+    function renderStripFoot() {
+        if (!el.stripfoot) return;
+        if (state.cutFrom !== "render") {
+            show(el.stripfoot, false);
+            return;
+        }
+        var mb = renderMbps();
+        var out = [];
+        out.push(mb
+            ? ("Premiere renders each cut at <b>~"
+               + (mb < 10 ? mb.toFixed(1) : Math.round(mb))
+               + " Mbps</b>, then ffmpeg encodes it at your quality.")
+            : "Read a timeline to see the render bitrate.");
+        // Said because it is not obvious and it is wrong for a retimed clip: the scan runs
+        // before any render exists, so the estimate can only come from the source.
+        out.push("Sizes are estimated from the source clips in this mode.");
+        el.stripfoot.innerHTML = out.join(" ");
+        show(el.stripfoot, true);
+    }
+
+    /* Where Premiere writes the rendered ranges.
+     *
+     * Beside the clips rather than in a temp folder: these are large — Match Source High
+     * on a 4K sequence is tens of MB a cut — and /tmp is on the system volume, which is
+     * not the volume he chose to have room on. Kept after the run, not deleted: a retry
+     * of the failed rows then re-renders only those rows, and the folder says plainly
+     * what it is. */
+    function renderDir() {
+        return path.join(outDir(), "_renders");
+    }
+
+    /* The cuts a render phase has to produce, as the host's "label|in|out" records. Only
+     * video, only the chosen track, only what is actually ticked — the same set the
+     * engine will be asked to cut, or the two would disagree about what a run is. */
+    function renderSpec() {
+        var want = Number(state.vtrackWant || 0);
+        var picked = pickedClips(), out = [], i, c;
+        for (i = 0; i < picked.length; i++) {
+            c = picked[i];
+            if (c.trackType !== "video") continue;
+            if (want && Number(c.trackIndex) !== want) continue;
+            if (!(c.timelineOut > c.timelineIn)) continue;
+            /* The label IS the filename xmlcut.py looks the render up by, so it is
+             * built from the timeline geometry and never from the clip's name.
+             *
+             * ⚠️ IN **AND** OUT. A cross-dissolve leaves the outgoing clip's overlap
+             * sitting on the exact frame the incoming clip starts, so two cuts on one
+             * track really can share an in-point — a 10-frame tail and an 88-frame clip
+             * both at frame 448 on a real timeline. With the in-point alone they named
+             * the same render and one of them got a file 78 frames too long. */
+            out.push(c.trackType + "-" + c.trackIndex + "-" + c.timelineIn
+                + "-" + c.timelineOut
+                + "|" + c.timelineIn + "|" + c.timelineOut);
+        }
+        return out;
+    }
+
     function renderScaleRead() {
         if (!el.scaleread) return;
         var pct = state.scale;
-        if (pct >= 100) { el.scaleread.textContent = "100% · source"; return; }
+        var NAMES = { 100: "Full", 50: "Half", 25: "Quarter", 12.5: "Eighth" };
+        var name = NAMES[pct] || (pct + "%");
+        if (pct >= 100) { el.scaleread.textContent = "Full · source"; return; }
         // The clips that will actually be CUT, not every clip on the timeline: an
         // unticked 3000x3000 still would otherwise turn a uniform 1080x1920 export into
         // "mixed sources" on the strength of a file nobody is exporting.
@@ -2266,7 +3222,7 @@
             if (!seen[k]) { seen[k] = 1; n++; dims = [c.w, c.h]; }
         }
         var out = (n === 1) ? scaledDims(dims[0], dims[1], pct) : null;
-        el.scaleread.textContent = pct + "% · "
+        el.scaleread.textContent = name + " · "
             + (out ? (out[0] + "×" + out[1])
                    : (n > 1 ? "mixed sources" : "of source"));
     }
@@ -2276,6 +3232,18 @@
      * MB here is 1024*1024, matching humanBytes — the two numbers sit next to each other
      * on the same row, and a clip shown as "10 MB" that is not flagged by a 10 MB cap
      * would read as a bug in whichever of the two the reader trusted less. */
+    /* "H.265", not "libx265" — the stale-size line is read next to a dropdown that says
+     * H.264 and H.265, and an ffmpeg library name there reads as a different setting. */
+    function codecName(v) {
+        return v === "libx265" ? "H.265" : "H.264";
+    }
+
+    /* The encoders this panel can SHOW. Diffed against index.html by tests/check_panel.js,
+     * because the two have to agree in both directions: an option in the markup and not
+     * here would make every preset naming it warn as unrepresentable, and an entry here
+     * with no option would let applyPreset set a value the dropdown cannot display. */
+    var PANEL_VCODECS = ["libx264", "libx265"];
+
     function capBytes() {
         return state.cap > 0 ? state.cap * 1024 * 1024 : 0;
     }
@@ -2287,7 +3255,13 @@
      * field asked at export time rather than the one being asked now. */
     function isOver(r) {
         var lim = capBytes();
-        return !!(lim && r && r.bytes > lim);
+        /* A FAILURE is not a size problem. ffmpeg can leave a partial file behind when it
+         * exits non-zero, and that wreckage can be larger than the flag — but the fact worth
+         * reporting about that clip is that it did not write, not how heavy the debris is.
+         * The rows exclude it for the same reason, and this is the function that has to
+         * agree with them: a count that disagrees with the rows under it is worse than no
+         * count. */
+        return !!(lim && r && !r.bad && r.bytes > lim);
     }
 
     /* The CRF band, MEASURED on real 1080x1920 footage at 13-15 Mbps — SSIM against the
@@ -2387,9 +3361,11 @@
             // Never a scaled number. The sizes shown are the ones that were measured, and
             // the line says which settings they belong to.
             el.sizeest.textContent = "~" + humanBytes(total) + " for " + picked.length
-                + " clip(s) — measured at CRF " + state.probeCrf + " · "
-                + state.probeScale + "% size. Re-measure to update these for CRF "
-                + state.crfVal + " · " + state.scale + "%.";
+                + " clip(s) — measured at " + codecName(state.probeVcodec) + " CRF "
+                + state.probeCrf + " · " + state.probeScale
+                + "% size. Re-measure to update these for "
+                + codecName(settings().vcodec) + " CRF " + state.crfVal + " · "
+                + state.scale + "%.";
         } else if (measured()) {
             el.sizeest.textContent = "~" + humanBytes(total) + " for " + picked.length
                 + " clip(s) — measured, by encoding a second of each clip at these"
@@ -2415,6 +3391,10 @@
         } else {
             show(el.fpswarn, false);
         }
+        renderAudioTracks();
+        renderVideoTracks();
+        applyCutFrom();
+        renderListLabel();
         renderSizeEstimate();
         rememberSettings();
     }
@@ -2481,19 +3461,50 @@
     function applyPreset(name) {
         var s = state.presets && state.presets[name];
         if (!s) return;
+        // Both halves below can be unrepresentable at once, so the refusals are collected
+        // and said together rather than one of them overwriting the other.
+        var refused = [];
         if (s.bitrate) {
-            el.presetwarn.textContent = "\u201c" + name + "\u201d targets a bitrate of "
+            refused.push("\u201c" + name + "\u201d targets a bitrate of "
                 + s.bitrate + ". This panel exports by CRF only, so its quality setting "
                 + "was NOT applied — CRF " + state.crfVal + " still stands. Run "
-                + "xmlcut.py --bitrate " + s.bitrate + " from a terminal if you need it.";
-            show(el.presetwarn, true);
+                + "xmlcut.py --bitrate " + s.bitrate + " from a terminal if you need it.");
         } else {
-            show(el.presetwarn, false);
             // parseFloat, not parseInt: a preset saved at crf 18.5 must not come back
             // as 18 while still calling itself by the same name.
             if (s.crf) {
                 state.crfVal = Math.max(1, Math.min(35, parseFloat(s.crf) || 1));
             }
+        }
+        /* THE ENCODER IS A STORED SETTING, so applying a preset has to move the dropdown.
+         * Until this was added, a preset saved while H.265 was chosen came back as H.264:
+         * the panel showed one encoder and exported it, under a name the person had chosen
+         * precisely so they would not have to remember which. It belongs with crf and
+         * scale — it determines the size — not with the size flag.
+         *
+         * A preset with NO vcodec is H.264 by definition: either it predates the dropdown,
+         * when x264 was the only encoder there was, or a panel saved it while dropping the
+         * field. Leaving the current encoder standing instead would make one preset mean
+         * different things depending on what happened to be on screen before it, which is
+         * the same fault in the other direction. */
+        var vc = s.vcodec ? String(s.vcodec) : "libx264";
+        if (PANEL_VCODECS.indexOf(vc) < 0) {
+            /* A presets.json is meant to be hand-editable, so it can name an encoder this
+             * panel has no option for. Same rule as the bitrate half: refuse it out loud.
+             * Falling back to H.264 silently would export something the preset's name says
+             * it is not, and setting the value anyway would leave the dropdown blank. */
+            refused.push("\u201c" + name + "\u201d was saved with encoder " + vc
+                + ", which this panel cannot show. Its encoder was NOT applied — "
+                + codecName(el.vcodec.value) + " still stands. Run xmlcut.py --vcodec "
+                + vc + " from a terminal if you need it.");
+        } else {
+            el.vcodec.value = vc;
+        }
+        if (refused.length) {
+            el.presetwarn.textContent = refused.join(" ");
+            show(el.presetwarn, true);
+        } else {
+            show(el.presetwarn, false);
         }
         el.fps.value = s.fps ? String(s.fps) : "";
         state.scale = s.scale ? Math.max(10, Math.min(100, parseFloat(s.scale) || 100)) : 100;
@@ -2667,6 +3678,7 @@
 
     function buildReport() {
         state.report = [];
+        state.reportFresh = true;
         if (manifestMtime() === state.manifestBefore) {
             // Nothing was written this run — do not present an older manifest as this
             // run's result.
@@ -2719,7 +3731,32 @@
             else if (st === "unsupported") facts.push("not decodable");
             else if (st === "skipped_existing") facts.push("kept");
 
+            /* The manifest is the AUTHORITY on what happened, and the row states are
+             * brought up to it here. The live states came off stdout, which cannot know
+             * the finished size and never hears about a clip that returned before it
+             * announced itself — a missing source, or one --resume skipped. This is also
+             * what makes the table the report: after this loop every row says what the
+             * manifest says. */
+            /* Built by hand rather than through clipKey(), because a manifest row is not a
+             * clip row — it carries the engine's field names. It must spell the SAME four
+             * fields, out-point included, or the report would write to keys no row holds. */
+            var rkey = String(c.track_type || "video") + " "
+                + Number(c.track_index || 1) + " "
+                + Number(c.timeline_in_frames || 0) + " "
+                + Number(c.timeline_out_frames || 0);
+            setRow(rkey, {
+                st: bad ? "bad" : (st === "skipped_existing" ? "kept"
+                                   : (st === "ok" ? "ok" : "bad")),
+                bytes: wrote,
+                // What to say in the last column when it is not just a time: the reason it
+                // failed, or that the file was already there.
+                note: bad ? String(c.error || st).split("\n")[0].substring(0, 90)
+                    : (st === "skipped_existing" ? "already there"
+                       : (st === "unsupported" ? "not decodable" : "")),
+                done: true
+            });
             state.report.push({
+                key: rkey,
                 name: String(c.output_file || c.clip_name || "?"),
                 facts: facts.join(" · "),
                 bad: bad,
@@ -2800,65 +3837,67 @@
         return true;
     }
 
+    /* The end of a run, said once — and NOT as a second list.
+     *
+     * This used to build #rows: every clip again, with a marker, a name and a facts string,
+     * in a section that appeared where the table had been hidden. Same clips, third visual
+     * language, and the ticks and type colours gone. buildReport() now brings the row states
+     * up to what the manifest says, so the table you have been watching IS the report; what
+     * is left here is the filter and the counts, which are about the run, not a clip. */
+    /* The keys of the clips that did not write, for a retry to run and for the headline to
+     * count. Derived from the report rather than stored, so it answers for whatever run is
+     * currently on screen. */
+    function failedRows() {
+        var out = [];
+        for (var i = 0; i < state.report.length; i++) {
+            if (state.report[i].bad && state.report[i].key) out.push(state.report[i]);
+        }
+        return out;
+    }
+
     function renderReport() {
-        var only = el.onlyprob.checked;
-        var shown = 0;
-        // Offering "only problems" when there are none is a control that can only produce
-        // "No problems." Hidden instead.
-        var anyProblem = false;
+        var anyProblem = false, nOver = 0;
         for (var q = 0; q < state.report.length; q++) {
             if (state.report[q].problem) anyProblem = true;
+            if (isOver(state.report[q])) nOver++;
         }
-        if (!anyProblem && el.onlyprob.checked) el.onlyprob.checked = only = false;
-        show(el.onlyproblab, anyProblem);
-        el.rows.innerHTML = "";
-        for (var i = 0; i < state.report.length; i++) {
-            var r = state.report[i];
-            if (only && !r.problem) continue;
-            shown++;
-            var div = document.createElement("div");
-            /* ONE marker per row, and the list becomes scannable by colour alone.
-             *
-             * Precedence runs by what needs attention, not by what is nicest to report:
-             * broken, then bigger than you asked for, then left alone by --resume, then
-             * written and fine. A clip can be both written and over the flag; the flag is
-             * the half worth seeing, so amber wins over green.
-             *
-             * The marker is put in the DOM text rather than by CSS ::before so that it is
-             * part of what the row SAYS. The copied report is built from state.report, not
-             * from these nodes, so nothing leaks into the paste. */
-            var mark = r.bad ? "✕ " : isOver(r) ? "▲ " : r.kept ? "– " : r.wrote ? "✓ " : "";
-            div.className = "row2"
-                + (r.bad ? " isbad" : (r.warn ? " iswarn" : ""))
-                + (isOver(r) ? " isover" : (r.wrote ? " isok" : r.kept ? " iskept" : ""));
-            var nm = document.createElement("span");
-            nm.className = "nm";
-            nm.textContent = mark + r.name;
-            div.appendChild(nm);
-            if (r.facts) {
-                var f = document.createElement("span");
-                f.className = "facts";
-                f.textContent = r.facts;
-                div.appendChild(f);
-            }
-            el.rows.appendChild(div);
+        /* FAILURES LEAD. When clips did not write, the list filters itself down to them and
+         * the primary action becomes retrying those — the two things you would otherwise do
+         * by hand, in that order, after reading nineteen rows to find the two red ones.
+         *
+         * Auto-ticked only when a run has just produced failures (state.reportFresh), never
+         * on a re-render: typing a new size threshold or clicking a row must not silently
+         * re-filter a list he has just unfiltered. */
+        var failed = failedRows();
+        if (state.reportFresh) {
+            state.reportFresh = false;
+            el.onlyprob.checked = failed.length > 0;
         }
-        // "18 of 18 shown" restated the "18 written" pill directly above it. Only says
-        // anything when the filter is actually hiding something — or when the size flag
-        // has something to report, which is the one fact this line can add.
-        var nOver = 0;
-        for (var z = 0; z < state.report.length; z++) if (isOver(state.report[z])) nOver++;
-        el.repcount.textContent = (shown === state.report.length)
-            ? (nOver ? nOver + " over " + state.cap + " MB" : "")
-            : (shown + " of " + state.report.length + " shown"
-               + (nOver ? " · " + nOver + " over " + state.cap + " MB" : ""));
+        show(el.retry, failed.length > 0);
+        // One expression, not a special case for a single failure: "Retry the 1 that failed"
+        // reads correctly out of the general form, and a hard-coded branch beside a computed
+        // one is where an off-by-one hides — the fixture has exactly one failure, so the
+        // computed half was never exercised by a test at all.
+        el.retry.textContent = "Retry the " + failed.length + " that failed";
+        el.retry.disabled = state.busy || state.running;
+        /* Two primaries would compete, so only one of them is ever the primary: retrying is
+         * the next move when something failed, and exporting again is the next move when
+         * nothing did. */
+        el.again.className = failed.length > 0 ? "mini" : "primary";
+        // Offering "only problems" when there are none is a control that can only produce
+        // an empty list. Hidden instead — and un-ticked, so a run that fixes everything
+        // cannot leave the table filtered down to nothing.
+        if (!anyProblem && el.onlyprob.checked) el.onlyprob.checked = false;
+        show(el.onlyproblab, anyProblem || nOver > 0);
+        el.repcount.textContent = nOver ? (nOver + " over " + state.cap + " MB") : "";
         el.repcount.className = "repcount" + (nOver ? " hit" : "");
-        if (!shown) {
-            var e2 = document.createElement("div");
-            e2.className = "row2";
-            e2.textContent = only ? "No problems." : "Nothing to show.";
-            el.rows.appendChild(e2);
-        }
+        barMode();
+        /* The headline lives in the next-action line at the top of the panel, and this is the
+         * only place that knows a run has just failed. refreshExportEnabled() runs before the
+         * report is revealed — it is called from setBusy() — so without this the line still
+         * read "Ready. 4 clips will be written…" underneath a report saying two did not. */
+        renderNext();
+        renderClips();
     }
 
     /* A CEP panel has no reliable navigator.clipboard, so everything goes through a
@@ -2981,10 +4020,25 @@
         }
     });
 
+    el.retry.addEventListener("click", function () {
+        var keys = [];
+        var bad = failedRows();
+        for (var i = 0; i < bad.length; i++) keys.push(bad[i].key);
+        if (!keys.length) return;
+        state.retryKeys = keys;
+        /* Straight into the run. doExport() hides the report and shows progress itself, and
+         * the rows being retried go back to "encoding" as their start lines arrive — the rest
+         * keep the results they already have. */
+        doExport();
+    });
+
     el.again.addEventListener("click", function () {
+        /* Back to planning. The rows keep the finished run's states — they are facts about
+         * files on disk, and jobsReset() clears them when the next run actually starts, not
+         * when you say you might. The list and the settings never went away, so there is
+         * nothing here to restore. */
         show(el.report, false);
-        show(el.opts, true);
-        show(el.step3, true);
+        barMode();
         clearError();
     });
 
@@ -3011,6 +4065,27 @@
     });
 
     el.onlyprob.addEventListener("change", renderReport);
+
+    el.wholeframes.addEventListener("change", function () {
+        try { window.localStorage.setItem("xmlcut.wholeframes",
+                                          el.wholeframes.checked ? "1" : ""); } catch (e) {}
+        // It changes which frames land in the file, so it is not the named preset any more.
+        el.preset.value = "";
+        el.delpreset.disabled = true;
+        if (state.clips.length) renderClips();
+    });
+
+    el.audiosel.addEventListener("change", function () {
+        /* ⚠️ state.audioWant TOO, not only localStorage. renderAudioTracks() rebuilds the menu on
+         * every settings repaint and sets its value from state — so writing the choice to storage
+         * alone let the very next repaint put the old value back, and the flag never reached the
+         * engine. */
+        state.audioWant = String(el.audiosel.value || "");
+        try { window.localStorage.setItem("xmlcut.audio", state.audioWant); } catch (e) {}
+        // It changes what a run writes, so it is not the named preset any more.
+        el.preset.value = "";
+        el.delpreset.disabled = true;
+    });
 
     el.resume.addEventListener("change", function () {
         state.resume = el.resume.checked;
@@ -3061,6 +4136,264 @@
     // readSequence() re-expands the step itself on the way through its reset.
     el.readagain.addEventListener("click", function () { readSequence(); });
     el.updbtn.addEventListener("click", applyUpdate);
+    /* --------------------------------------------- POC · export with effects
+     *
+     * Cutting reads RAW SOURCE MEDIA, so nothing done on the timeline reaches the
+     * clips — no colour, no Motion, no titles, no speed ramp. Only Premiere can bake
+     * those in, by rendering the timeline range instead of seeking the source file.
+     *
+     * The question that decides whether that is buildable is not whether it works —
+     * it is what ONE export costs in fixed overhead. At a second a cut, rendering
+     * every cut separately is plainly right: it removes the frame-alignment risk
+     * entirely, keeps resume and per-row retry working, and needs no intermediate on
+     * disk. At fifteen seconds a cut, a sixty-cut timeline is fifteen minutes of
+     * nothing and the whole approach has to change to one render, sliced.
+     *
+     * So: two ranges of different lengths, then the first one again.
+     *
+     *     warm-up   = first − repeat            (a one-off, not a per-cut cost)
+     *     per frame = (long − repeat) / (long frames − short frames)
+     *     overhead  = repeat − per frame × short frames
+     *
+     * Two points is a line, not a model, and it is reported as one. It is enough to
+     * separate a second from fifteen, which is the only distinction the architecture
+     * actually turns on.
+     *
+     * Nothing here touches an export. It renders two short ranges and puts the
+     * sequence's in/out points back where it found them.
+     */
+
+    /* `pad` because this is a report to be read, not a status to be glanced at: it
+     * keeps the line breaks, sizes the text like body copy, and stays selectable so
+     * the numbers can be copied out. */
+    function pocSay(text, cls) {
+        el.pocnote.className = "note pad" + (cls ? " " + cls : "");
+        el.pocnote.textContent = text;
+        show(el.pocnote, true);
+    }
+
+    function pocMins(secs) {
+        return secs < 90 ? (Math.round(secs) + "s")
+                         : ((secs / 60).toFixed(1) + " min");
+    }
+
+    /* The shortest video cut and the longest, so the two timings differ by as much as
+     * this timeline allows — two ranges a frame apart measure nothing but noise. Both
+     * are capped, because a probe that renders a five-minute clip is not a probe. */
+    function pocPickRanges() {
+        var fps = Number((state.info && state.info.fps) || 0) || 25;
+        var cap = Math.max(1, Math.round(fps * 20));
+        var vids = [], i, c, n;
+        for (i = 0; i < state.clips.length; i++) {
+            c = state.clips[i];
+            if (c.trackType !== "video") continue;
+            n = c.timelineOut - c.timelineIn;
+            if (n > 0) vids.push({ label: c.clip, inF: c.timelineIn,
+                                   outF: c.timelineOut, n: n });
+        }
+        if (!vids.length) return [];
+        vids.sort(function (a, b) { return a.n - b.n; });
+
+        function capped(v) {
+            return { label: v.label, inF: v.inF,
+                     outF: Math.min(v.outF, v.inF + cap) };
+        }
+        var a = capped(vids[0]);
+        var b = capped(vids[vids.length - 1]);
+        // Equal lengths after capping — or only one clip — leave nothing to fit a line
+        // through. One render still answers "does it work at all", which is worth having.
+        if ((b.outF - b.inF) === (a.outF - a.inF)) return [a];
+        return [a, b];
+    }
+
+    function pocSpec(ranges) {
+        var parts = [], i, lab;
+        for (i = 0; i < ranges.length; i++) {
+            // `|` and `;` are the host's field and record separators, and a clip called
+            // "A;B" would otherwise silently become two malformed records.
+            lab = String(ranges[i].label || "clip")
+                .replace(/[|;]/g, " ").replace(/\s+/g, "_").substring(0, 28);
+            parts.push(lab + "|" + ranges[i].inF + "|" + ranges[i].outF);
+        }
+        return parts.join(";");
+    }
+
+    function pocReport(r) {
+        var L = [], rs = r.renders || [], i, t, x;
+        for (i = 0; i < (r.tried || []).length; i++) log("poc: " + r.tried[i]);
+        for (i = 0; i < rs.length; i++) {
+            for (t = 0; t < (rs[i].tried || []).length; t++) {
+                log("poc: " + rs[i].label + ": " + rs[i].tried[t]);
+            }
+        }
+
+        if (!r.ok) {
+            L.push(r.error || "The probe failed.");
+            for (i = 0; i < rs.length; i++) {
+                for (t = 0; t < (rs[i].tried || []).length; t++) {
+                    L.push("· " + rs[i].tried[t]);
+                }
+            }
+            L.push("");
+            L.push("Every attempt is in the log, under the gear.");
+            pocSay(L.join("\n"), "bad");
+            return;
+        }
+
+        var ok = [];
+        for (i = 0; i < rs.length; i++) if (rs[i].ok) ok.push(rs[i]);
+
+        L.push("✅ Premiere rendered " + ok.length + " of " + rs.length
+            + " range(s) — " + (ok[0].method || "?"));
+        L.push("Preset: " + (r.preset_name || r.preset || "?"));
+
+        /* Frame accuracy. The in/out is set in seconds and read back in ticks, so this
+         * is the round-trip error measured rather than assumed. Anything but zero here
+         * would mean every cut lands off by a fraction of a frame. */
+        var off = 0, howRead = "";
+        for (i = 0; i < rs.length; i++) {
+            var a = Math.abs(Number(rs[i].in_off_frames || 0));
+            var b = Math.abs(Number(rs[i].out_off_frames || 0));
+            if (a > off) off = a;
+            if (b > off) off = b;
+            if (!howRead && rs[i].read_how) howRead = rs[i].read_how;
+        }
+        L.push(off === 0
+            ? "🎯 In/out landed exactly on the frames asked for (" + howRead + ")."
+            : "⚠️ In/out was off by up to " + off.toFixed(3) + " frame(s) ("
+                + howRead + ").");
+        L.push("");
+
+        for (i = 0; i < rs.length; i++) {
+            x = rs[i];
+            if (!x.ok) {
+                L.push("· " + x.label + " — " + (x.error || "no file written"));
+                continue;
+            }
+            L.push("· " + x.label + " — " + x.frames + " frames in "
+                + (x.ms / 1000).toFixed(1) + "s"
+                + (x.bytes ? "  (" + (x.bytes / 1048576).toFixed(1) + " MB)" : ""));
+        }
+        L.push("");
+
+        var first = null, longer = null, repeat = null;
+        for (i = 0; i < rs.length; i++) {
+            if (rs[i].is_repeat_of === 0) repeat = rs[i];
+            else if (first === null) first = rs[i];
+            else if (longer === null) longer = rs[i];
+        }
+
+        if (first && repeat && first.ok && repeat.ok) {
+            var warm = first.ms - repeat.ms;
+            if (warm > 250) {
+                L.push("Warm-up: the first render cost " + (warm / 1000).toFixed(1)
+                    + "s more than the identical repeat — paid once, not per cut.");
+            }
+        }
+
+        // The WARM timing is the honest per-export cost; the first one carries start-up.
+        var base = (repeat && repeat.ok) ? repeat : first;
+        if (!(base && base.ok && longer && longer.ok
+              && longer.frames !== base.frames)) {
+            L.push("Only one length rendered, so fixed overhead cannot be separated"
+                + " from encoding time. The numbers above are still real timings.");
+            pocFinish(L, r);
+            return;
+        }
+
+        var perFrame = (longer.ms - base.ms) / (longer.frames - base.frames);
+        var overhead = base.ms - perFrame * base.frames;
+        if (!(perFrame > 0) || !(overhead > 0)) {
+            L.push("The two timings were too close to tell overhead and encoding apart"
+                + " — " + base.frames + " and " + longer.frames + " frames took "
+                + (base.ms / 1000).toFixed(1) + "s and "
+                + (longer.ms / 1000).toFixed(1) + "s. Try a timeline with a longer clip.");
+            pocFinish(L, r);
+            return;
+        }
+
+        var cuts = 0, frames = 0, seqEnd = 0, c;
+        for (i = 0; i < state.clips.length; i++) {
+            c = state.clips[i];
+            if (c.timelineOut > seqEnd) seqEnd = c.timelineOut;
+            if (c.trackType !== "video") continue;
+            cuts++;
+            frames += (c.timelineOut - c.timelineIn);
+        }
+        var perSeg = (cuts * overhead + perFrame * frames) / 1000;
+        var oneGo = (overhead + perFrame * seqEnd) / 1000;
+
+        L.push("Overhead per export: " + (overhead / 1000).toFixed(1)
+            + "s · encoding: " + perFrame.toFixed(1) + " ms/frame");
+        L.push("This timeline — " + cuts + " video cuts, " + frames + " frames:");
+        L.push("   each cut rendered separately ≈ " + pocMins(perSeg));
+        L.push("   the whole sequence rendered once ≈ " + pocMins(oneGo)
+            + " (then sliced by ffmpeg)");
+        L.push("");
+        L.push("Two timings is a line, not a model — enough to tell a second a cut"
+            + " from fifteen, which is all this has to decide.");
+        pocFinish(L, r);
+    }
+
+    function pocFinish(L, r) {
+        L.push("");
+        L.push(r.restored
+            ? "Your in/out points were put back."
+            : "⚠️ Your in/out points could NOT be restored — check the timeline.");
+        if (r.folder) {
+            L.push("Files: " + r.folder);
+            reveal(r.folder);
+        }
+        pocSay(L.join("\n"), r.restored ? "" : "warn");
+    }
+
+    function runRenderPoc() {
+        if (!state.clips.length) {
+            pocSay("Read the timeline first — the probe renders two of its own clips,"
+                + " so it needs the cut list.", "warn");
+            return;
+        }
+        if (state.running) {
+            pocSay("An export is running. Let it finish first.", "warn");
+            return;
+        }
+        var ranges = pocPickRanges();
+        if (!ranges.length) {
+            pocSay("No video clips on this timeline to render.", "warn");
+            return;
+        }
+        var dir = String(state.out || "").replace(/\/+$/, "");
+        if (!dir) {
+            pocSay("Set a destination folder first — the renders have to land"
+                + " somewhere.", "warn");
+            return;
+        }
+        dir = dir + "/_render_poc";
+
+        el.pocrender.disabled = true;
+        pocSay("Rendering " + (ranges.length + 1) + " range(s) through Premiere."
+            + "\nPremiere is busy until it finishes. This panel stays live.", "");
+        log("poc: probing " + dir);
+
+        cs.evalScript("probeRender(" + jsStr(dir) + ", " + jsStr(pocSpec(ranges))
+            + ", " + renderMbps() + ", 1)",
+            function (raw) {
+                el.pocrender.disabled = false;
+                var r;
+                try {
+                    r = JSON.parse(raw);
+                } catch (e) {
+                    log("poc: unreadable reply: " + raw);
+                    pocSay("Premiere did not return a readable reply. The raw text is"
+                        + " in the log, under the gear.", "bad");
+                    return;
+                }
+                pocReport(r);
+            });
+    }
+
+    el.pocrender.addEventListener("click", runRenderPoc);
+
     el.checkupd.addEventListener("click", function () { checkUpdate(true); });
     el.recheck.addEventListener("click", function () { recheckScript(false); });
 
@@ -3089,9 +4422,11 @@
     /* Resolution applies ON TOP of the quality setting rather than competing with it — it
      * resamples space, not bits. It does clear the named preset, because unlike the size
      * flag it genuinely changes what ffmpeg is told. */
-    el.scale.addEventListener("input", function () {
-        var v = parseInt(el.scale.value, 10);
-        if (!isNaN(v)) state.scale = Math.max(10, Math.min(100, v));
+    /* `change`, not `input`, and parseFloat, not parseInt: this is a <select> of named
+     * fractions now, and "12.5" truncated to 12 would silently export an Eighth as 12%. */
+    el.scale.addEventListener("change", function () {
+        var v = parseFloat(el.scale.value);
+        if (!isNaN(v)) state.scale = Math.max(1, Math.min(100, v));
         el.preset.value = "";
         el.delpreset.disabled = true;
         show(el.presetwarn, false);
@@ -3150,7 +4485,8 @@
             var dx = e.clientX - x0;
             if (!moved && Math.abs(dx) < SLOP) return;
             moved = true;
-            document.body.className = "scrubbing";
+            state.scrubbing = true;
+            paintBody();
             var v = Math.max(0, Math.round(v0 + dx / pxPer));
             if (String(v) !== input.value) {
                 input.value = String(v);
@@ -3160,7 +4496,8 @@
         document.addEventListener("mouseup", function () {
             if (!live) return;
             live = false;
-            document.body.className = "";
+            state.scrubbing = false;
+            paintBody();
             if (!moved) {
                 if (input.focus) input.focus();
                 if (input.select) input.select();
@@ -3172,7 +4509,7 @@
     // single pixel of jitter cannot move the number.
     scrubNumber(el.cap, 3, applyCap);
 
-    var setInputs = [el.fps];
+    var setInputs = [el.fps, el.vcodec, el.audiosel];
     for (var si = 0; si < setInputs.length; si++) {
         setInputs[si].addEventListener("change", function () {
             // Any hand edit means the settings are no longer the named preset.
@@ -3186,6 +4523,28 @@
         el.delpreset.disabled = !el.preset.value;
         if (el.preset.value) applyPreset(el.preset.value);
     });
+
+    /* ⚠️ NOT in the setInputs loop above, and not in a preset. A preset is the ENGINE's
+     * file and describes an ENCODE — crf, codec, scale, rate. Where the pixels come from
+     * is a different kind of choice, and putting it in a preset would mean applying a
+     * saved preset could silently switch a run from source to render. */
+    el.cutfrom.addEventListener("change", function () {
+        state.cutFrom = String(el.cutfrom.value || "source");
+        try { window.localStorage.setItem("xmlcut.cutfrom", state.cutFrom); } catch (e) {}
+        applyCutFrom();
+        renderSettings();
+        if (state.clips.length) renderClips();
+    });
+
+    el.vtrack.addEventListener("change", function () {
+        state.vtrackWant = String(el.vtrack.value || "");
+        renderListLabel();
+        // The new master must be ticked and locked, and the old one released.
+        renderIncludeTracks();
+        try { window.localStorage.setItem("xmlcut.vtrack", state.vtrackWant); } catch (e) {}
+        renderSettings();
+        if (state.clips.length) renderClips();
+    });
     el.savepreset.addEventListener("click", function () {
         cs.evalScript("askName(" + jsStr("Save these export settings as:") + ")",
             function (name) {
@@ -3195,6 +4554,11 @@
                 if (s.crf) a.push("--crf", String(s.crf));
                 if (s.fps) a.push("--fps", String(s.fps));
                 if (s.scale && s.scale < 100) a.push("--scale", String(s.scale));
+                // Same convention as settingArgs(): sent only when it differs from H.264.
+                // Omitting it does NOT leave the preset silent about the encoder — the
+                // engine records vcodec_of(args), which resolves an absent --vcodec to
+                // libx264, so a preset always names one.
+                if (s.vcodec && s.vcodec !== "libx264") a.push("--vcodec", s.vcodec);
                 runJson(a, function () {
                     loadPresets(function () {
                         el.preset.value = name;
@@ -3277,6 +4641,33 @@
             state.resume = !!window.localStorage.getItem("xmlcut.resume");
         } catch (e) { state.resume = false; }
         el.resume.checked = state.resume;
+        // Remembered the same way, and for the same reason: it is a property of how he works
+        // rather than of this timeline. The TRACK part of it is re-checked against each
+        // timeline in renderAudioTracks(), because A2 on one project is not A2 on the next.
+        try {
+            state.audioWant = window.localStorage.getItem("xmlcut.audio") || "";
+        } catch (e) { state.audioWant = ""; }
+        try {
+            el.wholeframes.checked = !!window.localStorage.getItem("xmlcut.wholeframes");
+        } catch (e) { el.wholeframes.checked = false; }
+        /* Remembered across sessions, like the audio choice and for the same reason: it is
+         * a property of how he works, not of this one timeline. The track number is kept
+         * too but re-validated against whatever gets read — V3 on the last project may not
+         * exist on this one, and renderVideoTracks() falls back to the lowest track. */
+        try {
+            state.cutFrom = window.localStorage.getItem("xmlcut.cutfrom") === "render"
+                ? "render" : "source";
+        } catch (e) { state.cutFrom = "source"; }
+        try {
+            state.vtrackWant = window.localStorage.getItem("xmlcut.vtrack") || "";
+        } catch (e) { state.vtrackWant = ""; }
+        /* Default ON. The overlays being baked in was reported as a bug, so the useful
+         * default is the one that does not do it — but the choice is remembered, because
+         * a timeline whose upper track is an adjustment layer wants the opposite. */
+        try {
+            state.vIncludeWant = window.localStorage.getItem("xmlcut.vinclude") || "";
+        } catch (e) { state.vIncludeWant = ""; }
+        applyCutFrom();
         restoreSettings();
         renderSettings();
         if (state.script) loadPresets();
