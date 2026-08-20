@@ -1,6 +1,6 @@
 {
-  "version": "3.53",
-  "notes": "Export with effects: render each cut through Premiere with its effects baked in. Master track plus a per-track include set, cross-dissolves split at the midpoint, graphics and offline media no longer skipped.",
+  "version": "3.54",
+  "notes": "Nest thanh 1 clip khi render timeline; so track audio khop Premiere (chon lai track audio giup minh); panel bao track nao that su duoc mix; clip chia raw/ va edited/; _renders tu xoa sau khi chay sach; them nut mo folder canh Export; gom thong bao ve mot cho.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

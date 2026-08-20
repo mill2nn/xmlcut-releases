@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.53"
+VERSION = "3.54"
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -56,7 +56,21 @@ STILL_EXT = {".png", ".jpg", ".jpeg", ".psd", ".tif", ".tiff", ".bmp",
              ".tga", ".gif", ".exr", ".dpx", ".webp", ".ai", ".eps"}
 
 # Project/comp files that ffmpeg cannot decode (dynamic-link, not media).
-UNSUPPORTED_EXT = {".aep", ".prproj", ".psb", ".c4d", ".aet", ".ppj", ".fcpxml"}
+#
+# ⚠️ .aegraphic AND .mogrt WERE MISSING, and because they are in neither this set nor
+# STILL_EXT they classified as ordinary decodable video — so an Essential Graphics
+# template WITH a file on disk was offered as cuttable footage that ffmpeg then cannot
+# open. On the reporter's timeline that was 37 of 56 cuts.
+#
+# They are RENDERABLE, unlike a .prproj: Premiere resolves them while rendering, so they
+# behave exactly like an .aep here — refused with a reason in source mode, offered under
+# --render-planned, and cut from a render when one exists. describe() words them as
+# "graphic — needs a render" rather than "AE comp", which is what they are.
+#
+# ⚠️ PAIRED WITH panel/client/main.js:1039 (DEAD_TYPES). If the panel's copy of this list
+# disagrees, a type the engine refuses arrives ticked by default, or the reverse.
+UNSUPPORTED_EXT = {".aep", ".prproj", ".psb", ".c4d", ".aet", ".ppj", ".fcpxml",
+                   ".aegraphic", ".mogrt"}
 
 # Premiere's native time unit. <pproTicksIn>/<pproTicksOut> give the source range in
 # absolute seconds — immune to frame-rate conforming AND already correct for speed
@@ -1167,6 +1181,15 @@ class Cut:
     clip_name: str = ""
     track_type: str = "video"
     track_index: int = 1
+    # ⚠️ A SEPARATE FIELD, NOT A REDEFINITION OF track_index. Premiere explodes one audio
+    # track into one <track> per channel, so the XML's lane ordinal is not the A-number the
+    # editor sees — the real export has 9 lanes for 4 tracks. But track_index feeds
+    # render_name(), pick_key() and the panel's clipKey, and collapsing 9 lanes to 4 numbers
+    # takes audio pick_keys from 21 distinct to 15: six collisions, where unticking one of
+    # two identical-looking "Typewriter" rows would silently drop both. So the lane ordinal
+    # stays in track_index and keeps owning the keys and filenames; premiere_track carries
+    # the A-number that --audio-tracks and the panel menu speak in.
+    premiere_track: int = 1
 
     # timeline position (sequence frame rate)
     timeline_in_frames: int = 0
@@ -1290,11 +1313,43 @@ class SequenceChoice(Exception):
 
 
 class Timeline:
-    def __init__(self, xml_path: Path, remaps: list[tuple[str, str]], select: Optional[str] = None):
+    def __init__(self, xml_path: Path, remaps: list[tuple[str, str]],
+                 select: Optional[str] = None, nest_mode: str = "all"):
         self.xml_path = xml_path
         self.remaps = remaps
         self.select = select
+        # WHAT A NESTED SEQUENCE BECOMES. Two states:
+        #
+        #   "one-cut"  render mode's default. A clipitem holding a <sequence> becomes ONE
+        #              cut spanning its own parent-timeline start/end. Premiere renders the
+        #              nest with every inner layer baked in, which is the whole point of
+        #              render mode — so there is nothing to look inside for.
+        #   "all"      source mode always, and render mode under --nest resolve. Every
+        #              inner track resolves onto the parent's track.
+        #
+        # ⚠️ AN INNER-V1-ONLY STATE WAS BUILT AND THEN DELETED, on measurement. "Treat the
+        # nest like the main timeline" reads at first as the master-track model — the nest's
+        # own V1 sets the cut points, upper layers are picture. On the one real nest
+        # available that rule cuts NOTHING: inner V1 and V2 are empty placeholder tracks
+        # (Premiere writes those) and the 35-shot spine runs along inner V5 and V6, split
+        # across two tracks because the editor dragged clips up under dissolves. Every
+        # single-track choice loses part of the edit — 0 cuts from the empty V1, 2 from V3,
+        # or 27 of 35 from V5 while dropping V6's 8. And the main timeline's own default is
+        # every video track (--video-track 0), so "like the main timeline" literally means
+        # all of them. The cost, accepted: a genuine title layer comes through as a cut.
+        #
+        # Defaults to "all" so every existing in-process construction — the test suites,
+        # overlay_dump, verify.py — behaves exactly as it did before this existed.
+        self.nest_mode = nest_mode
+        # Nests collapsed to one cut. Counted so the advisory can say so ONCE rather than
+        # per item, and so a number that shrinks can never do it quietly.
+        self.nests_one_cut: list[str] = []
         self.files: dict[str, dict] = {}
+        # <sequence> DEFINITIONS by id, for the same reason self.files exists: a nest's
+        # second appearance in the document is a bare <sequence id="…"/> with no children
+        # at all, and the frames it plays live on the first appearance. MEASURED on a real
+        # Premiere export — see _register_sequence.
+        self.sequences: dict[str, ET.Element] = {}
         self.cuts: list[Cut] = []
         # The timeline's AUDIO clipitems, kept whatever --tracks does to the cut list — the
         # voice-over mix reads them as a source rather than writing them as files of their own.
@@ -1409,6 +1464,40 @@ class Timeline:
         self.files[fid] = entry
         return fid
 
+    # -- nested sequence table --------------------------------------------
+    def _register_sequence(self, seq_node: ET.Element) -> None:
+        """Index a <sequence> that has a body, so a later bare reference can find it.
+
+        The same idiom as <file>, MEASURED on a real Premiere FCP7 export rather than
+        inferred — a timeline using one nest twice writes:
+
+            <clipitem id="clipitem-42">  <name>Nested Sequence 08</name>
+              <start>0</start> <end>1366</end> <in>0</in> <out>1366</out>
+              <sequence id="sequence-2">  duration rate name media timecode logginginfo
+            <clipitem id="clipitem-80">  <name>Nested Sequence 08</name>
+              <start>1366</start> <end>1586</end> <in>1366</in> <out>1586</out>
+              <sequence id="sequence-2"/>          <- NO CHILDREN AT ALL
+
+        The placeholder carries no name, no rate and no duration; its only identity is the
+        id attribute. The human-readable name lives on the enclosing clipitem, which is
+        where _parse_nested already looks for it.
+
+        ⚠️ THE TWO INSTANCES ARE NOT DUPLICATES. On that export the inline one plays the
+        nest's frames 0-1366 and the reference plays 1366-1586 — 220 frames of different
+        content, which resolved to nothing at all before this existed.
+
+        UNLIKE _register_file this records only DEFINITIONS. A file entry is a dict that a
+        reference still needs to exist so the lookup does not fail; a sequence reference is
+        resolved BY the index, so storing body-less elements would let a reference
+        overwrite the definition it is trying to find. Registering in one pass ahead of the
+        walk keeps it order-independent: the definition may appear after the reference and
+        this does not care.
+        """
+        sid = seq_node.get("id", "")
+        if not sid or seq_node.find("media") is None:
+            return
+        self.sequences[sid] = seq_node
+
     # -- main parse -------------------------------------------------------
     def _parse(self):
         root = ET.parse(self.xml_path).getroot()
@@ -1437,6 +1526,13 @@ class Timeline:
         for f in root.iter("file"):
             self._register_file(f)
 
+        # And every <sequence> that has a body, for exactly the same reason and in the same
+        # pass: a nest used twice is defined once and referenced by id alone after that.
+        # Order-independent, so a definition later in the document than its reference
+        # resolves just as well.
+        for s in root.iter("sequence"):
+            self._register_sequence(s)
+
         for m in seq.findall("marker"):
             self.markers.append({
                 "name": txt(m, "name"),
@@ -1454,7 +1550,14 @@ class Timeline:
             section = media.find(track_type)
             if section is None:
                 continue
+            # ⚠️ AUDIO ONLY. Video lanes carry no exploded attributes, so the rule would
+            # return 1..n for them anyway — but computing it only for audio makes it
+            # impossible for a future Premiere that DOES write them on video to renumber
+            # video tracks as a side effect. Video numbering is not part of this fix.
+            lanes = (self.premiere_track_numbers(section, track_type)
+                     if track_type == "audio" else [])
             for t_idx, track in enumerate(section.findall("track"), start=1):
+                p_track = lanes[t_idx - 1] if t_idx - 1 < len(lanes) else t_idx
                 transitions = self._collect_transitions(track)
                 edges = self.resolve_transition_edges(track)
                 for clip in track.findall("clipitem"):
@@ -1463,12 +1566,27 @@ class Timeline:
                     # timelines here do use nests, so those clips were simply absent
                     # from the dataset with nothing to show they were missing.
                     if clip.find("sequence") is not None:
+                        # ⚠️ RENDER MODE'S DEFAULT IS ONE CUT PER NEST INSTANCE, and it
+                        # deliberately reads NOTHING out of the nest's definition — only
+                        # this clipitem's own start/end/in/out. So it does not care whether
+                        # the <sequence> carries a <media> or is a bare id reference, and
+                        # a nest used twice becomes two cuts either way.
+                        if self.nest_mode == "one-cut":
+                            cut = self._parse_clipitem(clip, track_type, t_idx,
+                                                       transitions, edges=edges,
+                                                       premiere_track=p_track)
+                            if cut:
+                                self.nests_one_cut.append(cut.clip_name)
+                                self.cuts.append(cut)
+                            continue
                         self.cuts.extend(
                             self._parse_nested(clip, track_type, t_idx,
-                                               depth=1, edges=edges))
+                                               depth=1, edges=edges,
+                                               premiere_track=p_track))
                         continue
                     cut = self._parse_clipitem(clip, track_type, t_idx,
-                                               transitions, edges=edges)
+                                               transitions, edges=edges,
+                                               premiere_track=p_track)
                     if cut:
                         self.cuts.append(cut)
 
@@ -1483,9 +1601,106 @@ class Timeline:
                 f"{e['count']} clipitem(s) were not cut — {why}"
                 + (f": {names}{more}" if names else ""))
 
+        # ⚠️ SAID OUT LOUD, both of them. A cut count that quietly shrinks because the
+        # engine stopped looking inside something is the exact class of bug this whole
+        # thread started with — "62 video clips as Premiere counts them · 56 cut(s) read".
+        if self.nests_one_cut:
+            shown = sorted(set(self.nests_one_cut))
+            self.warnings.append(
+                f"{len(self.nests_one_cut)} nested sequence instance(s) cut as ONE clip "
+                f"each, because a render has every inner layer baked into it: "
+                + ", ".join(shown[:4]) + (", …" if len(shown) > 4 else "")
+                + " — pass --nest resolve to cut the clips inside them instead")
+
         self.cuts.sort(key=lambda c: (c.timeline_in_frames, c.track_type != "video", c.track_index))
         for i, c in enumerate(self.cuts, start=1):
             c.index = i
+
+    def premiere_track_numbers(self, section: ET.Element, track_type: str) -> list[int]:
+        """Lane ordinal -> Premiere track number, for one <video>/<audio> section.
+
+        ⚠️ PREMIERE EXPLODES ONE AUDIO TRACK INTO ONE <track> PER CHANNEL. On the one real
+        export available, the <audio> section holds NINE <track> elements for FOUR audio
+        tracks, so the document ordinal is a per-channel LANE index wearing an A-number.
+        That number reached --audio-tracks and the panel menu, which offered seven rows for
+        a four-track timeline — and `--audio-tracks 2` and `--audio-tracks 3` produced
+        byte-identical mp3s of the background music while the panel's own mismatch alarm
+        stayed quiet, because the filter applied perfectly to a meaningless number.
+
+        Premiere states the grouping itself, in ATTRIBUTES on <track>. MEASURED:
+
+            lane items currentExplodedTrackIndex totalExplodedTrackCount  ->  track
+              1     9              0                        1                  A1
+              2     2              0                        2                  A2
+              3     2              1                        2                  A2
+              4     3              0                        2                  A3
+              5     3              1                        2                  A3
+              6     1              0                        2                  A4
+              7     1              1                        2                  A4
+              8     0              0                        2                  A5 (empty)
+              9     0              1                        2                  A5 (empty)
+
+        So: absent or 0 starts a new track, non-zero continues the current one. Decided from
+        the ATTRIBUTES ALONE, before any clipitem is looked at, so an empty lane is numbered
+        like a populated one and consumes its group number without resetting anything — an
+        empty pair sitting between A1 and the music shifts every track above it, and a
+        content-derived rule cannot even see it.
+
+        ⚠️ totalExplodedTrackCount IS NOT THE DRIVER, and must not become one: lane 1 above
+        is a `total=1` stereo track, because its clips are mono. Lane count follows the
+        CLIPS' channel width, not the track's. It is used here only as a consistency check.
+
+        ⚠️ THE sourcetrack/trackindex RULE IS REFUTED — do not re-derive it. It collapses
+        both tests/PROMO_MASTER_v7.xml and the fixture check_audio_tracks.py generates into
+        a single audio track, it cannot number an empty lane at all, and a mono clip on a
+        stereo track writes ONE lane while an empty stereo track writes TWO.
+
+        Backward compatible by construction: the attribute is absent on every existing
+        fixture in this repo and on every <video> lane, and absent means "start a new
+        track", so the result is 1..n — byte-identical to the enumerate() this replaces.
+        """
+        tracks = section.findall("track")
+        out: list[int] = []
+        counter = 0
+        for lane, track in enumerate(tracks, start=1):
+            raw = track.get("currentExplodedTrackIndex")
+            if raw is None:
+                counter += 1
+            else:
+                try:
+                    cet = int(raw)
+                except (TypeError, ValueError):
+                    cet = 0
+                if cet == 0:
+                    counter += 1
+                elif counter == 0:
+                    # A continuation with nothing to continue — a hand-edited or truncated
+                    # file. Starting a group is the only answer that never yields track 0.
+                    self.warnings.append(
+                        f"{track_type} lane {lane} says it continues a Premiere track "
+                        f"(currentExplodedTrackIndex={raw}) but no track has started "
+                        f"before it — treated as the start of one")
+                    counter += 1
+            out.append(counter)
+
+        # totalExplodedTrackCount as a CHECK, never as the driver.
+        seen: dict = {}
+        want: dict = {}
+        for lane, (track, num) in enumerate(zip(tracks, out), start=1):
+            seen[num] = seen.get(num, 0) + 1
+            raw = track.get("totalExplodedTrackCount")
+            if raw is not None and num not in want:
+                try:
+                    want[num] = int(raw)
+                except (TypeError, ValueError):
+                    pass
+        for num, n_lanes in sorted(seen.items()):
+            if num in want and want[num] != n_lanes:
+                self.warnings.append(
+                    f"{track_type} track {num} is written as {n_lanes} lane(s) but "
+                    f"declares totalExplodedTrackCount={want[num]} — the grouping was "
+                    f"taken from currentExplodedTrackIndex, which is the reliable one")
+        return out
 
     @staticmethod
     def resolve_transition_edges(track: ET.Element) -> dict:
@@ -1558,7 +1773,8 @@ class Timeline:
         return out
 
     def _parse_nested(self, clip, track_type, t_idx, depth: int,
-                      edges: Optional[dict] = None) -> list[Cut]:
+                      edges: Optional[dict] = None,
+                      premiere_track: Optional[int] = None) -> list[Cut]:
         """Resolve a clipitem that contains a <sequence> instead of a <file>.
 
         The cuts are inside the nest; what the parent timeline contributes is a window
@@ -1570,9 +1786,20 @@ class Timeline:
         <in>/<out> are read in the CLIPITEM's rate, exactly as a file clipitem's are —
         Premiere conforms both to the parent sequence rate. Inner clipitems' own
         <start>/<end> are read in the NESTED sequence's rate. That is self-consistent
-        and verified against the fixture, but it has not been checked against a real
-        Premiere export of a nested timeline. Compare the cut count with Premiere the
-        first time you run this on one.
+        and verified against the fixture.
+
+        MEASURED against a real Premiere export as of 2026-08-20 (a client timeline
+        using one nest twice): the reference spelling is confirmed — see
+        _register_sequence — and both instances live inside a clipitem, so neither shows
+        up in the --sequence picker. What is still NOT measured is the RATE assumption in
+        the paragraph above: that export's nest runs at the parent's 30 fps, so a nest
+        with a different timebase would not have exercised it.
+
+        EVERY inner video track contributes, flattened onto the parent clipitem's track
+        index. This function is only reached at all when nest_mode is "all"; render mode's
+        default collapses a nest to one cut in _parse without coming here. An inner-V1-only
+        variant existed for part of one day and was deleted on measurement — the note on
+        Timeline.nest_mode records why, and nothing in this function should reintroduce it.
         """
         seq = clip.find("sequence")
         name = txt(clip, "name") or txt(seq, "name") or "Nested Sequence"
@@ -1580,6 +1807,22 @@ class Timeline:
             self.warnings.append(f"{name}: nested deeper than {MAX_NEST_DEPTH} levels "
                                  f"— those cuts are not extracted")
             return []
+
+        # ⚠️ RESOLVED HERE, BEFORE ANYTHING IS READ OUT OF `seq`. A bare
+        # <sequence id="…"/> has no <rate> either, so reading the nest's frame rate off the
+        # placeholder would silently fall back to the parent's and shift every inner cut on
+        # a nest whose timebase differs. The body is swapped in first; from this point on
+        # `seq` is the definition and everything below is unchanged.
+        #
+        # The WINDOW still comes from `clip` — start/end/in/out and the nest's own retime
+        # are the reference clipitem's own, and they are the whole reason the second
+        # instance is not a duplicate of the first.
+        seq_ref_id = seq.get("id", "")
+        if seq.find("media") is None and seq_ref_id:
+            defn = self.sequences.get(seq_ref_id)
+            # `is not seq` so a body-less element can never resolve to itself.
+            if defn is not None and defn is not seq:
+                seq = defn
 
         nest_fps = parse_rate(seq.find("rate"), self.sequence_fps)
         clip_fps = parse_rate(clip.find("rate"), self.sequence_fps)
@@ -1616,6 +1859,30 @@ class Timeline:
         media = seq.find("media")
         section = media.find(track_type) if media is not None else None
         if section is None:
+            # ⚠️ THIS USED TO BE A BARE `return []`. No warning, no _skip — a nest could
+            # contribute ZERO cuts and look exactly like a nest that had nothing in it.
+            # That is what a panel reading "62 video clips as Premiere counts them ·
+            # 56 cut(s) read" was: Premiere counts a nest as ONE clip, so fewer cuts than
+            # clips is arithmetically impossible unless the nests yielded nothing.
+            #
+            # ⚠️ TWO CAUSES, TWO SENTENCES, and conflating them cost an hour of someone's
+            # day. The first wording said "has no video track" for a nest that plainly had
+            # six of them — the definition simply lived on the other instance of the same
+            # nest. `media is None` here means the body was never found, which after the
+            # resolution above can only mean an unresolved REFERENCE; anything else is a
+            # definition that genuinely has no section for this track type.
+            if media is None:
+                self.warnings.append(
+                    f"{name}: this is a reference to sequence "
+                    f"id={seq_ref_id or '(none)'} and no definition for it was found in "
+                    f"this XML — it contributed no cuts")
+                self._skip("a nested sequence reference whose definition is not in "
+                           "this XML", name)
+            else:
+                self.warnings.append(
+                    f"{name}: the nested sequence has no <{track_type}> section anywhere "
+                    f"— it contributed no cuts")
+                self._skip(f"a nested sequence with no <{track_type}> section", name)
             return []
 
         # The visible window inside the nested timeline, in seconds
@@ -1624,15 +1891,37 @@ class Timeline:
         parent_lo_s = nest_start / self.sequence_fps
 
         out: list[Cut] = []
+        # EVERY inner track, onto the parent's track index. Not the nest's inner V1 alone:
+        # see the note on self.nest_mode for the measurement that killed that rule. The
+        # consequence to be aware of rather than surprised by is that a nest's stacked
+        # layers land on one parent track and therefore overlap, and
+        # split_transition_overlaps moves those boundaries as though they were dissolves.
+        # On the one real nest available, four of its six overlapping pairs ARE dissolves —
+        # the next shot moved up a track under a transition, which is how Premiere writes
+        # one — so the splitter is right more often than it is wrong here, and narrowing to
+        # one track would have discarded the four correct ones along with the two wrong.
+        inner_clipitems = 0
         for track in section.findall("track"):
             transitions = self._collect_transitions(track)
             edges = self.resolve_transition_edges(track)
             for inner in track.findall("clipitem"):
+                inner_clipitems += 1
                 if inner.find("sequence") is not None:
-                    out.extend(self._parse_nested(inner, track_type, t_idx, depth + 1))
+                    # `edges` here is THIS track's map, rebuilt two lines above — the
+                    # inner nest lives in this track, so those are the -1 boundaries it
+                    # needs. Not forwarding them is why a nest-inside-a-nest with a
+                    # transition on both sides had start = end = -1, could not be
+                    # positioned, and was dropped with "no usable timeline position".
+                    out.extend(self._parse_nested(inner, track_type, t_idx, depth + 1,
+                                                  edges=edges,
+                                                  premiere_track=premiere_track))
                     continue
+                # The nest's inner cuts report the PARENT's track, both the lane ordinal and
+                # the Premiere number — they are placed on the parent's timeline, so the
+                # parent's track is where they live.
                 c = self._parse_clipitem(inner, track_type, t_idx, transitions,
-                                         seq_fps=nest_fps, edges=edges)
+                                         seq_fps=nest_fps, edges=edges,
+                                         premiere_track=premiere_track)
                 if c is None:
                     continue
 
@@ -1681,7 +1970,20 @@ class Timeline:
                 out.append(c)
 
         if not out:
-            self.warnings.append(f"{name}: nested sequence resolved to no visible cuts")
+            # ⚠️ IN THE NEW TERMS. This used to be able to mean "its shots are on a track
+            # --nest resolve refused to look at", and the message that said so is gone
+            # along with the rule. Every inner track is walked now, so there are only two
+            # ways to end up here and they want different actions from the reader.
+            if inner_clipitems == 0:
+                self.warnings.append(
+                    f"{name}: the nest holds no clipitems on any {track_type} track, so "
+                    f"there is nothing inside it to cut")
+            else:
+                self.warnings.append(
+                    f"{name}: all {inner_clipitems} clipitem(s) inside the nest fall "
+                    f"outside the window this instance shows (its in/out is "
+                    f"{nest_in:g}-{nest_out:g} in the nest's own frames) — no cuts came "
+                    f"out of it")
         return out
 
     def _skip(self, why: str, name: str = "") -> None:
@@ -1699,7 +2001,8 @@ class Timeline:
 
     def _parse_clipitem(self, clip, track_type, t_idx, transitions,
                         seq_fps: Optional[float] = None,
-                        edges: Optional[dict] = None) -> Optional[Cut]:
+                        edges: Optional[dict] = None,
+                        premiere_track: Optional[int] = None) -> Optional[Cut]:
         # seq_fps overrides the sequence rate when this clipitem lives inside a nested
         # sequence — its timeline positions are counted in the NEST's rate, not the
         # parent's, and conflating the two shifts every nested cut.
@@ -1722,11 +2025,18 @@ class Timeline:
         # mode, cuttable once a render exists. Listed and explained instead of silently
         # absent — which is exactly what _skip's own docstring complains about.
         file_node = clip.find("file")
+        # A NEST reaching here means --nest one-cut: it is being cut as a single clip
+        # spanning its own start/end. It has no file, like a synthetic — but it is not one,
+        # and filing it under "no media file" would inflate an advisory that is meant to
+        # flag MISSING media with something the user deliberately asked for.
+        nest_node = clip.find("sequence")
         fid = ""
         finfo = {}
         no_media = ""
         if file_node is None:
-            no_media = "synthetic (Black Video, Slug or a colour matte)"
+            no_media = ("a nested sequence, cut as one clip"
+                        if nest_node is not None
+                        else "synthetic (Black Video, Slug or a colour matte)")
         else:
             fid = self._register_file(file_node)
             finfo = self.files.get(fid, {})
@@ -1735,7 +2045,9 @@ class Timeline:
                 # another sequence were never registered. Counted either way.
                 no_media = "no media file (an adjustment layer, a graphic or a title)"
         if no_media:
-            self._skip(no_media + " — listed as needing a render", txt(clip, "name"))
+            # Counted in nests_one_cut and reported by its own advisory instead.
+            if nest_node is None:
+                self._skip(no_media + " — listed as needing a render", txt(clip, "name"))
             finfo = {"path": "", "fps": 0.0}
 
         start = num(clip, "start", 0) or 0
@@ -1843,6 +2155,7 @@ class Timeline:
             clip_name=txt(clip, "name") or finfo.get("name", "clip"),
             track_type=track_type,
             track_index=t_idx,
+            premiere_track=int(t_idx if premiere_track is None else premiere_track),
             timeline_in_frames=int(start),
             timeline_out_frames=int(end),
             timeline_in_tc=frames_to_tc(start, seq_fps),
@@ -2660,8 +2973,25 @@ def write_timeline_audio(tl, args) -> dict:
         return {}
     whole = Cut(track_type="video", timeline_in_frames=0, timeline_out_frames=frames)
     parts, note = vo_contributions(whole, items, fps)
+    # ⚠️ AN ITEM PARKED PAST THE END OF THE SEQUENCE WAS DROPPED IN SILENCE. MEASURED on a
+    # real export: MrClaps_Funk_main.wav sits at frames 2515-2641 on a timeline whose
+    # duration is 1426, so a two-item track reported `parts: 1` with an empty note and no
+    # warning anywhere. Here — and only here — a non-overlap really does mean "outside the
+    # sequence", because `whole` spans all of it; in a per-cut mix it is ordinary.
+    outside = [a for a in items
+               if a.timeline_in_frames >= frames
+               or (a.timeline_out_frames or a.timeline_in_frames) <= 0]
+    if outside:
+        names = sorted({Path(a.source_path).name or a.clip_name for a in outside})
+        note = ((note + "; ") if note else "") + (
+            f"{len(outside)} audio item(s) sit outside the sequence's own length "
+            f"({frames} frames) and are not in the mix: " + ", ".join(names[:4])
+            + (", …" if len(names) > 4 else ""))
     if not parts:
-        return {"note": note or "no audio items to mix"}
+        # outside_sequence rides on this branch too: a track whose ONLY item sits past the
+        # end of the sequence lands here, and that is precisely the case that was silent.
+        return {"note": note or "no audio items to mix",
+                "outside_sequence": len(outside)}
     total = frames / fps
     out_path = args.out / "_timeline_audio.mp3"
     try:
@@ -2672,8 +3002,19 @@ def write_timeline_audio(tl, args) -> dict:
     if r.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
         tail = (r.stderr or "").strip().splitlines()
         return {"note": "timeline audio failed: " + (tail[-1][:120] if tail else "no output")}
+    # ⚠️ WHAT ACTUALLY WENT IN, BY NAME. Before this, `grep -c <a music file's name> manifest.json`
+    # returned 0: no artefact anywhere named the material in the mix, which is exactly why
+    # "A2 only" shipped a full copy of the background music for a whole release with every
+    # numeric field reading green. A name is the one thing a wrong number cannot fake.
+    counts: dict = {}
+    for d in parts:
+        n = Path(d["path"]).name or "(unnamed)"
+        counts[n] = counts.get(n, 0) + 1
+    sources = [{"name": n, "parts": counts[n]} for n in sorted(counts)]
     return {"file": out_path.name, "bytes": out_path.stat().st_size,
-            "seconds": round(total, 6), "parts": len(parts), "note": note}
+            "seconds": round(total, 6), "parts": len(parts), "note": note,
+            "sources": sources,
+            "outside_sequence": len(outside)}
 
 
 def parse_track_list(raw) -> set[int]:
@@ -2737,10 +3078,37 @@ def vo_contributions(cut: Cut, items: list[Cut], seq_fps: float) -> tuple[list[d
             "at": (start - c_in) / seq_fps,
         })
     out.sort(key=lambda d: d["at"])
+    # ⚠️ DE-DUPLICATED, and this is part of the numbering fix rather than a follow-up.
+    # Grouping both lanes of a stereo pair into one Premiere track means a request for that
+    # track now hands ffmpeg two inputs identical in all four fields, and amix(normalize=0)
+    # sums them coherently for +6.02 dB — MEASURED as mean level −9.8 dB rising to −5.1 dB
+    # with 758,060 samples pinned at 0 dBFS, 16.6% of the file. Shipping the grouping
+    # without this replaces "the wrong track" with "the right track, clipped".
+    #
+    # ⚠️ ON THE FOUR-TUPLE, NOT ON "drop lanes whose cet != 0". A dual-mono clip routed to
+    # take only channel 2 of its file would put genuinely different material in a non-zero
+    # lane, and dropping by lane would lose it silently. Identical parts collapse; different
+    # parts both survive. That case is unmeasured, so it is designed around rather than
+    # assumed away.
+    deduped: list[dict] = []
+    seen_parts: set = set()
+    for d in out:
+        key = (d["path"], round(d["src_in"], 6), round(d["dur"], 6), round(d["at"], 6))
+        if key in seen_parts:
+            continue
+        seen_parts.add(key)
+        deduped.append(d)
+    collapsed = len(out) - len(deduped)
+    out = deduped
     note = ""
+    if collapsed:
+        note = (f"{collapsed} duplicate audio part(s) collapsed — Premiere writes one "
+                f"stereo track as two identical lanes, and mixing both would double the "
+                f"level")
     if skipped:
-        note = (f"{skipped} audio item(s) left out of the mix "
-                f"(retimed, reversed, or the source is missing)")
+        note = ((note + "; ") if note else "") + (
+            f"{skipped} audio item(s) left out of the mix "
+            f"(retimed, reversed, or the source is missing)")
     return out, note
 
 
@@ -3617,6 +3985,16 @@ def export_summary(tl: Timeline, args) -> dict:
             # things: one is the camera original, the other is the edit as it played.
             "cut_from": "render" if getattr(args, "render_dir", None) else "source",
             "render_planned": bool(getattr(args, "render_planned", False)),
+            # What a nest became, and how it was applied. Both are kept: `nest` is the
+            # user-facing word, `nest_applied` the state the parser actually ran, and they
+            # differ whenever source mode ignores an explicit --nest one-cut.
+            # ⚠️ THE MARKER THE PANEL GATES ITS MIGRATION ON. Audio A-numbers now mean
+            # Premiere's tracks, not the XML's per-channel lanes, so a saved "5" from an
+            # older manifest points at different material. A panel reading a manifest
+            # without this key must not present old numbers under the new key.
+            "audio_track_numbering": "premiere",
+            "nest": str(getattr(args, "nest_effective", "resolve")),
+            "nest_applied": str(getattr(args, "nest_applied", "all")),
             "transitions_split": int(getattr(args, "transitions_split", 0) or 0),
             "render_dir": str(getattr(args, "render_dir", "") or ""),
             "video_track": int(getattr(args, "video_track", 0) or 0),
@@ -4043,6 +4421,18 @@ def main():
                     help="for speed-ramped clips: 'native' keeps the real source frames "
                          "(default, best for training data); 'timeline' retimes the clip so "
                          "it matches what played on screen")
+    # DEFAULT IS None ON PURPOSE, because it is MODE-DEPENDENT and the engine only learns
+    # the mode from its own arguments. Resolved in main(): "one-cut" when render mode is
+    # active (--render-dir or --render-planned), "resolve" otherwise. An explicit --nest
+    # always wins. Source mode ignores the choice entirely — a nest has no file to seek, so
+    # one-cut there would only lose clips.
+    ap.add_argument("--nest", choices=["one-cut", "resolve"], default=None,
+                    help="what a nested sequence becomes in timeline-render mode: "
+                         "'one-cut' treats the whole nest as a single clip, since the "
+                         "render already has every inner layer baked in (default in "
+                         "render mode); 'resolve' cuts the clips inside it instead, from "
+                         "every one of its inner video tracks, exactly as source-media "
+                         "mode does. Source-media mode always resolves and ignores this")
     ap.add_argument("--min-frames", type=int, default=1, help="skip cuts shorter than N frames")
     ap.add_argument("--ext", metavar="LIST",
                     help="only cut clips whose SOURCE file has one of these extensions, "
@@ -4207,8 +4597,21 @@ def main():
         if args.list_sequences:
             show_sequences(Timeline.list_sequences(args.xml))
             return
+        # WHAT A NEST BECOMES, decided before the parse because _parse acts on it.
+        #
+        # Mode-dependent default: render mode gets one-cut (the render has every inner
+        # layer in it already), source mode gets resolve (there is no render, and a nest has
+        # no file of its own to seek — one-cut would just lose the clips). An explicit
+        # --nest wins in render mode; source mode ignores it, which is what keeps every
+        # existing source-mode run byte-identical.
+        render_mode = bool(getattr(args, "render_dir", None)
+                           or getattr(args, "render_planned", False))
+        args.nest_effective = (args.nest or ("one-cut" if render_mode else "resolve"))
+        nest_mode = ("one-cut" if render_mode and args.nest_effective == "one-cut"
+                     else "all")
+        args.nest_applied = nest_mode
         try:
-            tl = Timeline(args.xml, remaps, args.sequence)
+            tl = Timeline(args.xml, remaps, args.sequence, nest_mode=nest_mode)
         except SequenceChoice as e:
             show_sequences(e.options)
             sys.exit("\nerror: this XML holds more than one sequence — pick one with "
@@ -4235,7 +4638,12 @@ def main():
     # set of ints rather than re-parsing a string — and an unknown number is dropped with a
     # warning rather than silently selecting nothing.
     want = parse_track_list(getattr(args, "audio_tracks", None))
-    have = sorted({a.track_index for a in tl.audio_items})
+    # ⚠️ premiere_track, NOT track_index. The XML's lane ordinal is a per-CHANNEL index —
+    # nine lanes for four tracks on the real export — so `have` used to advertise seven
+    # tracks for a four-track timeline, and A2 and A3 named the two halves of one stereo
+    # pair. track_index still owns render_name/pick_key/clipKey; this number is the one the
+    # editor and the panel menu speak in.
+    have = sorted({a.premiere_track for a in tl.audio_items})
     if want:
         missing = [n for n in sorted(want) if n not in have]
         if missing:
@@ -4243,16 +4651,22 @@ def main():
                 f"--audio-tracks names A{', A'.join(str(n) for n in missing)}, which this "
                 f"timeline does not have (it has "
                 + (", ".join(f"A{n}" for n in have) if have else "no audio tracks") + ")")
-        tl.audio_items = [a for a in tl.audio_items if a.track_index in want]
-    args.audio_tracks_used = sorted({a.track_index for a in tl.audio_items})
+        tl.audio_items = [a for a in tl.audio_items if a.premiere_track in want]
+    args.audio_tracks_used = sorted({a.premiere_track for a in tl.audio_items})
     # ⚠️ WHAT WAS ASKED FOR, kept apart from what was used. A filter that fails to apply reports
     # every track as "used" and so looks exactly like "all tracks were requested" — the two have
     # to be separate numbers for a verifier to tell them apart.
     args.audio_tracks_requested = sorted(want)
-    args.audio_tracks_available = [
-        {"index": n, "items": sum(1 for a in tl.cuts
-                                  if a.track_type == "audio" and a.track_index == n)}
-        for n in have]
+    # ⚠️ DISTINCT ITEMS, NOT CUTS. Both lanes of a stereo pair now sit in one Premiere
+    # track, so counting cuts would report "A2 only · 4 items" for what Premiere shows as
+    # two clips — still a wrong number, just a different one.
+    args.audio_tracks_available = []
+    for n in have:
+        seen = {(a.source_path, a.timeline_in_frames, a.timeline_out_frames,
+                 round(a.source_in_seconds or 0.0, 6))
+                for a in tl.cuts
+                if a.track_type == "audio" and a.premiere_track == n}
+        args.audio_tracks_available.append({"index": n, "items": len(seen)})
     # Carried on args because that is what every run_cut() call already takes. Not a module
     # global: two sequences in one process would then share one timeline's voice-over.
     args.vo_items = tl.audio_items
@@ -4263,28 +4677,58 @@ def main():
     # the sheet can say what was LEFT OUT: `picked_count` on its own is always equal to the
     # final count, which answered nothing.
     args.cuts_before_filters = len(tl.cuts)
-    if args.ext:
-        # Filtered BEFORE the indices are assigned, so a run limited to one type gets a
-        # clean 01..N rather than gaps where the other types used to be.
-        want = {e.strip().lower().lstrip(".") for e in args.ext.split(",") if e.strip()}
-        args.types_kept = sorted(want)
-        before = len(tl.cuts)
-        tl.cuts = [c for c in tl.cuts
-                   if Path(c.source_path).suffix.lower().lstrip(".") in want]
-        print(f"  --ext {','.join(sorted(want))}: kept {len(tl.cuts)} of {before} cuts")
-    # ⚠️ THIS MUST RUN BEFORE --pick, and it did not.
+    # ⚠️ THIS MUST RUN BEFORE EVERY FILTER THAT CAN DROP AN INDIVIDUAL CUT — --ext and
+    # --pick both — and it ran before neither, then before only --pick.
     #
     # pick_key is (track type, track index, timeline IN, timeline OUT). The SCAN writes
     # split ranges into the manifest, the panel builds its selectors from those, and the
     # export then matched them against ranges the split had not touched yet — so every cut
     # a transition had moved failed to match and was filtered away. Reported as "it miss
     # all the clip with transition", which is exactly that set.
+    #
+    # v3.53 moved it above --pick and stopped there. --ext has the identical shape and the
+    # panel makes it differ between the two runs BY DESIGN: the scan passes no --ext, the
+    # export passes one built from the ticked file-type chips (argsFor(dir, allTypes) in
+    # panel/client/main.js). Filtering first hands the split a different set of NEIGHBOURS,
+    # so it moves different boundaries — measured on a nest fixture as 3 of 12 cuts
+    # diverging, e.g. the scan promising 0-95 where the export computed 0-100. The
+    # render's FILENAME is built from those numbers on one side and looked up by them on
+    # the other, so attach_renders found nothing, and run_cut refuses to fall back to
+    # source: the cut was neither cut nor cut-from-source.
+    #
+    # Not moved above --tracks or --min-frames, and that is deliberate:
+    #   --tracks removes whole track TYPES, and the split only ever looks at video cuts
+    #     grouped per track — losing every audio cut cannot change a video boundary.
+    #   --min-frames drops individual cuts and therefore HAS the same shape, but the panel
+    #     never passes it (settingArgs() does not emit it), so both runs use the same
+    #     default. Splitting first would also change which cuts a given --min-frames
+    #     drops, which is a behaviour change rather than a fix.
     if getattr(args, "render_planned", False) or getattr(args, "render_dir", None):
         n_split = split_transition_overlaps(tl.cuts, tl.sequence_fps)
         args.transitions_split = n_split
         if n_split:
             print(f"\n  split {n_split} cross-dissolve overlap(s) at the midpoint, so no "
                   f"two cuts hold the same frame")
+
+    if args.ext:
+        # Filtered BEFORE the indices are assigned, so a run limited to one type gets a
+        # clean 01..N rather than gaps where the other types used to be.
+        want = {e.strip().lower().lstrip(".") for e in args.ext.split(",") if e.strip()}
+        args.types_kept = sorted(want)
+        before = len(tl.cuts)
+        # ⚠️ A CUT WITH NO SOURCE PATH IS NOT A CUT OF THE WRONG TYPE. An adjustment
+        # layer, an Essential Graphics title and a synthetic (Black Video, a colour matte)
+        # have no path at all, so Path("").suffix is "" and "" is in no --ext set — they
+        # were DELETED. Measured: --ext mp4 kept 12 of 17 cuts and the 5 it dropped were
+        # exactly the pathless ones, which is to say the very rows --render-planned had
+        # just declared cuttable. In timeline-render mode the pixels come from Premiere,
+        # so filtering those by a SOURCE extension they do not have answers nothing.
+        # A cut that DOES have a path is filtered exactly as before.
+        tl.cuts = [c for c in tl.cuts
+                   if getattr(c, "render_planned", False) or getattr(c, "render_path", "")
+                   or not c.source_path
+                   or Path(c.source_path).suffix.lower().lstrip(".") in want]
+        print(f"  --ext {','.join(sorted(want))}: kept {len(tl.cuts)} of {before} cuts")
 
     if args.pick:
         # Also before indices are assigned, for the same reason --ext is: a run limited

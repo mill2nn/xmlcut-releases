@@ -13,24 +13,54 @@
     <button id="gear" class="gearbtn" title="Settings &amp; maintenance">⚙</button>
 </header>
 
-<!-- ONE SENTENCE SAYING WHAT TO DO NEXT, and it is the first thing on the page.
-     Everything the panel knows about its own state was previously spread across a
-     disabled button, a hint under it, a warning box, and a note beside the folder — so
-     "what do I press now" had to be assembled by the reader from four places. This says
-     it once, in the imperative, and it is never blank. -->
-<div id="nextline" class="nextline">Open a sequence in Premiere, then read it.</div>
+<!-- THE MESSAGE RAIL — the ONE place this panel says anything ------------------------
+     MEASURED before it was built: twenty-nine separate elements could put prose in front of
+     the reader, scattered through five regions. A warning about the frame rate appeared under
+     the Frame rate field, a warning about the destination appeared beside the folder, a
+     warning about a stalled encode appeared above the Export button, and an error appeared
+     below the whole page — so "is anything wrong" was a question you answered by SCANNING,
+     and a first-time reader could not know where to look. "1 người mới nhìn vào sẽ thấy rối
+     đấy" — someone seeing it for the first time will find it cluttered.
+
+     Now: one rail, directly under the title, and every message the panel has arrives in it.
+     One component (.msg), three severities (error · warn · info), errors first. Nothing is
+     lost — this is a ROUTING change, and main.js's say() carries the same sentences.
+
+     The four rows here are the fixed furniture:
+       #nextline   what to do next. Always present, always first, never blank.
+       #railmsgs   everything routed through say(), rebuilt in severity order.
+       #updbar     an update, with the button that installs it.
+       #mergedet   what the engine's merge decided, folded away.
+
+     What deliberately did NOT come here is listed in main.js above say(). -->
+<div id="rail" class="rail">
+    <div id="nextline" class="msg next">Open the sequence you want in Premiere, then press Read timeline. Nothing is written until you press Export.</div>
+    <div id="railmsgs" class="railmsgs"></div>
+    <div id="updbar" class="msg act good" hidden>
+        <div class="updtext" id="updtext"></div>
+        <button id="updbtn" class="mini">Update</button>
+    </div>
+    <details id="mergedet" class="msg det" hidden>
+        <summary id="mergesum">Merge notes</summary>
+        <div id="mergebox" class="mergebox"></div>
+    </details>
+</div>
 
 <!-- Everything about the TOOL rather than about this timeline. -->
 <section id="gearmenu" class="gearmenu" hidden>
     <p class="lbl">Cut script
         <span class="q" data-tip="xmlcut.py — the engine that does the cutting. It ships inside this panel, so normally there is nothing to do here. Re-check confirms it is present and runnable, and downloads it from the release channel if it has gone missing.">?</span>
     </p>
-    <div id="enginestat" class="note">checking…</div>
+    <div id="enginestat" class="msg">checking…</div>
     <div class="pathrow">
         <span id="scriptpath" class="path">looking…</span>
         <button id="pickscript" class="mini" hidden>Find</button>
     </div>
-    <div id="scripthelp" class="note warn" hidden></div>
+    <!-- ⚠️ STAYS HERE, and it is one of the three exceptions to the rail. This menu is an
+         overlay that COVERS the rail, so a message produced by a button inside it cannot be
+         shown in the rail at all. It also sits beside Find — the control that fixes it. The
+         headline ("the cut script is missing") is on the rail, in #nextline. -->
+    <div id="scripthelp" class="msg error" hidden></div>
     <!-- One row, not two stacked full-width buttons: neither is the thing you came for. -->
     <div class="btnrow">
         <button id="recheck" class="mini">Re-check cut script</button>
@@ -46,13 +76,9 @@
     <div class="btnrow">
         <button id="pocrender" class="mini">Test render (POC)</button>
     </div>
-    <div id="pocnote" class="note pad" hidden></div>
+    <!-- Also inside the overlay, and stays for the same reason. -->
+    <div id="pocnote" class="msg pad" hidden></div>
 </section>
-
-<div id="updbar" class="note row good" hidden>
-    <div class="updtext" id="updtext"></div>
-    <button id="updbtn" class="mini">Update</button>
-</div>
 
 <!-- STEP 1 · read ------------------------------------------------------- -->
 <!-- Collapses once it has succeeded. A finished step with a full-width blue button still
@@ -61,16 +87,18 @@
 <section id="step1" class="step">
     <div class="stephead">Timeline</div>
     <div id="step1body">
-        <button id="read" class="primary">Read timeline</button>
-        <!-- Says what pressing it PRODUCES, not only what it will not damage. The empty
-             state is the one screen with a single thing to do, so it can afford a sentence. -->
-        <p id="readhint" class="hint">Open the sequence you want in Premiere, then click. Every
-            cut on the timeline is listed here — nests resolved, speed ramps read — and nothing
-            is written until you press Export.</p>
+        <!-- What reading PRODUCES is on the button rather than in a paragraph under it.
+             The empty state used to hold the next-action line AND a <p> saying the same thing
+             at greater length — the panel's first screen, telling a first-time reader the
+             same thing twice in two components. The safety half ("nothing is written until
+             you press Export") is in the next-action line; the capability half is here, where
+             it costs no pixels. -->
+        <button id="read" class="primary" title="Every cut on the timeline is listed, in timeline order, with nested sequences resolved and speed ramps read. This writes a JSON read and an XML of the sequence beside your project; it changes nothing on the timeline and cuts no media.">Read timeline</button>
     </div>
 
     <section id="readprog" hidden>
         <div class="bar"><div id="readfill" class="fill"></div></div>
+        <!-- Progress text belongs to the bar it sits under, so it is not on the rail. -->
         <div id="readtext" class="hint"></div>
     </section>
 
@@ -80,16 +108,15 @@
             <button id="readagain" class="mini">Read again</button>
         </div>
         <div class="seqmeta" id="seqmeta"></div>
-        <div id="mode" class="note" hidden></div>
-        <div id="seqwarn" class="note warn" hidden></div>
-        <!-- One row. The label that used to sit above this is now the tooltip. -->
+        <!-- The read mode, the ramp warning and the note about what the saved folder costs
+             were three notes stacked inside this card. All three are on the rail now, so the
+             card is the sequence's own facts and one path. -->
         <div id="savedbox" class="saved" hidden>
             <div class="pathrow">
-                <span class="q" data-tip="Where this read and its XML were saved: beside your Premiere project, in xmlcut/&lt;sequence name&gt;/. Every read adds a new timestamped pair — nothing is overwritten.">?</span>
+                <span class="q" data-tip="Where this read and its XML were saved: beside your Premiere project, in xmlcut/&lt;sequence name&gt;/. Every read adds a new timestamped pair and nothing is overwritten, so only the newest ten are kept — the panel says so on the rail when it prunes any. If the project has never been saved there is nowhere beside it to write, and the read goes to the Desktop instead.">?</span>
                 <span id="savedpath" class="path">—</span>
                 <button id="showsaved" class="mini">Show</button>
             </div>
-            <div id="savednote" class="hint"></div>
         </div>
     </div>
 </section>
@@ -254,7 +281,7 @@
 
         <!-- Takes the slack: a path is the one value here with no natural width. -->
         <div class="field f-dest">
-            <div class="flbl">Save to <span class="q" data-tip="Pick this once. Every export makes a folder named after the sequence inside it and writes there — so cutting several sequences into one place keeps each set of clips separate, with its own 01..N numbering and its own clips.csv.">?</span></div>
+            <div class="flbl">Save to <span class="q" data-tip="Pick this once. Every export makes a folder named after the sequence inside it, then writes into raw/ for source media or edited/ for a timeline render — so cutting several sequences into one place keeps each set of clips separate, with its own 01..N numbering and its own clips.csv.">?</span></div>
             <div class="pathrow">
         <span id="outpath" class="path">—</span>
         <button id="copyout" class="mini" title="Copy this path">Copy</button>
@@ -277,13 +304,9 @@
         </label>
     </div>
 
-    <!-- CONSEQUENCES, once, quietly, at the bottom. Four labels scattered through the
-         grid became two sentences nobody has to hunt for. -->
-    <div class="stripfoot" id="stripfoot" hidden></div>
-
-    <div id="presetwarn" class="note warn" hidden></div>
-    <div id="outdest" class="note" hidden></div>
-    <div id="fpswarn" class="note bad" hidden></div>
+    <!-- The four notes that used to close this strip — the render-mode consequences, a refused
+         preset, the destination folder and the frame-rate warning — are all on the rail now.
+         They were the last four blocks of prose in a region whose whole job is fields. -->
 
     <!-- HIDDEN, not removed. "cái flag large clip thì cứ để ẩn đi thôi, sau này nếu thêm lại
          thì ko cần phải code lại" — Tung, 18 Aug. Every line of its logic still works; only
@@ -311,12 +334,36 @@
         <button id="typeall" class="linkbtn">select what's here</button>
     </p>
     <div id="types" class="types"></div>
-    <div id="typehint" class="note warn" hidden></div>
+    <!-- What is NOT ticked, and the "reading the cut list" note, are both on the rail. -->
 
     <p class="lbl" id="listlbl">Every cut, in timeline order
         <span class="q" data-tip="Every cut this export will make, in timeline order. Untick any single clip to leave it out. Numbers renumber to match the filenames you'll actually get. Hover a row for its timeline position, where the timing came from, and any notes.">?</span>
     </p>
-    <div id="scanning" class="hint" hidden>Reading the cut list…</div>
+
+    <!-- THE RUN'S RESULT, above the list it describes -------------------------------------
+         It used to be the third row of the action bar, which made that bar 210px tall on a
+         docked panel — a quarter of the height, holding a report, under a list it was
+         describing. Everything here is ABOUT the rows below it: the counts, where the files
+         landed, and the filter that hides the ones that went fine. The bar keeps only what
+         the bar is for — the next action.
+
+         Measured: bar 210px -> 71px docked, and the report is now beside its own rows. -->
+    <div id="repsum" class="repsum" hidden>
+        <div id="tally" class="tally"></div>
+        <div id="repdestlbl" class="hint" hidden></div>
+        <div class="pathrow" id="repdestrow" hidden>
+            <span id="repdest" class="path">—</span>
+            <button id="copydest" class="mini" title="Copy this path">Copy</button>
+            <button id="reveal" class="mini">Show in Finder</button>
+        </div>
+        <div class="repbar">
+            <label class="tick" id="onlyproblab"><input type="checkbox" id="onlyprob">only
+                problems</label>
+            <span id="repcount" class="repcount"></span>
+            <button id="copyrep" class="mini">Copy report</button>
+        </div>
+    </div>
+
     <!-- FIVE columns and the spacer. Speed and Frames were dropped on 19 Aug: in timeline
          mode a speed percentage describes a ramp Premiere has already baked into the
          pixels, and Frames restates the timeline length. Between them they held 78 of the
@@ -366,18 +413,20 @@
      The three mode blocks keep their old ids (#prog, #report) so every show() that drove
      those sections still drives them here. Only their position and their frame changed. -->
 <section id="actionbar" class="actionbar">
-    <!-- Notes ride ABOVE the bar: they explain the bar, and a note that pushed the buttons
-         down would move the one control you are waiting to press. -->
-    <div id="stalled" class="note warn" hidden></div>
-    <details id="mergedet" hidden>
-        <summary id="mergesum">Merge notes</summary>
-        <div id="mergebox" class="note"></div>
-    </details>
+    <!-- The stall warning and the merge notes used to ride above this bar. Both are on the
+         rail: a message that appears above the one control you are waiting to press MOVES
+         that control, which is the worst place on the page to put a new block. -->
 
     <!-- READY: what it will cost, and the button that commits to it. -->
     <div id="barready" class="abrow">
         <div class="abfacts">
-            <div id="sizeest" class="note" hidden></div>
+            <!-- THE NUMBER ONLY. The sentence explaining how the number was arrived at —
+                 "an estimate, usually within about 1.5x…" — wrapped to three lines at a 320px
+                 dock and made this row 96px tall to say one figure. The figure stays here
+                 beside the button; how it was made is on the ? and, when the sizes are STALE
+                 and there is something to do about it, on the rail. -->
+            <div id="sizeest" class="abfact" hidden></div>
+            <span class="q" data-tip="What the ticked clips are expected to weigh in total. `estimated` means it came from each source's own bitrate scaled by a ratio measured per CRF — usually within about 1.5x. `measured` means Re-measure encoded a second of every clip at these exact settings, which is good to a few percent. When it says `measured at` some OTHER setting, the sizes on screen belong to that setting and not to the one now on the sliders.">?</span>
         </div>
         <div class="abacts">
             <!-- Encodes a second of each clip for a figure good to a few percent. Opt-in,
@@ -386,6 +435,15 @@
                     title="encode a second of each clip at these settings">Re-measure</button>
             <!-- The label says the action and its size, so there is nothing to work out
                  before pressing it: "Export 19 clips". -->
+            <!-- Beside Export because "where did it go" gets asked in the same breath as
+                 "go", and the report's own Show in Finder only exists AFTER a run. Opens the
+                 folder this export writes into — <sequence>/raw or <sequence>/edited — or the
+                 save-to root before the engine has created it. -->
+            <!-- "Folder", not "Open folder": the longer label pushed this row 9px past a
+                 320px dock — measured, and the run/done rows were 0px over, which is how the
+                 label rather than the layout was identified as the cause. -->
+            <button id="openout" class="mini"
+                    title="open the folder this export writes into">Folder</button>
             <button id="export" class="primary">Export clips</button>
         </div>
     </div>
@@ -405,45 +463,24 @@
         </div>
     </div>
 
-    <!-- DONE -->
-    <div id="report" hidden class="abstack">
-        <div class="abrow">
-            <div class="abfacts">
-                <span id="tally" class="tally"></span>
-                <span class="q" data-tip="A cut is written at the source's own speed, so a sped-up clip comes out LONGER than it looks on the timeline. Re-speeding it by the percentage shown returns it to the timeline length — to within about a frame, because the frame count is whole and the range Premiere used is not. Check a clip on its frame count, not by re-speeding it.">?</span>
-            </div>
-            <div class="abacts">
-                <button id="copyrep" class="mini">Copy report</button>
-                <button id="reveal" class="mini">Show in Finder</button>
-                <!-- When clips failed, retrying THOSE is the next move, so it takes the
-                     primary and "Export again" steps down to a mini. Re-running all
-                     nineteen to fix two was the only way before, and ticking the two by
-                     hand means reading the list to find them. -->
-                <button id="retry" class="primary" hidden>Retry</button>
-                <!-- Primary otherwise, and named for what it does. It used to say "Back",
-                     which described the panel's own navigation rather than your next move. -->
-                <button id="again" class="primary">Export again</button>
-            </div>
-        </div>
-        <!-- Accounts for "25 matched" vs "18 written", which nothing used to. -->
-        <div id="repcomplete" class="hint" hidden></div>
-        <!-- Where the clips actually went, said in words as well as shown as a path. Clips
-             go into a folder named after the SEQUENCE, and someone used to the old behaviour
-             looks in the root, finds it empty, and reports files as missing. -->
-        <div id="repdestlbl" class="hint" hidden></div>
-        <div class="pathrow" id="repdestrow" hidden>
-            <span id="repdest" class="path">—</span>
-            <button id="copydest" class="mini" title="Copy this path">Copy</button>
-        </div>
-        <div class="repbar">
-            <label class="tick" id="onlyproblab"><input type="checkbox" id="onlyprob">only
-                problems</label>
-            <span id="repcount" class="repcount"></span>
+    <!-- DONE. THE NEXT ACTION, and nothing else.
+         The counts, the destination, the filter, Copy report and Show in Finder all moved up
+         to #repsum, beside the rows they describe; "25 matched vs 18 written" is on the rail.
+         What is left is the one question this bar answers: what now. -->
+    <div id="report" hidden class="abrow">
+        <div class="abfacts"></div>
+        <div class="abacts">
+            <!-- When clips failed, retrying THOSE is the next move, so it takes the
+                 primary and "Export again" steps down to a mini. Re-running all
+                 nineteen to fix two was the only way before, and ticking the two by
+                 hand means reading the list to find them. -->
+            <button id="retry" class="primary" hidden>Retry</button>
+            <!-- Primary otherwise, and named for what it does. It used to say "Back",
+                 which described the panel's own navigation rather than your next move. -->
+            <button id="again" class="primary">Export again</button>
         </div>
     </div>
 </section>
-
-<div id="err" class="note bad pad" hidden></div>
 
 <details id="adv">
     <summary>Advanced</summary>

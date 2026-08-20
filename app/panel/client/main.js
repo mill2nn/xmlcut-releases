@@ -20,30 +20,35 @@
     var PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
     var el = {};
-    var ids = ["read", "seqbox", "seqname", "seqmeta", "seqwarn", "opts", "types",
+    /* ⚠️ THIRTEEN IDS LEFT THIS LIST when the message rail arrived, and every one of them was
+     * a box that could hold prose: err, mode, seqwarn, savednote, stripfoot, presetwarn,
+     * outdest, fpswarn, typehint, scanning, stalled, readhint, repcomplete. They are not
+     * features that were dropped — say() carries the same sentences into #railmsgs. The
+     * elements are gone because a message needs a place, not an element of its own. */
+    var ids = ["read", "seqbox", "seqname", "seqmeta", "opts", "types",
                "outpath", "pickout", "export", "prog", "barfill", "progtext",
-               "cancel", "reveal", "again", "err", "adv", "scriptpath",
-               "pickscript", "cmd", "log", "tip", "ver", "mode", "step3",
-               "report", "tally", "onlyprob", "repcount", "copyrep",
-               "readhint", "scanning", "tablewrap", "cliptable", "clipbody",
+               "cancel", "reveal", "again", "adv", "scriptpath", "openout",
+               "pickscript", "cmd", "log", "tip", "ver", "step3",
+               "report", "repsum", "tally", "onlyprob", "repcount", "copyrep",
+               "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
-               "mergebox", "resume", "savednote", "updbar", "updtext", "updbtn",
-               "typehint", "typeall", "scripthelp",
-               "readprog", "readfill", "readtext", "pickall", "checkupd", "outdest",
+               "mergebox", "resume", "updbar", "updtext", "updbtn",
+               "typeall", "scripthelp",
+               "readprog", "readfill", "readtext", "pickall", "checkupd",
                "gear", "gearmenu", "enginestat", "recheck",
-               "repcomplete", "repdestrow", "repdest", "repdestlbl", "mergedet", "mergesum",
-               "jobtally", "stalled", "copyout", "copydest",
-               "preset", "crf", "fps", "fpswarn",
+               "repdestrow", "repdest", "repdestlbl", "mergedet", "mergesum",
+               "jobtally", "copyout", "copydest",
+               "preset", "crf", "fps",
                "sizeest", "savepreset", "delpreset", "crfread", "sweetcrf",
-               "crfblock", "cap", "capnote", "presetwarn",
-               "nextline", "step1", "step1body", "readagain",
+               "crfblock", "cap", "capnote",
+               "rail", "railmsgs", "nextline", "step1", "step1body", "readagain",
                "remeasure", "vcodec",
                "scale", "scaleread",
                "onlyproblab",
                "actionbar", "barready", "retry", "audiosel", "wholeframes",
                "pocrender", "pocnote",
                "cutfrom", "vtrack", "vtrackfield",
-               "stripfoot", "wfwrap", "wfwhy", "vinclude"];
+               "wfwrap", "wfwhy", "vinclude"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -79,6 +84,12 @@
         audioTracks: [],
         // What he last chose, remembered across sessions: "" · "all" · a track number.
         audioWant: "",
+        /* A saved track NUMBER that was thrown away because the engine renumbered the tracks.
+         * Held only long enough to say so once — see sayAudioRenumbered(). */
+        audioDropped: "",
+        // "premiere" once the engine reports it numbers tracks Premiere's way; "" for a
+        // manifest from before that, whose numbers mean something else.
+        audioNumbering: "",
         /* WHERE THE PIXELS COME FROM: "source" cuts the camera originals, "render" cuts
          * ranges Premiere rendered from the timeline, with the effects already in them.
          * Held here as well as on the select because renderVideoTracks() rebuilds the
@@ -94,6 +105,9 @@
         // The render phase's own progress, read off a file Premiere writes as it goes:
         // {done, total, current, failed}. Null when no render phase is running.
         renderProg: null,
+        // How many cuts the last render phase failed to produce, off its manifest. Decides
+        // whether the _renders scratch is kept for a retry — see cleanRenders().
+        rendersMissing: 0,
         renderTimer: null,
         /* The clips a RETRY is limited to, as clipKeys. Empty for an ordinary export. It is
          * read once, when the pick file is written, and cleared there — a leftover here would
@@ -413,6 +427,149 @@
 
     function show(node_, on) { node_.hidden = !on; }
 
+    /* ---------------------------------------------------------------- the message rail
+     *
+     * ONE PLACE, and everything this panel has to SAY arrives in it.
+     *
+     * MEASURED before this existed: twenty-nine elements in index.html could put prose in
+     * front of the reader — a warning under Frame rate, another beside the folder, another
+     * above the Export button, an error below the whole page, a note inside the sequence
+     * card — spread over five regions. "Is anything wrong?" was a question you answered by
+     * SCANNING the page, and someone opening the panel for the first time had no way to
+     * learn where to look. "1 người mới nhìn vào sẽ thấy rối đấy."
+     *
+     * say(key, sev, text[, title]) is the whole interface. ONE KEY PER SUBJECT, not per call
+     * site, so the frame-rate warning occupies exactly one row however many times it is set;
+     * an empty text removes the row. Rows come out ordered error → warn → info, and within a
+     * severity in the fixed order of RAIL_KEYS, so a message never changes place because an
+     * unrelated one appeared or went.
+     *
+     * WHAT DELIBERATELY DID NOT MOVE HERE, and why none of it is a rail message:
+     *
+     *   #enginestat #scripthelp #pocnote  inside the gear menu, which is an OVERLAY that
+     *     COVERS the rail. A message produced by a button in there could not be seen at all
+     *     if it went to the rail, and each already sits beside the control that produced it.
+     *   #readtext #progtext #jobtally     the text OF a progress bar, under that bar.
+     *   #listnote #repcount #capnote      counters over a list, in that list's own heading.
+     *     They change on every tick, and one that jumped to the top of the panel each time a
+     *     checkbox moved would be worse than the scatter this replaces.
+     *   #wfwhy                            why THIS control is disabled, inside its label.
+     *   #repdestlbl                       the caption on a path row, with its Copy button.
+     *   td.sts and the group headings      per row, in the row.
+     *
+     * Everything else routes. Thirteen elements left index.html for this.
+     */
+    var RAIL_SEV = { error: 0, warn: 1, info: 2 };
+    /* Every subject say() can occupy, in the order they appear WITHIN a severity. A key that
+     * nothing writes would be a promise about an ordering that never happens, so this list and
+     * the say() call sites are the same seventeen. */
+    var RAIL_KEYS = ["err", "failures", "audionum", "audio", "fps", "readmode",
+                     "ramps", "types", "preset", "dest", "stall", "sizes", "rendermode",
+                     "complete", "renders", "scan", "saved"];
+    var railRows = {};        // key -> {sev, text, title}
+
+    /* WHAT CHANGED, shown once after an update.
+     *
+     * Asked for by the team lead, who updates often and could not tell what he was getting:
+     * "thêm phần changelog vào sau khi mọi người ấn update nhé". It cannot live in the update
+     * RESPONSE — that update is performed by the OLD engine and rendered by the OLD panel, so
+     * neither knows this text exists. It therefore appears on the first launch AFTER the
+     * version changes, which is the first moment the new code is the code running.
+     *
+     * Keyed by the version in xmlcut.py, which readVersion() already reads, so there is no
+     * second place to bump. Vietnamese because the people reading it are the video team. */
+    var CHANGELOG = {
+        "3.54": [
+            "Nested sequence — ở Timeline render, mỗi nest giờ ra 1 clip. Trước đây nest dùng "
+            + "lại lần thứ 2 bị bỏ qua hoàn toàn nên thiếu cut.",
+            "Track audio giờ đánh số đúng như Premiere. Trước đây panel hiện A1–A7 cho timeline "
+            + "chỉ có 4 track, nên chọn A2 có thể ra tiếng của A1. ⚠️ Lựa chọn audio cũ đã "
+            + "được xoá — chọn lại giúp mình nhé.",
+            "Sau mỗi lần chạy, panel báo rõ track nào thật sự được mix, và báo đỏ nếu khác với "
+            + "track mình đã chọn.",
+            "Clip xuất ra chia 2 folder: raw/ khi cắt từ source, edited/ khi render từ "
+            + "timeline. Không còn trộn 2 lần chạy vào chung 1 folder.",
+            "Folder _renders tự xoá sau khi chạy xong sạch; nếu có clip lỗi thì giữ lại để "
+            + "Retry không phải render lại từ đầu.",
+            "Thêm nút mở folder cạnh Export. Thông báo gom về một chỗ, thanh dưới gọn hơn, và "
+            + "lý do một clip lỗi giờ đọc được thay vì bị cắt mất."
+        ]
+    };
+
+    /* Shown when the running version differs from the one last seen here.
+     *
+     * ⚠️ `hadPrior` exists because xmlcut.seenver DID NOT EXIST before this release, so its
+     * absence cannot distinguish "just updated from 3.53" from "installed for the first time
+     * five seconds ago". A remembered save-to folder or engine path proves the copy has been
+     * used before, which is exactly the population this text is for. A fresh install gets
+     * nothing: a changelog for a version you never had is noise. */
+    function noteVersion(ver) {
+        if (!ver) return;
+        var seen = null, hadPrior = false;
+        try {
+            seen = window.localStorage.getItem("xmlcut.seenver");
+            hadPrior = !!(window.localStorage.getItem("xmlcut.out")
+                          || window.localStorage.getItem("xmlcut.script"));
+        } catch (e) { return; }
+        if (seen === ver) return;
+        try { window.localStorage.setItem("xmlcut.seenver", ver); } catch (e) {}
+        if (!seen && !hadPrior) return;
+        var lines = CHANGELOG[ver];
+        if (!lines || !lines.length) return;
+        say("changelog", "info", "Bản " + ver + " có gì mới:\n• " + lines.join("\n• "));
+    }
+
+    function say(key, sev, text, title) {
+        var t = String(text === null || text === undefined ? "" : text);
+        var had = railRows[key];
+        if (!t) {
+            if (!had) return;
+            delete railRows[key];
+        } else {
+            if (had && had.sev === sev && had.text === t && had.title === title) return;
+            railRows[key] = { sev: sev, text: t, title: title || "" };
+        }
+        renderRail();
+    }
+
+    /* Rebuilt whole rather than patched. There are never more than a handful of rows, and a
+     * patcher would have to know which row moved when a severity changed — which is exactly
+     * the class of bug that made the old scatter impossible to reason about. */
+    function renderRail() {
+        if (!el.railmsgs) return;
+        var keys = [], k;
+        for (k in railRows) {
+            if (Object.prototype.hasOwnProperty.call(railRows, k)) keys.push(k);
+        }
+        keys.sort(function (a, b) {
+            var d = RAIL_SEV[railRows[a].sev] - RAIL_SEV[railRows[b].sev];
+            if (d) return d;
+            var ia = RAIL_KEYS.indexOf(a), ib = RAIL_KEYS.indexOf(b);
+            return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+        });
+        el.railmsgs.innerHTML = "";
+        for (var i = 0; i < keys.length; i++) {
+            var r = railRows[keys[i]];
+            var d = document.createElement("div");
+            d.className = "msg " + r.sev;
+            // Read by the tests to find a row by SUBJECT rather than by position: rows are
+            // created and destroyed as messages come and go, so children[3] means nothing.
+            d.setAttribute("data-k", keys[i]);
+            if (r.title) d.title = r.title;
+            d.textContent = r.text;
+            el.railmsgs.appendChild(d);
+        }
+    }
+
+    /* The report is TWO blocks now — its counts and its destination sit above the list it
+     * describes (#repsum), its next action sits in the bar (#report) — so they are revealed
+     * together or not at all. Two show() calls at three sites is three chances to leave one
+     * of them on screen alone. */
+    function showReport(on) {
+        show(el.report, on);
+        show(el.repsum, on);
+    }
+
     /* THE ONE WRITER of body's class, because two of them fought.
      *
      * A scrub sets a cursor for the whole page and the wide layout needs a class of its own;
@@ -440,12 +597,11 @@
     }
 
     function fail(msg) {
-        el.err.textContent = String(msg);
-        show(el.err, true);
+        say("err", "error", String(msg));
         log("ERROR " + msg);
     }
 
-    function clearError() { show(el.err, false); }
+    function clearError() { say("err", "error", ""); }
 
     function exists(p) {
         try { return !!p && fs.existsSync(p); } catch (e) { return false; }
@@ -629,6 +785,9 @@
             var head = String(fs.readFileSync(state.script, "utf8")).substring(0, 4000);
             var m = head.match(/VERSION\s*=\s*"([^"]+)"/);
             if (m) el.ver.textContent = "v" + m[1];
+            // The engine file is the single source of the version, so the changelog is keyed
+            // off the same read rather than a constant that would drift from it.
+            if (m) noteVersion(m[1]);
         } catch (e) {}
     }
 
@@ -718,10 +877,21 @@
         show(el.opts, false);
         show(el.step3, false);
         show(el.tablewrap, false);
-        show(el.mode, false);
         show(el.mergebox, false);
-        show(el.report, false);
+        showReport(false);
         show(el.prog, false);
+        /* Every rail row that belonged to the PREVIOUS read goes with it. They used to be
+         * cleared one show(el.x, false) at a time, which is how "Premiere only" from the last
+         * sequence survived into a read of a different one. */
+        say("readmode", "info", "");
+        say("ramps", "warn", "");
+        say("saved", "info", "");
+        say("types", "warn", "");
+        say("audio", "info", "");
+        say("complete", "info", "");
+        say("sizes", "warn", "");
+        say("renders", "info", "");
+        say("failures", "error", "");
         // The destination is named after the sequence, so it is unknown again until this
         // read answers. Leaving the old sequence's folder on screen would name the wrong
         // one — the same staleness as the clip table above.
@@ -759,13 +929,21 @@
             // Say what the folder is costing, since it can sit on a shared drive where
             // every read syncs ~1 MB to the whole team.
             var keep = r.keep_reads || 10;
-            var note = "a new pair each read · newest " + keep + " kept";
-            if (r.pruned) note += " · " + r.pruned + " older file(s) pruned";
+            /* ⚠️ ONLY WHEN SOMETHING HAPPENED. This was a note under the saved path on every
+             * single read, saying "a new pair each read · newest 10 kept" — which is the
+             * policy, not news, and is already on the ? beside that very path. What IS news is
+             * that files were deleted, or that the read did not land beside the project. */
+            var note = [];
+            if (r.pruned) {
+                note.push(r.pruned + " older read" + (r.pruned === 1 ? "" : "s")
+                    + " pruned — the newest " + keep + " are kept");
+            }
             if (r.beside_project === false) {
-                note += " · project unsaved, so this is the Desktop";
+                note.push("This project is unsaved, so the read went to the Desktop "
+                    + "instead of beside the project.");
                 log("project not saved — falling back to the Desktop");
             }
-            el.savednote.textContent = note;
+            say("saved", "info", note.join(" "));
             renderSequence();
             exportXML();
         });
@@ -820,24 +998,23 @@
             });
     }
 
-    /* One line saying exactly which sources the next export will use. Guessing about
-     * accuracy is worse than being told. */
+    /* WHICH SOURCES the next export will use — but only when the answer costs you something.
+     *
+     * ⚠️ SPEAKS ONLY IN THE DEGRADED CASE, and that is a deliberate cut rather than an
+     * omission. This was a note in the sequence card with three states, and two of the three
+     * were already on screen somewhere else:
+     *
+     *   "Exporting XML…"     the read's own progress bar says "Step 2 of 3 · Asking Premiere
+     *                        to export the XML", six pixels away, at the same moment.
+     *   "XML + Premiere · …" the sequence card's meta line already ends with "· XML +
+     *                        Premiere" — see state.readDone and renderSequence().
+     *
+     * So the only reading of this that was not a duplicate is the one where the XML failed and
+     * nests will be skipped. That one is a warning, and it is the one that is kept. */
     function setMode(busyText) {
-        if (busyText) {
-            el.mode.textContent = busyText;
-            el.mode.className = "note busy";
-            show(el.mode, true);
-            return;
-        }
-        if (state.xml) {
-            el.mode.textContent = "XML + Premiere · nests resolved, ramp keyframes read";
-            el.mode.className = "note good";
-        } else {
-            el.mode.textContent = "Premiere only · XML export unavailable, "
-                + "nested sequences will be skipped";
-            el.mode.className = "note warn";
-        }
-        show(el.mode, true);
+        if (busyText) return;
+        say("readmode", "warn", state.xml ? "" : "Premiere only · XML export unavailable, "
+            + "nested sequences will be skipped");
     }
 
     /* Read the dump back off disk to build the type list. The ExtendScript already
@@ -927,7 +1104,14 @@
 
     // Not decodable media, so they start unticked rather than failing one by one during
     // the export. Overridden by anything remembered from last time.
-    var DEAD_TYPES = { aep: 1, prproj: 1, psb: 1, c4d: 1, aet: 1, ppj: 1, fcpxml: 1 };
+    /* ⚠️ PAIRED WITH THE ENGINE, and it has to stay paired. The engine refuses these in
+     * source mode; until this list matched it, the panel offered a type the engine would
+     * refuse, TICKED BY DEFAULT — and a .mogrt is a Zip archive, so ffmpeg answers "Invalid
+     * data found when processing input" and the clip simply does not appear. In render mode
+     * Premiere resolves them, which is why this is a list of what cannot be CUT rather than a
+     * list of what is not media; see ensure() in typesFromClips(). */
+    var DEAD_TYPES = { aep: 1, prproj: 1, psb: 1, c4d: 1, aet: 1, ppj: 1, fcpxml: 1,
+                       aegraphic: 1, mogrt: 1 };
 
     /* Always listed, even when the open timeline has none of them.
      *
@@ -957,19 +1141,13 @@
         show(el.step1body, false);
         el.step1.className = "step done";
 
-        if (r.keyframed_ramps > 0) {
-            el.seqwarn.textContent = r.keyframed_ramps + " clip"
-                + (r.keyframed_ramps === 1 ? " has" : "s have")
-                + " a keyframed speed ramp. The range extracted is exact; the speed "
-                + "is treated as constant.";
-            show(el.seqwarn, true);
-        } else {
-            show(el.seqwarn, false);
-        }
+        say("ramps", "warn", r.keyframed_ramps > 0
+            ? (r.keyframed_ramps + " clip"
+               + (r.keyframed_ramps === 1 ? " has" : "s have")
+               + " a keyframed speed ramp. The range extracted is exact; the speed "
+               + "is treated as constant.")
+            : "");
 
-        // Types and the clip table are both built by the scan, which runs after the XML
-        // export settles — so they can never disagree about what is being cut.
-        show(el.readhint, false);
         // The destination folder is named after this sequence, so it is only knowable now.
         setOutDest();
         refreshExportEnabled();
@@ -1073,10 +1251,16 @@
     }
 
     function typeHint() {
-        // Nothing to advise while a read is in flight: the type list is empty by
-        // construction at that point, and "this timeline has no media that can be cut" is
-        // a conclusion about a timeline that has not been read yet.
-        if (state.busy) return "";
+        /* Nothing to advise while a read is in flight: the type list is empty by
+         * construction at that point, and "this timeline has no media that can be cut" is a
+         * conclusion about a timeline that has not been read yet.
+         *
+         * ⚠️ AND NOTHING TO ADVISE BEFORE ONE, which this did not check. It could not be seen:
+         * #typehint lived inside #opts, which is hidden until a scan lands, so the sentence
+         * was drawn into a hidden container and nobody ever met it. On the rail there is
+         * nowhere to hide, and the panel's very first screen said "This timeline has no media
+         * that can be cut." above a button asking you to read a timeline. */
+        if (state.busy || !state.clips.length) return "";
         if (state.typesReset) {
             return "Nothing was selected, so " + state.typesReset
                  + " — the types on this timeline — were switched back on.";
@@ -1125,6 +1309,8 @@
         if (!el.barready) return;
         var running = el.prog.hidden === false, done = el.report.hidden === false;
         show(el.barready, !running && !done);
+        // The report's counts live above the list now, so they follow the bar's DONE row.
+        show(el.repsum, done);
         /* ⚠️ NO BAR UNTIL THERE IS SOMETHING TO DO WITH IT. Before a read the panel's floor
          * held a disabled "Export clips" — a second, dead call to action under the one button
          * that actually did anything, on a screen whose whole job is to say "read a timeline
@@ -1136,18 +1322,17 @@
     function refreshExportEnabled() {
         barMode();
         var n = selectedCount();
-        if (el.typehint) {
-            var h = typeHint();
-            el.typehint.textContent = h;
-            // Neutral when the panel fixed it itself, amber when he has to act.
-            el.typehint.className = "note" + (state.typesReset ? "" : " warn");
-            show(el.typehint, !!h);
-        }
+        // Neutral when the panel fixed it itself, amber when he has to act.
+        say("types", state.typesReset ? "info" : "warn", typeHint());
         // `!state.busy` is load-bearing, not belt-and-braces: setBusy() disables Read and
         // the pickers but never touched Export, so it stayed live through a read — and
         // during a read state.dump still points at the PREVIOUS sequence.
         var ready = !!(state.dump && state.script && state.out && n > 0) && !state.busy;
         el["export"].disabled = !ready;
+        // Openable as soon as there is a root, not only once clips exist: checking where the
+        // files will land is a thing you do BEFORE committing, which is the whole reason this
+        // sits beside Export rather than in the report.
+        el.openout.disabled = !state.out;
         el["export"].textContent = n > 0
             ? ("Export " + n + " clip" + (n === 1 ? "" : "s"))
             : "Nothing selected";
@@ -1175,13 +1360,13 @@
      */
     function renderNext() {
         if (!el.nextline) return;
-        var n = selectedCount(), cls = "nextline", msg;
+        var n = selectedCount(), cls = "msg next", msg;
         if (state.busy) {
             msg = "Reading the timeline…";
             cls += " busy";
         } else if (!state.script) {
             msg = "The cut script is missing. Open ⚙ and press Re-check to fetch it.";
-            cls += " bad";
+            cls += " error";
         } else if (el.report && el.report.hidden === false && failedRows().length) {
             /* THE FAILURE HEADLINE, in the line that is already at the top of the panel. The
              * rows carry their own reasons and the bar carries the count, but both are below a
@@ -1197,9 +1382,29 @@
             msg = bad.length + " clip" + (bad.length === 1 ? "" : "s") + " did not write"
                 + (same && why ? " — " + why : "")
                 + ". Retry them below, or open Advanced for the log.";
-            cls += " bad";
+            cls += " error";
+            /* ⚠️ AND WHEN THEY DO NOT SHARE A REASON, THE REASONS THEMSELVES.
+             *
+             * The status column is 76px docked and these cells clip rather than wrap, so
+             * "failed — encoder exit 1" — which needs 131px — was unreadable at every width the
+             * panel is used at. The cell now says "failed"; this is where the reason lives when
+             * the line above cannot state it once. Only then: a rail row repeating what the
+             * headline already says would be the duplication this rail exists to remove. */
+            var list = [];
+            for (var f2 = 0; f2 < bad.length; f2++) {
+                list.push(bad[f2].name + " — " + (bad[f2].facts || "no reason reported"));
+            }
+            say("failures", "error", same ? "" : ("Why each one failed: " + list.join("; ")));
         } else if (!state.dump) {
-            msg = "Open a sequence in Premiere, then read it.";
+            /* THE EMPTY STATE, IN ONE ROW. This said "Open a sequence in Premiere, then read
+             * it." with a paragraph six pixels below it saying the same thing at greater
+             * length — the panel's very first screen told a first-time reader the same thing
+             * twice, in two components. What the paragraph added and this keeps is the half
+             * that answers "is this safe": nothing is written until Export. What it also
+             * claimed — nests resolved, speed ramps read — is on the button's own tooltip,
+             * where a capability boast costs no pixels. */
+            msg = "Open the sequence you want in Premiere, then press Read timeline. "
+                + "Nothing is written until you press Export.";
         } else if (!state.out) {
             msg = "Choose a folder to save into.";
         } else if (!n) {
@@ -1252,7 +1457,7 @@
         }
         state.jobKey = {};
         el.jobtally.textContent = "";
-        show(el.stalled, false);
+        say("stall", "warn", "");
     }
 
     function jobsStop() {
@@ -1376,13 +1581,12 @@
                 var jj = state.jobs[state.jobOrder[q]];
                 if (jj.status === "run") longest = Math.max(longest, now - jj.t0);
             }
-            el.stalled.textContent = "No clip has finished for " + secs(quiet)
+            say("stall", "warn", "No clip has finished for " + secs(quiet)
                 + ". Still working — the longest running clip has been going "
                 + secs(longest) + ". Large or Drive-backed media takes this long; "
-                + "the times on the rows keep moving while it is alive.";
-            show(el.stalled, true);
+                + "the times on the rows keep moving while it is alive.");
         } else {
-            show(el.stalled, false);
+            say("stall", "warn", "");
         }
     }
 
@@ -1419,13 +1623,31 @@
         return String(state.info.safe_name || folderSafe(state.info.sequence));
     }
 
+    /* RAW OR EDITED, one subfolder per kind of output.
+     *
+     * "make the timeline export into the edited folder, and source export into the raw folder"
+     * — and the reason it was asked for is a collision he hit: a source run and a timeline run
+     * of the same sequence landed in one folder, both numbering their output 01..N, so the
+     * second run's 01–06 overwrote the first's. Two folders make the two kinds of output
+     * un-collidable and say which is which without opening a file.
+     *
+     * ⚠️ This does NOT stop two runs of the SAME kind colliding — two timeline exports still
+     * both write into edited/ — which is a separate problem and still open.
+     *
+     * Read off state.cutFrom, which is the same value doExport() and renderSpec() branch on.
+     * There is deliberately no second way of asking "am I in render mode". */
+    function outKind() {
+        return state.cutFrom === "render" ? "edited" : "raw";
+    }
+
     /* Where THIS export writes. Empty until a sequence has been read, since the folder is
      * named after it. Everything that touches the output — the argv, the manifest the
-     * report is built from, Show in Finder — goes through here so they cannot disagree. */
+     * report is built from, Show in Finder, the destination notice, renderDir() — goes
+     * through here so they cannot disagree. */
     function outDir() {
         if (!state.out) return "";
         var f = seqFolder();
-        return f ? path.join(state.out, f) : state.out;
+        return f ? path.join(state.out, f, outKind()) : state.out;
     }
 
     function countIn(dir) {
@@ -1441,30 +1663,35 @@
     /* Show the folder that will actually be written, before it is written. A root plus an
      * invisible rule about what gets appended to it is worse than no rule. */
     function setOutDest() {
-        if (!el.outdest) return;
         if (!state.out) {
-            show(el.outdest, false);
+            say("dest", "info", "");
             return;
         }
         if (!state.info) {
-            el.outdest.className = "note";
-            el.outdest.textContent = "A folder named after the sequence is created in "
-                + "here when you export.";
-            el.outdest.title = "";
-            show(el.outdest, true);
+            /* SILENT UNTIL THERE IS A FOLDER TO TALK ABOUT. This used to state the raw/edited
+             * rule here, which put a row on the rail before anything had happened — and the
+             * rail is for what needs attention, not for rules. The rule lives on the Save to
+             * field's own ? instead, which is where you look when you want to know where
+             * things land. What this branch has to say arrives after a read: whether the
+             * target folder already holds files. */
+            say("dest", "info", "");
             return;
         }
         var d = outDir();
         var n = countIn(d);
-        el.outdest.textContent = "→ " + seqFolder() + "/"
-            + (n > 0 ? ("  · exists already, " + n + " file(s) in it") : "");
-        // Flagged rather than merely mentioned: a re-export overwrites the names it
-        // reproduces and leaves everything else, so a folder from a DIFFERENT version of
-        // this timeline ends up holding a mix of both. Tick "skip clips already in that
-        // folder" to add only what is missing, or empty it first.
-        el.outdest.className = "note" + (n > 0 ? " warn" : "");
-        el.outdest.title = d;
-        show(el.outdest, true);
+        /* ⚠️ SILENT WHEN THERE IS NOTHING TO WARN ABOUT. The happy reading of this note was
+         * "→ PROMO_A_v3/", and renderNext() already ends with "…will be written into
+         * PROMO_A_v3/." — the same folder, named twice, two rows apart on the same rail.
+         *
+         * A folder that ALREADY HOLDS FILES is the reading nothing else covers, and it
+         * matters: a re-export overwrites the names it reproduces and leaves everything else,
+         * so a folder from a DIFFERENT version of this timeline ends up holding a mix of both.
+         * Tick "skip clips already there" to add only what is missing, or empty it first. */
+        say("dest", "warn", n > 0
+            ? (seqFolder() + "/" + outKind() + "/ exists already, with " + n
+               + " file(s) in it. A re-export overwrites the names it reproduces and leaves "
+               + "the rest, so the folder can end up holding two versions of this timeline.")
+            : "", d);
     }
 
     function setOut(p) {
@@ -1526,7 +1753,7 @@
         }
         var dir = renderDir();
         clearError();
-        show(el.report, false);
+        showReport(false);
         show(el.prog, true);
         setRunning(true);
         setBusy(true, "Rendering…");
@@ -1639,10 +1866,15 @@
         // previous run's manifest in place, which then rendered as though it described
         // the run that was just abandoned.
         state.manifestBefore = manifestMtime();
+        // Belongs to THIS run. A leftover count would keep the render scratch for ever.
+        state.rendersMissing = 0;
+        say("renders", "info", "");
+        // And the last run's reasons are not this run's.
+        say("failures", "error", "");
 
         /* ⚠️ The list STAYS. This used to hide #opts and #step3 and show a progress
          * section in their place — see renderRun() for what that cost. */
-        show(el.report, false);
+        showReport(false);
         show(el.prog, true);
         setRunning(true);
         el.barfill.style.width = "0";
@@ -1756,10 +1988,14 @@
                  * which row of the action bar belongs on screen and that decision reads
                  * #report's own visibility. Rendering first left the bar offering an export
                  * and reporting a finished run at the same time — two next actions. */
-                show(el.report, true);
+                showReport(true);
                 renderReport();
                 renderMerge();          // this run's '++' and '!!' lines
             }
+
+            /* AFTER the report, because whether to keep the renders depends on what the
+             * report says failed — and never before, because the encode reads them. */
+            if (renderDirPath) cleanRenders(renderDirPath, built, code);
 
             if (code === 0) {
                 if (!built) fail("The run finished but wrote no manifest to report on.");
@@ -1804,10 +2040,9 @@
             show(el.tablewrap, false);
         }
         el.tablewrap.className = rescan ? "tablewrap rescanning" : "tablewrap";
-        el.scanning.textContent = rescan
+        say("scan", "info", rescan
             ? "Re-reading the cut list… the list below is the last one read."
-            : "Reading the cut list…";
-        show(el.scanning, true);
+            : "Reading the cut list…");
         if (!rescan) el.listnote.textContent = "";
 
         var scanDir = path.join(workDir(), "scan");
@@ -1890,7 +2125,7 @@
     /* Both halves of "the scan is over", together. They were separate lines at four
      * exits, which is four chances to hide the hint and leave the table dimmed. */
     function endRescan() {
-        show(el.scanning, false);
+        say("scan", "info", "");
         el.tablewrap.className = "tablewrap";
     }
 
@@ -1919,6 +2154,12 @@
         state.audioTracks = (pset.audio_tracks_available || []).map(function (t) {
             return { index: Number(t.index || 0), items: Number(t.items || 0) };
         }).filter(function (t) { return t.index > 0; });
+        /* WHOSE NUMBERS THESE ARE. "premiere" means the engine numbered the tracks the way
+         * Premiere does; absent means an older engine, whose numbers are the old per-channel
+         * ones. The panel gates its migration notice on this so it cannot tell someone their
+         * numbers changed on the evidence of a manifest written before they did. */
+        state.audioNumbering = String(pset.audio_track_numbering || "");
+        sayAudioRenumbered();
         var clips = data.clips || [];
         for (var i = 0; i < clips.length; i++) {
             var c = clips[i];
@@ -2268,7 +2509,11 @@
              * of why this panel felt disorderly. Nothing was dropped — the manifest and
              * clips.csv carry all of it, and the tooltip has it per row. */
             tr.title = [v.clip, "at " + v.tc,
+                        // In full, because the cell above shows only what fits in 76px.
+                        v.status && v.status !== shortStatus(v.status) ? v.status : "",
                         v.timing ? "timing from " + v.timing : "",
+                        // WHY THIS ROW FAILED, in full. The cell has room for a word.
+                        (rs && rs.why) ? rs.why : "",
                         v.notes, v.source,
                         over ? "over the " + state.cap + " MB flag" : ""
                        ].filter(function (s) { return !!s; }).join(" · ");
@@ -2297,7 +2542,8 @@
             var lastText = rst === "run" ? secs(nowMs() - (rs.t0 || nowMs()))
                 : (rs && rs.done)
                     ? (rs.note || ((rs.t1 && rs.t0) ? secs(rs.t1 - rs.t0) : ""))
-                    : (v.group === 0 && /^ready/i.test(v.status) ? "" : v.status);
+                    : (v.group === 0 && /^ready/i.test(v.status)
+                        ? "" : shortStatus(v.status));
             var cells = [
                 [v.n ? pad2(v.n) : "—", "idx num"], [v.clip, "clipname"],
                 [sizeText, "siz num" + (over ? " over" : "")
@@ -2336,6 +2582,23 @@
             : (chosen + " of " + cuttable + " ticked");
         syncPickAll();
         renderSizeEstimate();
+    }
+
+    /* WHAT FITS IN THE STATUS COLUMN, which is 76px at a 320px dock.
+     *
+     * These cells are white-space: nowrap, so anything too long is CLIPPED — the row never gets
+     * taller and nothing announces it. The engine phrases a status as "<what> — <what to do>"
+     * ("graphic — needs a render", "AE comp — render it", "ready — from render"), and the half
+     * after the dash is the half that does not fit. It is not lost: the row's tooltip carries
+     * the status in full, along with the path, the timing source and the failure reason.
+     *
+     * A rule, not a lookup table. A table of the engine's exact strings would drift the first
+     * time the engine rephrased one, and drift silently, which is how this column came to be
+     * clipping on every row of a real timeline in the first place. */
+    function shortStatus(text) {
+        var s = String(text || "");
+        var i = s.indexOf(" — ");
+        return i > 0 ? s.substring(0, i) : s;
     }
 
     function pad2(n) { return (n < 10 ? "0" : "") + n; }
@@ -2512,7 +2775,7 @@
     }
 
     function setEngineStat(cls, text) {
-        el.enginestat.className = "note" + (cls ? " " + cls : "");
+        el.enginestat.className = "msg" + (cls ? " " + cls : "");
         el.enginestat.textContent = text;
     }
 
@@ -2547,7 +2810,7 @@
                 if (then) then(true);
                 return;
             }
-            setEngineStat("bad", "xmlcut.py is there but did not run — " + lastLine(e));
+            setEngineStat("error", "xmlcut.py is there but did not run — " + lastLine(e));
             // A broken copy of OUR OWN file is worth replacing without being asked: it is
             // only ever a copy, the panel cannot do anything without it, and "present" was
             // never the same as "works". Once only, so a download that also fails to run
@@ -2589,12 +2852,12 @@
         if (state.fetching) return;
         var dir = extensionDir();
         if (!dir) {
-            setEngineStat("bad", "xmlcut.py is missing and this panel cannot work out "
+            setEngineStat("error", "xmlcut.py is missing and this panel cannot work out "
                           + "where it is installed, so it cannot repair itself. Press Find.");
             return;
         }
         if (!https) {
-            setEngineStat("bad", "xmlcut.py is missing and this panel has no network "
+            setEngineStat("error", "xmlcut.py is missing and this panel has no network "
                           + "module to fetch it. Re-run the installer, or press Find.");
             return;
         }
@@ -2615,27 +2878,27 @@
 
         fetchRel("latest.json", function (text, err) {
             if (!text) {
-                stop("bad", "could not reach the release channel (" + err
+                stop("error", "could not reach the release channel (" + err
                      + "). Press Find and point at xmlcut.py, or re-run the installer.");
                 return;
             }
             var want = "";
             try { want = String(JSON.parse(text).version || ""); } catch (e) {}
             if (!want) {
-                stop("bad", "the release channel did not name a version.");
+                stop("error", "the release channel did not name a version.");
                 return;
             }
             setEngineStat("busy", "Downloading xmlcut.py " + want + "…");
             fetchRel(UPDATE_DIR + "/xmlcut.py", function (body, err2) {
                 if (!body) {
-                    stop("bad", "the download failed (" + err2 + ").");
+                    stop("error", "the download failed (" + err2 + ").");
                     return;
                 }
                 var bad = engineComplaint(body, want);
                 if (bad) {
                     // Nothing is written. A rejected download leaves the panel exactly as
                     // it was: missing an engine and saying so.
-                    stop("bad", "refused the download — " + bad + ". Nothing was written.");
+                    stop("error", "refused the download — " + bad + ". Nothing was written.");
                     return;
                 }
                 var lib = dir + "/lib";
@@ -2644,7 +2907,7 @@
                     fs.mkdirSync(lib, { recursive: true });
                     fs.writeFileSync(target, body, "utf8");
                 } catch (e3) {
-                    stop("bad", "could not write " + target + " (" + e3 + ").");
+                    stop("error", "could not write " + target + " (" + e3 + ").");
                     return;
                 }
                 state.fetching = false;
@@ -2889,6 +3152,70 @@
      * silence. When the remembered track is missing, this falls back to every track rather than
      * to off, because "he asked for audio" is the durable half of the preference and "which
      * track" is the part that belongs to a project. */
+    /* ══════════════════════════ THE AUDIO CHOICE, AND WHY IT MOVED KEY
+     *
+     * The engine now numbers audio tracks the way PREMIERE numbers them, not the way the XML's
+     * per-channel lanes happened to fall out. So a saved "5" from before that change points at
+     * different material — and the panel's old fallback for a number the timeline does not have
+     * was `if (!known) want = "all"`, silently, with nothing said. Between them: an editor with
+     * a saved A5–A7 gets a full mix of everything instead of the one track they picked, and an
+     * editor with a saved A3 gets a different track. Both look like a working export.
+     *
+     * ⚠️ DISCARDED, NEVER REMAPPED. Old number → new number is only computable from the
+     * manifest OF THE SAME TIMELINE, which the panel does not have when it restores a
+     * preference at boot. Any mapping invented here would be a guess presented as a memory,
+     * which is the failure mode being fixed.
+     *
+     * "" and "all" carry over untouched, because neither is a track number and neither can
+     * mean something different under a new numbering. Only a NUMBER is thrown away, and only
+     * then does the panel say anything. */
+    var AUDIO_KEY = "xmlcut.audio.v2";
+    var AUDIO_KEY_OLD = "xmlcut.audio";
+
+    function loadAudioWant() {
+        var now = null, old = null;
+        try { now = window.localStorage.getItem(AUDIO_KEY); } catch (e) {}
+        try { old = window.localStorage.getItem(AUDIO_KEY_OLD); } catch (e) {}
+        // Gone either way: a key left behind is a key that gets read again by mistake.
+        if (old !== null) {
+            try { window.localStorage.removeItem(AUDIO_KEY_OLD); } catch (e) {}
+        }
+        if (now !== null) {
+            state.audioWant = String(now);
+            return;
+        }
+        if (old === null) { state.audioWant = ""; return; }
+        old = String(old);
+        if (old === "" || old === "all") {
+            // Not a number, so the renumbering cannot have changed what it means.
+            state.audioWant = old;
+            return;
+        }
+        /* A saved NUMBER. Thrown away, and remembered only so the panel can say it did — and
+         * only once the engine confirms it is the one that renumbered (see audioNumbering). */
+        state.audioDropped = old;
+        state.audioWant = "all";
+        rememberAudioWant();
+    }
+
+    function rememberAudioWant() {
+        try { window.localStorage.setItem(AUDIO_KEY, state.audioWant); } catch (e) {}
+    }
+
+    /* Said ONCE, and only when the engine that read this timeline is the one whose numbers
+     * changed. A manifest with no audio_track_numbering came from an older engine, whose
+     * numbers are the OLD ones — telling someone their numbers now match Premiere on the
+     * strength of that manifest would be false. */
+    function sayAudioRenumbered() {
+        if (!state.audioDropped || state.audioNumbering !== "premiere") return;
+        say("audionum", "warn", "Audio track numbers now match Premiere's own, which the "
+            + "earlier numbering did not. Your saved choice of A" + state.audioDropped
+            + " could have meant a different track under the new numbers, so it was cleared "
+            + "and every audio track is selected. Pick the track you want again.");
+        // Once. It is news about a migration, not a standing state.
+        state.audioDropped = "";
+    }
+
     function renderAudioTracks() {
         var have = state.audioTracks || [];
         var sel = el.audiosel;
@@ -3035,13 +3362,20 @@
      * suddenly shows a third of the clips otherwise reads as a fault. */
     function renderListLabel() {
         if (!el.listlbl) return;
-        var q = el.listlbl.querySelector ? null : null;
         var txt = (state.cutFrom === "render" && state.vtrackWant)
             ? ("Every cut on V" + state.vtrackWant + ", in timeline order")
             : "Every cut, in timeline order";
-        // The tip marker is a child element; only the leading text node is replaced.
+        /* The tip marker is a child ELEMENT, so only the leading text node may be replaced.
+         *
+         * ⚠️ nodeType, NOT tagName. This read `first.tagName === "#text"`, and a real text node
+         * has no tagName at all — the test was always false, so every call PREPENDED another
+         * copy of the label instead of replacing it. Measured in a real browser: eight calls,
+         * nine copies of "Every cut, in timeline order" stacked above the list. The DOM shim in
+         * tests/panel_dom.js gave its text nodes `tagName: "#text"`, which made the broken test
+         * true there and is exactly why no test could see this. nodeType 3 is what a text node
+         * actually is, in the browser and now in the shim. */
         var first = el.listlbl.firstChild;
-        if (first && first.tagName === "#text") first.textContent = txt + " ";
+        if (first && first.nodeType === 3) first.textContent = txt + " ";
         else el.listlbl.insertBefore(document.createTextNode(txt + " "), first || null);
     }
 
@@ -3148,34 +3482,123 @@
      * These were four separate labels living inside four different fields, which is most
      * of why the strip read as busy. */
     function renderStripFoot() {
-        if (!el.stripfoot) return;
         if (state.cutFrom !== "render") {
-            show(el.stripfoot, false);
+            say("rendermode", "info", "");
             return;
         }
         var mb = renderMbps();
+        /* NOTHING UNTIL THE NUMBER EXISTS. The bitrate is frame size x fps x quality, so none
+         * of it is knowable before a read — and "read a timeline to see the render bitrate" is
+         * an instruction to do the one thing the panel is already asking for, taking a rail row
+         * to do it. The caveat below goes with it: there are no sizes to qualify yet either. */
+        if (!mb) {
+            say("rendermode", "info", "");
+            return;
+        }
         var out = [];
-        out.push(mb
-            ? ("Premiere renders each cut at <b>~"
-               + (mb < 10 ? mb.toFixed(1) : Math.round(mb))
-               + " Mbps</b>, then ffmpeg encodes it at your quality.")
-            : "Read a timeline to see the render bitrate.");
+        // Plain text, no <b>. The bold was the only inline emphasis left in the panel and it
+        // was carrying a number that is already the only number in the sentence.
+        out.push("Premiere renders each cut at ~"
+                 + (mb < 10 ? mb.toFixed(1) : Math.round(mb))
+                 + " Mbps, then ffmpeg encodes it at your quality.");
         // Said because it is not obvious and it is wrong for a retimed clip: the scan runs
         // before any render exists, so the estimate can only come from the source.
         out.push("Sizes are estimated from the source clips in this mode.");
-        el.stripfoot.innerHTML = out.join(" ");
-        show(el.stripfoot, true);
+        say("rendermode", "info", out.join(" "));
     }
 
-    /* Where Premiere writes the rendered ranges.
+    /* Where Premiere writes the rendered ranges: <sequence>/edited/_renders, composed out of
+     * outDir() so it follows the raw/edited split for free.
      *
-     * Beside the clips rather than in a temp folder: these are large — Match Source High
-     * on a 4K sequence is tens of MB a cut — and /tmp is on the system volume, which is
-     * not the volume he chose to have room on. Kept after the run, not deleted: a retry
-     * of the failed rows then re-renders only those rows, and the folder says plainly
-     * what it is. */
+     * Beside the clips rather than in a temp folder: these are large — Match Source High on a
+     * 4K sequence is tens of MB a cut — and /tmp is on the system volume, which is not the
+     * volume he chose to have room on.
+     *
+     * ⚠️ DELETED AFTER A CLEAN RUN, kept after a dirty one. This comment used to say the
+     * opposite — "kept after the run, not deleted" — and the reason it gave is still true and
+     * is why the deletion is conditional: the engine CUTS FROM these files, so "Retry the N
+     * that failed" re-encodes the failed rows out of _renders without asking Premiere to
+     * render anything again. Throw them away while something still needs retrying and the
+     * retry becomes a full re-render.
+     *
+     * What deleting on a clean run buys: these are Premiere intermediates carrying a full
+     * stereo mix of the whole sequence, while the delivered clips are silent by design. Left
+     * behind, they read as a second folder of the same clips WITH sound — which is exactly how
+     * they were reported ("two folders, one with sound one without"). See cleanRenders(). */
     function renderDir() {
         return path.join(outDir(), "_renders");
+    }
+
+    /* Remove a directory tree, on whatever this runtime actually provides.
+     *
+     * ⚠️ PROBED, NOT ASSUMED. CEP 11 bundles its own Node and it is not the one on the machine:
+     * fs.rmSync arrived in Node 14.14, and rmdirSync's `recursive` option was deprecated in 14
+     * and REMOVED in 16 — so on some builds one works, on some the other, and on some neither.
+     * The hand-rolled walk at the end needs no options at all and is the only branch that can
+     * be relied on. Returns whether the directory is gone. */
+    function rmTree(dir) {
+        if (!dir || !exists(dir)) return true;
+        try {
+            if (typeof fs.rmSync === "function") {
+                fs.rmSync(dir, { recursive: true, force: true });
+                if (!exists(dir)) return true;
+            }
+        } catch (e) { log("rmSync could not remove " + dir + ": " + e); }
+        try {
+            if (typeof fs.rmdirSync === "function") {
+                fs.rmdirSync(dir, { recursive: true });
+                if (!exists(dir)) return true;
+            }
+        } catch (e2) { log("rmdirSync could not remove " + dir + ": " + e2); }
+        try {
+            var names = fs.readdirSync(dir);
+            for (var i = 0; i < names.length; i++) {
+                var p = path.join(dir, names[i]);
+                var st = null;
+                try { st = fs.statSync(p); } catch (e3) { st = null; }
+                if (st && st.isDirectory()) rmTree(p);
+                else { try { fs.unlinkSync(p); } catch (e4) {} }
+            }
+            fs.rmdirSync(dir);
+        } catch (e5) {
+            log("could not remove " + dir + ": " + e5);
+        }
+        return !exists(dir);
+    }
+
+    /* THE RENDER SCRATCH, after the run. Deleted only when there is nothing left to retry.
+     *
+     * ⚠️ NEVER BEFORE OR DURING THE RUN. ffmpeg is reading these files; they are the source
+     * material of a render-mode export, not a by-product of it.
+     *
+     * A failure to delete NEVER fails an export. The clips are the deliverable and a leftover
+     * working folder is cosmetic, so the worst case here is one quiet line on the rail. */
+    function cleanRenders(dir, built, code) {
+        if (!dir || !exists(dir)) return;
+        var failed = failedRows().length;
+        var missing = state.rendersMissing || 0;
+        var why = "";
+        if (!built || code !== 0) why = "this run did not finish cleanly";
+        else if (failed) {
+            why = failed + " clip" + (failed === 1 ? "" : "s") + " did not write";
+        } else if (missing) {
+            why = missing + " cut" + (missing === 1 ? "" : "s") + " had no render";
+        }
+        if (why) {
+            /* Said out loud, because a folder that is sometimes there and sometimes not is a
+             * thing you go looking for an explanation of. */
+            say("renders", "info", "The rendered ranges are still in _renders/ because " + why
+                + " — Retry re-encodes those without asking Premiere to render them again. "
+                + "Delete the folder by hand once you are done with it.");
+            return;
+        }
+        if (rmTree(dir)) {
+            log("removed the render scratch: " + dir);
+            say("renders", "info", "");
+        } else {
+            say("renders", "info", "The rendered ranges in _renders/ could not be removed. "
+                + "They are Premiere intermediates and safe to delete by hand.");
+        }
     }
 
     /* The cuts a render phase has to produce, as the host's "label|in|out" records. Only
@@ -3343,7 +3766,11 @@
             el.remeasure.className = "mini" + (staleSizes() ? " on" : "");
         }
         var picked = pickedClips();
-        if (!picked.length) { show(el.sizeest, false); return; }
+        if (!picked.length) {
+            show(el.sizeest, false);
+            say("sizes", "warn", "");
+            return;
+        }
         var s = settings(), total = 0, known = 0;
         for (var i = 0; i < picked.length; i++) {
             var b = clipBytes(picked[i], s);
@@ -3354,43 +3781,50 @@
         // readout showing the boot value after a scan.
         el.crfread.textContent = state.crfVal
             + (total > 0 ? "  ·  " + humanBytes(total) : "");
-        if (!known) { show(el.sizeest, false); return; }
-        var stale = staleSizes();
-        el.sizeest.className = "note" + (stale ? " warn" : "");
-        if (stale) {
-            // Never a scaled number. The sizes shown are the ones that were measured, and
-            // the line says which settings they belong to.
-            el.sizeest.textContent = "~" + humanBytes(total) + " for " + picked.length
-                + " clip(s) — measured at " + codecName(state.probeVcodec) + " CRF "
-                + state.probeCrf + " · " + state.probeScale
-                + "% size. Re-measure to update these for "
-                + codecName(settings().vcodec) + " CRF " + state.crfVal + " · "
-                + state.scale + "%.";
-        } else if (measured()) {
-            el.sizeest.textContent = "~" + humanBytes(total) + " for " + picked.length
-                + " clip(s) — measured, by encoding a second of each clip at these"
-                + " settings.";
-        } else {
-            el.sizeest.textContent = "~" + humanBytes(total) + " for " + picked.length
-                + " clip(s) — an estimate, usually within about 1.5x. Re-measure encodes a"
-                + " second of each clip for a figure good to a few percent.";
+        if (!known) {
+            show(el.sizeest, false);
+            say("sizes", "warn", "");
+            return;
         }
+        /* THE NUMBER IN THE BAR, THE CAVEAT ELSEWHERE.
+         *
+         * This one line used to carry both, and the explaining half is three times the
+         * length of the fact: at a 320px dock "an estimate, usually within about 1.5x.
+         * Re-measure encodes a second of each clip for a figure good to a few percent."
+         * wrapped to three lines and made the action bar 96px tall to state one figure.
+         *
+         * So the bar gets the figure and one word for its provenance. The full explanation
+         * of `estimated` and `measured` is on the ? beside it — the panel's own idiom for
+         * "how is this number made", and it costs no pixels. The rail gets a row ONLY in the
+         * stale case, which is the one where there is something to DO about it. */
+        var stale = staleSizes();
+        var how = stale
+            ? ("measured at " + codecName(state.probeVcodec) + " CRF " + state.probeCrf
+               + " · " + state.probeScale + "%")
+            : (measured() ? "measured" : "estimated");
+        el.sizeest.className = "abfact" + (stale ? " warn" : "");
+        el.sizeest.textContent = "~" + humanBytes(total) + " for " + picked.length
+            + " clip" + (picked.length === 1 ? "" : "s") + " · " + how;
         show(el.sizeest, true);
+        // Never a scaled number. The sizes shown are the ones that were measured, and this
+        // says which settings they belong to and what would refresh them.
+        say("sizes", "warn", stale
+            ? ("The sizes on screen were measured at " + codecName(state.probeVcodec)
+               + " CRF " + state.probeCrf + " · " + state.probeScale + "% size, not at "
+               + codecName(settings().vcodec) + " CRF " + state.crfVal + " · " + state.scale
+               + "%. Re-measure to update them.")
+            : "");
     }
 
     function renderSettings() {
         applyScale();
         // The one setting that changes what the files CONTAIN rather than how big
         // they are. Said in red, and not folded into a tooltip.
-        if (el.fps.value) {
-            el.fpswarn.textContent = "Forcing " + el.fps.value + " fps RESAMPLES: frames "
-                + "are dropped or duplicated to hit that rate, so these clips will NOT "
-                + "hold the frames the timeline used. The manifest records them as "
-                + "frame_exact = false.";
-            show(el.fpswarn, true);
-        } else {
-            show(el.fpswarn, false);
-        }
+        say("fps", "error", el.fps.value
+            ? ("Forcing " + el.fps.value + " fps RESAMPLES: frames are dropped or "
+               + "duplicated to hit that rate, so these clips will NOT hold the frames "
+               + "the timeline used. The manifest records them as frame_exact = false.")
+            : "");
         renderAudioTracks();
         renderVideoTracks();
         applyCutFrom();
@@ -3500,12 +3934,7 @@
         } else {
             el.vcodec.value = vc;
         }
-        if (refused.length) {
-            el.presetwarn.textContent = refused.join(" ");
-            show(el.presetwarn, true);
-        } else {
-            show(el.presetwarn, false);
-        }
+        say("preset", "warn", refused.join(" "));
         el.fps.value = s.fps ? String(s.fps) : "";
         state.scale = s.scale ? Math.max(10, Math.min(100, parseFloat(s.scale) || 100)) : 100;
         renderSettings();
@@ -3547,7 +3976,7 @@
 
     function setUpd(cls, text, btn) {
         // "done" was a distinct blue box; it is the same news as "good".
-        el.updbar.className = "note row " + (cls === "done" ? "good" : (cls || "good"));
+        el.updbar.className = "msg act " + (cls === "done" ? "good" : (cls || "good"));
         el.updtext.textContent = text;
         el.updbtn.hidden = !btn;
         if (btn) el.updbtn.textContent = btn;
@@ -3574,13 +4003,13 @@
                         ? "bundled with this panel" : "found") + " · v" + r.current
                     + " · runs");
             } else if (state.script) {
-                setEngineStat("bad", "xmlcut.py is at that path but did not run: "
+                setEngineStat("error", "xmlcut.py is at that path but did not run: "
                               + (e || "no reply") + ". Check python3 is installed.");
             }
             if (!r) {
                 log("update check failed: " + e);
                 if (manual) {
-                    setUpd("bad", "Could not reach the release channel. " + e, "");
+                    setUpd("error", "Could not reach the release channel. " + e, "");
                 } else {
                     // A failed check on open says nothing: no network is not news, and a
                     // red bar on every launch would be. Hidden explicitly rather than
@@ -3599,7 +4028,7 @@
             if (r.checked === false) {
                 log("update check failed: " + (r.error || "no reason given"));
                 if (manual) {
-                    setUpd("bad", "Could not check for updates — "
+                    setUpd("error", "Could not check for updates — "
                            + (r.error || "no reason given")
                            + ". You are still running " + r.current + ".", "");
                 } else {
@@ -3636,7 +4065,7 @@
         setUpd("busy", "Downloading and checking every file first…", "");
         runJson(["--self-update-json"], function (r, e) {
             if (!r) {
-                setUpd("bad", "Update failed: " + e, "");
+                setUpd("error", "Update failed: " + e, "");
                 return;
             }
             for (var i = 0; i < (r.steps || []).length; i++) log("update: " + r.steps[i]);
@@ -3657,7 +4086,7 @@
                 log("update changed: " + ((r.changed || []).join(", ") || "nothing"));
                 readVersion();
             } else {
-                setUpd("bad", r.message, "");
+                setUpd("error", r.message, "");
             }
         });
     }
@@ -3674,6 +4103,90 @@
         } catch (e) {
             return 0;
         }
+    }
+
+    /* WHICH AUDIO TRACKS THE MIX ACTUALLY READ, said after every run that asked for audio.
+     *
+     * "tuy a chọn render track A2 nhưng nó lại trả về audio của A1" — he chose one track and
+     * got a different one, and the panel showed him NOTHING either way. The manifest has
+     * carried `audio_tracks` (what was mixed) and `audio_tracks_requested` (what was asked
+     * for) as separate fields all along, precisely so that a filter which failed to apply can
+     * be told apart from "every track was wanted" — and nothing in this panel read either of
+     * them. The one fact he needed in order to see the bug was the one fact he could not get.
+     *
+     * ⚠️ FACTS ONLY, AND NO ASSUMPTION ABOUT WHAT IS ON A TRACK. This panel does not know
+     * which track holds a voice-over and which holds music. On his timeline the voice-over
+     * was A2 and the music A1; on the next project it may be A4. Naming a track by what it is
+     * expected to contain is the assumption that produced the complaint, so this reports the
+     * numbers the engine reports, plus how many items each track holds, and lets the reader
+     * judge which one they wanted.
+     *
+     * ⚠️ A MISMATCH IS AN ERROR, not a footnote. It means the mp3 sitting beside the clips is
+     * not the audio that was asked for — silently wrong data, which for a dataset is the
+     * worst kind of wrong.
+     */
+    function trackNames(list) {
+        var out = [];
+        for (var i = 0; i < (list || []).length; i++) out.push("A" + list[i]);
+        return out.join(", ");
+    }
+
+    function sayAudioTracks(st) {
+        // Audio was not asked for, so there is nothing to report — not even that there isn't.
+        if (!st.audio) { say("audio", "info", ""); return; }
+        var used = (st.audio_tracks || []).map(Number);
+        var want = (st.audio_tracks_requested || []).map(Number);
+        var have = st.audio_tracks_available || [];
+        var ta = st.timeline_audio || {};
+        /* What the timeline HAD to offer, with each track's item count, so a mismatch can be
+         * understood without going anywhere else. On a real timeline the track holding one
+         * long item and the track holding fourteen short ones are obvious to their editor and
+         * invisible to this tool. */
+        var offer = [], h, n;
+        for (h = 0; h < have.length; h++) {
+            n = Number(have[h].items || 0);
+            offer.push("A" + have[h].index + " (" + n + (n === 1 ? " item" : " items") + ")");
+        }
+        var had = offer.length ? " This timeline has " + offer.join(", ") + "." : "";
+        /* ⚠️ THE FILES THAT WENT IN, BY NAME. This is the one fact a wrong number cannot fake,
+         * and its absence is why "A2 only" shipped a full copy of the background music for a
+         * whole release with every numeric field reading green: nothing anywhere named the
+         * material in the mix, so there was nothing to check the number against. The engine
+         * reports it as settings.timeline_audio.sources — [{name, parts}] — and a basename is
+         * something an editor recognises at a glance. */
+        var src = [], q;
+        for (q = 0; q < (ta.sources || []).length; q++) {
+            var nm = String(ta.sources[q].name || "?");
+            var pc = Number(ta.sources[q].parts || 0);
+            src.push(nm + (pc > 1 ? " ×" + pc : ""));
+        }
+        var mix = ta.file
+            ? (" Written: " + ta.file
+               + (ta.seconds ? ", " + Number(ta.seconds).toFixed(2) + "s" : "")
+               + (ta.parts ? ", from " + ta.parts + " item(s)" : "") + "."
+               + (src.length ? " It holds: " + src.join(", ") + "." : ""))
+            : (ta.note ? " " + String(ta.note) : " No audio file was written.");
+
+        // THE BUG. Said first, said loudly, and said in the words of what it costs.
+        if (want.length && want.join(",") !== used.join(",")) {
+            say("audio", "error", "AUDIO TRACK MISMATCH — " + trackNames(want)
+                + " was asked for, but the mix read "
+                + (used.length ? trackNames(used) : "no track")
+                + ". The audio file beside these clips is NOT the track you chose." + had
+                + mix);
+            return;
+        }
+        // Asked for and got: still reported, because "it worked" is only checkable if the
+        // panel says which track it read when it worked.
+        var sev = ta.file ? "info" : "warn";
+        if (!want.length) {
+            say("audio", sev, "Audio: read "
+                + (used.length ? "every audio track — " + trackNames(used)
+                               : "no audio track")
+                + "." + mix);
+            return;
+        }
+        say("audio", sev, "Audio: read " + trackNames(used) + ", as asked." + had + mix);
     }
 
     function buildReport() {
@@ -3750,9 +4263,21 @@
                 bytes: wrote,
                 // What to say in the last column when it is not just a time: the reason it
                 // failed, or that the file was already there.
-                note: bad ? String(c.error || st).split("\n")[0].substring(0, 90)
-                    : (st === "skipped_existing" ? "already there"
-                       : (st === "unsupported" ? "not decodable" : "")),
+                /* ⚠️ A WORD, NOT A SENTENCE. This carried the engine's error message, up to 90
+                 * characters of it, into a column that is 76px wide at a 320px dock — so the one
+                 * thing anybody wants after a failed run, WHY it failed, was silently clipped at
+                 * every width the panel is used at (measured: "failed — encoder exit 1" needs
+                 * 131px, the column gives 76 docked and 120 undocked). These cells are
+                 * white-space: nowrap, so it never even wrapped to announce itself.
+                 *
+                 * The reason now goes where there is room for it: the row's own tooltip, and the
+                 * rail when the failures do not share one. This says which of four things
+                 * happened, in a word that fits. */
+                note: bad ? "failed"
+                    : (st === "skipped_existing" ? "kept"
+                       : (st === "unsupported" ? "not media" : "")),
+                // The full reason, for the tooltip and the rail. Never for the cell.
+                why: bad ? String(c.error || st).split("\n")[0].substring(0, 160) : "",
                 done: true
             });
             state.report.push({
@@ -3821,15 +4346,29 @@
          * tell whether seven clips had failed silently. xmlcut computes exactly this
          * sentence and was only writing it to clips.csv. */
         var comp = String(data.completeness || "");
-        el.repcomplete.textContent = comp;
-        show(el.repcomplete, !!comp);
+        // Kept in state as well as said on the rail: reportText() pastes it, and reading it
+        // back off the element it was written to is how that line silently emptied when the
+        // element moved.
+        state.completeness = comp;
+        say("complete", "info", comp);
+        /* How many cuts the render phase failed to produce. Read here because this is where the
+         * run's manifest is already open, and needed by cleanRenders(): a cut with no render is
+         * a reason to KEEP the scratch folder even when nothing reported a failure. */
+        state.rendersMissing = Number((data.settings || {}).renders_missing || 0);
+
+        // WHICH AUDIO TRACKS THE MIX ACTUALLY READ. See sayAudioTracks().
+        sayAudioTracks(data.settings || {});
 
         // And WHERE it wrote, which the report never said despite having a Show button.
         // Named in words too: the clips are in a folder called after the sequence, and
         // anyone expecting the root folder finds it empty and calls the files missing.
         var f = seqFolder();
+        // Names the SUBFOLDER too, since there are two now. A caption that said only
+        // "a folder named after the sequence" would send someone to the level above the
+        // clips, find it holding two folders, and be exactly as lost as before.
         el.repdestlbl.textContent = f
-            ? ("Clips are in a folder named after the sequence — " + f + "/")
+            ? ("Clips are in a folder named after the sequence — " + f + "/"
+               + outKind() + "/")
             : "Clips are in:";
         show(el.repdestlbl, !!outDir());
         setPathLabel(el.repdest, outDir(), 60);
@@ -3932,7 +4471,7 @@
         out.push(el.tally.textContent.replace(/\s+/g, "  "));
         // The two lines added to the report on screen belong in the pasted copy too — they
         // are the ones that make a partial run legible to whoever receives it.
-        if (el.repcomplete.textContent) out.push(el.repcomplete.textContent);
+        if (state.completeness) out.push(state.completeness);
         // The size flag travels with the paste. This report gets sent to whoever asked
         // why the output was heavy, and "▲" beside four filenames means nothing without
         // the line that says what the ▲ is measured against.
@@ -3987,7 +4526,11 @@
 
     /* -------------------------------------------------------------- wiring */
 
-    el.read.addEventListener("click", readSequence);
+    el.read.addEventListener("click", function () {
+        // Reading a sequence means he is past "what changed" and into the work.
+        say("changelog", "info", "");
+        readSequence();
+    });
 
     el.pickout.addEventListener("click", function () {
         cs.evalScript("pickFolder(" + jsStr(state.out || "") + ")",
@@ -4037,7 +4580,7 @@
          * files on disk, and jobsReset() clears them when the next run actually starts, not
          * when you say you might. The list and the settings never went away, so there is
          * nothing here to restore. */
-        show(el.report, false);
+        showReport(false);
         barMode();
         clearError();
     });
@@ -4081,7 +4624,10 @@
          * alone let the very next repaint put the old value back, and the flag never reached the
          * engine. */
         state.audioWant = String(el.audiosel.value || "");
-        try { window.localStorage.setItem("xmlcut.audio", state.audioWant); } catch (e) {}
+        rememberAudioWant();
+        // A fresh choice answers the migration notice, so it goes.
+        state.audioDropped = "";
+        say("audionum", "warn", "");
         // It changes what a run writes, so it is not the named preset any more.
         el.preset.value = "";
         el.delpreset.disabled = true;
@@ -4121,6 +4667,14 @@
         reveal(exists(d) ? d : state.out);
     });
     el.showsaved.addEventListener("click", function () { reveal(state.folder); });
+
+    /* The same folder as #reveal, reachable BEFORE a run instead of only from the report.
+     * Same fallback for the same reason: the sequence folder is not created until the engine
+     * writes into it, so until then the honest thing to open is the root he chose. */
+    el.openout.addEventListener("click", function () {
+        var d = outDir();
+        reveal(exists(d) ? d : state.out);
+    });
 
     /* Re-measure. Deliberately a BUTTON rather than something that fires on its own after a
      * pause: it spawns a real encode of every clip, and a control that starts nineteen ffmpeg
@@ -4167,7 +4721,7 @@
      * keeps the line breaks, sizes the text like body copy, and stays selectable so
      * the numbers can be copied out. */
     function pocSay(text, cls) {
-        el.pocnote.className = "note pad" + (cls ? " " + cls : "");
+        el.pocnote.className = "msg pad" + (cls ? " " + cls : "");
         el.pocnote.textContent = text;
         show(el.pocnote, true);
     }
@@ -4236,7 +4790,7 @@
             }
             L.push("");
             L.push("Every attempt is in the log, under the gear.");
-            pocSay(L.join("\n"), "bad");
+            pocSay(L.join("\n"), "error");
             return;
         }
 
@@ -4385,7 +4939,7 @@
                 } catch (e) {
                     log("poc: unreadable reply: " + raw);
                     pocSay("Premiere did not return a readable reply. The raw text is"
-                        + " in the log, under the gear.", "bad");
+                        + " in the log, under the gear.", "error");
                     return;
                 }
                 pocReport(r);
@@ -4414,7 +4968,7 @@
         if (!isNaN(v)) state.crfVal = v;
         el.preset.value = "";
         el.delpreset.disabled = true;
-        show(el.presetwarn, false);
+        say("preset", "warn", "");
         renderSizeEstimate();
         if (state.clips.length) renderClips();
     });
@@ -4429,7 +4983,7 @@
         if (!isNaN(v)) state.scale = Math.max(1, Math.min(100, v));
         el.preset.value = "";
         el.delpreset.disabled = true;
-        show(el.presetwarn, false);
+        say("preset", "warn", "");
         rememberSettings();
         renderScaleRead();
         renderSizeEstimate();
@@ -4534,6 +5088,23 @@
         applyCutFrom();
         renderSettings();
         if (state.clips.length) renderClips();
+        /* ⚠️ RE-READ THE LIST, because the mode changes what is IN it.
+         *
+         * `cuttable` depends on the mode: typesFromClips() switches DEAD_TYPES back on in
+         * render mode, since Premiere resolves a Dynamic Link that ffmpeg cannot open. So after
+         * a switch the list on screen was the OTHER mode's answer — an .aep shown as
+         * uncuttable in the mode that can cut it, and the destination folder had changed under
+         * it too.
+         *
+         * A rescan rather than a stale marker: it costs one --manifest-only run, it is the same
+         * call a re-read makes, and the alternative is a list that is on screen and wrong with
+         * a disabled Export button beside it — which is the state this panel has been reported
+         * for twice. scanClips() keeps the existing rows up while it runs, so nothing blanks. */
+        if (state.clips.length && state.dump && state.script && !state.busy
+            && !state.running) {
+            setBusy(true, "Re-reading…");
+            scanClips();
+        }
     });
 
     el.vtrack.addEventListener("change", function () {
@@ -4644,9 +5215,7 @@
         // Remembered the same way, and for the same reason: it is a property of how he works
         // rather than of this timeline. The TRACK part of it is re-checked against each
         // timeline in renderAudioTracks(), because A2 on one project is not A2 on the next.
-        try {
-            state.audioWant = window.localStorage.getItem("xmlcut.audio") || "";
-        } catch (e) { state.audioWant = ""; }
+        loadAudioWant();
         try {
             el.wholeframes.checked = !!window.localStorage.getItem("xmlcut.wholeframes");
         } catch (e) { el.wholeframes.checked = false; }

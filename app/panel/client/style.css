@@ -305,80 +305,108 @@ h1 { margin: 0; font-size: var(--fs-head); font-weight: 600; }
 .gearmenu[hidden] { display: none; }
 .gearmenu .lbl { margin-top: 0; }
 
-/* -------------------------------------------------- what to do next */
-
-/* ONE sentence, directly under the title, never blank. It is the answer to the question
- * this panel got asked most — "what do I press now" — which previously had to be assembled
- * from a disabled button, the hint under it, a warning box and a note beside the folder.
+/* ════════════════════════════════════════════════════════ THE MESSAGE RAIL
  *
- * Full width in the wide layout, so it is read before either column. */
-.nextline {
+ * ONE region, ONE component, THREE severities. Everything this panel says arrives here,
+ * directly under the title, and nothing that is a message is drawn anywhere else.
+ *
+ * ⚠️ WHAT THIS REPLACED, counted rather than remembered: twenty-nine elements in index.html
+ * could put prose in front of the reader, in five different regions, under two components
+ * that were 90% the same CSS (.note with five states, .nextline with four) plus .stripfoot,
+ * .hint, .listnote and .tickwhy. The frame-rate warning was under Frame rate, the
+ * destination warning was beside the folder, the stall warning was above the Export button,
+ * and the error box was below the entire page. Nobody could learn where to look, which is
+ * exactly the report: "someone seeing it for the first time will find it cluttered".
+ *
+ * The rail's rows are ORDERED BY SEVERITY IN JS (see say() in main.js), not by CSS `order`:
+ * a reader copying the rail into a bug report gets the same sequence they saw. */
+.rail {
     margin: -2px 0 12px;
-    padding: 6px 9px;
-    border-left: 2px solid var(--accent);
-    border-radius: 2px;
-    background: var(--card);
-    color: var(--fg);
-    font-size: var(--fs-base);
-    line-height: 1.45;
+    display: grid;
+    gap: 6px;
 }
 
-.nextline { box-shadow: -1px 0 10px -2px rgba(0, 180, 255, .45); }
-.nextline.good { border-left-color: var(--ok);
-                 box-shadow: -1px 0 10px -2px rgba(63, 240, 138, .5); }
-.nextline.warn { border-left-color: var(--warn); color: var(--warn);
-                 box-shadow: -1px 0 10px -2px rgba(255, 194, 51, .5); }
-.nextline.bad { border-left-color: var(--bad); color: var(--bad);
-                box-shadow: -1px 0 10px -2px rgba(255, 84, 112, .5); }
-.nextline.busy { color: var(--dim); }
+.railmsgs { display: grid; gap: 6px; }
+/* No row and no gap when nothing is being said. Without this the rail reserved 6px of grid
+ * gap for an empty container on every screen. */
+.railmsgs:empty { display: none; }
 
-/* The collapsible settings box that used to live here is gone — he asked for the settings
- * to be permanently visible, so there is nothing left to summarise or to toggle. Its one
- * survivor is `button.mini.on`, which the Re-measure button uses to say it wants pressing. */
-button.mini.on { background: var(--line); color: var(--fg); }
-
-/* ------------------------------------------------------------ THE notice */
-
-/* One component, five states. Replaces .warn, .typehint, .mergebox, .updbar, .err, .mode,
- * .enginestat and .outdest — eight elements that were each styled separately while saying the
- * same kind of thing. A left rule carries the severity; the text colour follows it. */
-.note {
-    margin-top: 6px;
-    padding: 5px 8px;
+/* THE one message component. A left rule carries the severity and the text colour follows
+ * it — three levels, and nothing has a colour that does not mean something.
+ *
+ *   (none) / .info   neutral. A fact you may want.
+ *   .warn            you will want to know this before you press Export.
+ *   .error           this is wrong, or will produce something wrong.
+ *
+ * .good and .busy exist for the two rows that are not routed messages — the update bar and
+ * the engine's own status inside the gear overlay — and are not used by say(). */
+.msg {
+    padding: 5px 9px;
     border-left: 2px solid var(--line);
     border-radius: 2px;
     background: var(--card);
     color: var(--dim);
     font-size: var(--fs-small);
     line-height: 1.45;
+    /* So a multi-line rail row (the changelog) keeps its bullets. Every other row is
+       a single line, so this is inert for them. */
+    white-space: pre-line;
     word-break: break-word;
 }
 
-.note[hidden] { display: none; }
+.msg[hidden] { display: none; }
 /* A lit rail rather than a flat 2px line. The glow is inset from the left edge so it reads
  * as the rail emitting rather than as a drop shadow under the box. */
-.note.good { border-left-color: var(--ok); color: var(--ok);
-             box-shadow: -1px 0 8px -2px rgba(63, 240, 138, .45); }
-.note.warn { border-left-color: var(--warn); color: var(--warn);
-             box-shadow: -1px 0 8px -2px rgba(255, 194, 51, .45); }
-.note.bad { border-left-color: var(--bad); color: var(--bad);
-            box-shadow: -1px 0 8px -2px rgba(255, 84, 112, .45); }
-.note.busy { border-left-color: var(--accent); color: var(--dim);
-             box-shadow: -1px 0 8px -2px rgba(0, 180, 255, .45); }
-/* A notice with a control in it — the update bar. */
-.note.row { display: flex; align-items: center; gap: 8px; }
-.note.row[hidden] { display: none; }
-.note.row > :first-child { flex: 1 1 auto; min-width: 0; }
-/* Roomier, for a message you have to read rather than glance at. */
-.note.pad {
+.msg.warn { border-left-color: var(--warn); color: var(--warn);
+            box-shadow: -1px 0 8px -2px rgba(255, 194, 51, .45); }
+.msg.error { border-left-color: var(--bad); color: var(--bad);
+             box-shadow: -1px 0 8px -2px rgba(255, 84, 112, .45); }
+.msg.good { border-left-color: var(--ok); color: var(--ok);
+            box-shadow: -1px 0 8px -2px rgba(63, 240, 138, .45); }
+.msg.busy { border-left-color: var(--accent); color: var(--dim);
+            box-shadow: -1px 0 8px -2px rgba(0, 180, 255, .45); }
+
+/* THE NEXT ACTION — the rail's first row, always present, never blank. Body-size rather
+ * than secondary, because it is the answer to the question this panel gets asked most. */
+.msg.next {
+    padding: 6px 9px;
+    border-left-color: var(--accent);
+    color: var(--fg);
+    font-size: var(--fs-base);
+    box-shadow: -1px 0 10px -2px rgba(0, 180, 255, .45);
+}
+.msg.next.good { border-left-color: var(--ok);
+                 box-shadow: -1px 0 10px -2px rgba(63, 240, 138, .5); }
+.msg.next.warn { border-left-color: var(--warn); color: var(--warn);
+                 box-shadow: -1px 0 10px -2px rgba(255, 194, 51, .5); }
+.msg.next.error { border-left-color: var(--bad); color: var(--bad);
+                  box-shadow: -1px 0 10px -2px rgba(255, 84, 112, .5); }
+.msg.next.busy { color: var(--dim); }
+
+/* A row with a control in it — the update bar. */
+.msg.act { display: flex; align-items: center; gap: 8px; }
+.msg.act[hidden] { display: none; }
+.msg.act > :first-child { flex: 1 1 auto; min-width: 0; }
+/* Roomier, for a message you have to read rather than glance at — the POC's report. */
+.msg.pad {
     padding: 9px 10px;
     font-size: var(--fs-base);
     white-space: pre-wrap;
     -webkit-user-select: text;
     user-select: text;
 }
+/* The engine's merge notes, folded away: a disclosure rather than a wall of lines, because
+ * on a repaired timeline there can be forty of them. */
+.msg.det { padding: 0; border-left-color: var(--line); }
+.msg.det > summary { padding: 5px 9px; border: 0; margin: 0; }
+.msg.det > .mergebox { padding: 0 9px 7px; }
 
 .updtext { min-width: 0; }
+
+/* The collapsible settings box that used to live here is gone — he asked for the settings
+ * to be permanently visible, so there is nothing left to summarise or to toggle. Its one
+ * survivor is `button.mini.on`, which the Re-measure button uses to say it wants pressing. */
+button.mini.on { background: var(--line); color: var(--fg); }
 
 /* ---------------------------------------------------------------- buttons */
 
@@ -985,24 +1013,24 @@ td.sts.why { color: var(--bad); }
     gap: 8px;
     flex: 0 0 auto;
 }
-/* The estimate is a plain line inside the bar now, not a boxed note stacked above a button:
- * the box drew a border around the one thing that did not need separating from what it was
- * describing. */
-.actionbar #sizeest {
-    background: none;
-    border: 0;
-    padding: 0;
-    margin: 0;
+/* A FACT IN THE BAR, not a message. It is a plain line beside the button it belongs to —
+ * this used to be `.note` with its box switched back off, which is how a boxed component
+ * ended up drawing a border round the one thing that did not need separating from what it
+ * was describing. Now it has no box to remove. */
+.abfact {
+    min-width: 0;
     color: var(--dim);
+    font-size: var(--fs-small);
+    line-height: 1.45;
 }
-.actionbar #sizeest.warn { color: var(--warn); }
+.abfact[hidden] { display: none; }
+.abfact.warn { color: var(--warn); }
 /* The primary keeps its weight but stops being a full-width slab — it sits at the end of the
  * bar, where the eye lands after reading the number. */
 .actionbar .primary { width: auto; min-width: 132px; margin: 0; }
 .actionbar .mini { margin: 0; }
 .actionbar .bar { margin: 0; }
-.actionbar .tally { margin: 0; }
-.actionbar .repbar { margin: 0; }
+/* The tally and the report bar are no longer IN the bar — see .repsum. */
 
 /* Locked, not hidden. The settings stay readable while a run is going — you cannot change
  * them mid-encode, and that is what dimming says. Pointer events go too, so a click cannot
@@ -1094,13 +1122,23 @@ input.num:disabled { color: var(--off); border-color: #1a1f27; }
 .pill.bad { border-color: var(--bad); color: var(--bad); }
 .pill.warnp { border-color: var(--warn); color: var(--warn); }
 
+/* THE RUN'S RESULT, above the list rather than in the action bar. It was the bar's third
+ * row and made it 210px tall on a docked panel — a report, inside the strip whose job is
+ * the next action, under the list it was describing. */
+.repsum { margin: 0 0 8px; }
+.repsum[hidden] { display: none; }
+.repsum .pathrow { margin-top: 4px; }
+
 .repbar {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    gap: 8px 12px;
+    flex-wrap: wrap;
     margin: 8px 0 6px;
 }
+/* The count takes the slack, so Copy report sits at the right-hand end however long the
+ * count is — `justify-content: space-between` put it in a different place on every run. */
+.repbar .repcount { flex: 1 1 auto; }
 
 .repbar .tick { margin-top: 0; }
 .repcount { color: var(--dim); font-size: var(--fs-small); }
@@ -1168,8 +1206,8 @@ summary {
     outline: none;
 }
 
-/* Inside the report, the merge notes are a fold rather than a section of their own. */
-#mergedet { margin-top: 10px; border-top: 0; padding-top: 0; }
+/* On the rail, so it carries no rule of its own — .msg.det already draws the box. */
+#mergedet { margin: 0; border-top: 0; padding-top: 0; }
 
 code, .log {
     display: block;
@@ -1297,14 +1335,8 @@ code, .log {
 .strip .opts .tick.inert { opacity: .45; }
 .strip .opts .tickwhy { font-style: normal; color: var(--off); }
 
-.strip .stripfoot {
-    margin-top: 11px;
-    font-size: var(--fs-small);
-    color: var(--dim);
-    line-height: 1.6;
-}
-.strip .stripfoot b { color: var(--fg); font-weight: 600; }
-.strip .stripfoot[hidden] { display: none; }
+/* .strip .stripfoot is gone: the render-mode consequences it held are a rail message now,
+ * so the strip ends at its own fields and holds no prose at all. */
 
 /* ==========================================================================
    GROUPED BY OUTCOME — the cut list, chosen 19 Aug.
@@ -1361,7 +1393,6 @@ tbody tr.grouphead.g-dead td { background: #2a1218; }
 .strip .fields { gap: 17px 20px; }
 .strip .field { gap: 4px; }
 .strip .opts { gap: 8px 18px; margin-top: 16px; padding-top: 12px; }
-.strip .stripfoot { margin-top: 13px; }
 
 th.sts, td.sts { width: 76px; }
 @media (min-width: 420px) {

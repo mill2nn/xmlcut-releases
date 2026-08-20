@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ExtensionManifest Version="7.0"
     ExtensionBundleId="com.bom.xmlcutreader"
-    ExtensionBundleVersion="3.53"
+    ExtensionBundleVersion="3.54"
     ExtensionBundleName="Raw-cutter"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 
     <ExtensionList>
-        <Extension Id="com.bom.xmlcutreader.panel" Version="3.53" />
+        <Extension Id="com.bom.xmlcutreader.panel" Version="3.54" />
     </ExtensionList>
 
     <ExecutionEnvironment>
