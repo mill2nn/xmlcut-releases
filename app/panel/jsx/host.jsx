@@ -597,10 +597,17 @@ function askChoice(title, message, aLabel, bLabel) {
         var row = w.add("group");
         row.alignment = "right";
         var a = row.add("button", undefined, String(aLabel));
-        var b = row.add("button", undefined, String(bLabel));
+        /* AN EMPTY bLabel MEANS TWO BUTTONS, not a button with no text on it.
+         * The Replace/Skip/Cancel prompt lost its middle option — Skip could not do what it
+         * said — and a ScriptUI button added with "" is still a real, clickable, nameless
+         * button. So the caller asking for one choice gets one choice plus Cancel. */
+        var b = null;
+        if (String(bLabel) !== "") {
+            b = row.add("button", undefined, String(bLabel));
+            b.onClick = function () { out = "b"; w.close(); };
+        }
         var c = row.add("button", undefined, "Cancel", { name: "cancel" });
         a.onClick = function () { out = "a"; w.close(); };
-        b.onClick = function () { out = "b"; w.close(); };
         c.onClick = function () { out = ""; w.close(); };
         w.show();
         return out;
@@ -619,7 +626,13 @@ function askChoice(title, message, aLabel, bLabel) {
  * Three outcomes, kept apart on purpose. "No project" and "no active sequence" are NOT the
  * same as a different sequence being open, and the panel treats them differently, so `none`
  * is a field rather than something to be pattern-matched out of an error string. */
-function activeSequenceStamp() {
+function activeSequenceStamp(deep) {
+    /* `deep` BUYS THE FINGERPRINT AND NOTHING ELSE BUYS IT. Without it this reads two
+     * properties off the sequence and returns — which is what the focus check and the idle
+     * timer call, several times a minute. The timeline walk below is paid for only by the
+     * two callers that need a content comparison: the read that defines the baseline, and
+     * the export check that is the authoritative one. A test asserts this gate exists,
+     * because putting the walk on the timer is exactly the mistake that was made here. */
     var result = { ok: false, none: false };
     try {
         if (!app || !app.project) {
@@ -639,6 +652,52 @@ function activeSequenceStamp() {
          * mix-up this exists to catch. */
         result.id = String(get(seq, "sequenceID", ""));
         result.name = String(get(seq, "name", ""));
+        /* AND A FINGERPRINT OF THE CONTENT, because the id answers a different question.
+         *
+         * The id catches "you are looking at a different sequence". It cannot catch "you
+         * edited THIS sequence after you pressed Read" — same id, different timeline, and
+         * then the export writes the ranges and names of an edit that no longer exists.
+         * In render mode that is worse in kind: Premiere renders the LIVE timeline while
+         * every name, number and timecode comes from the stale read.
+         *
+         * ⚠️ DELIBERATELY NOT dumpActiveSequence(). That walks every clipitem and resolves
+         * a projectItem per clip, which is why it is too heavy to call on a timer. This
+         * reads two integers per clip and nothing else, so it is cheap enough to run before
+         * every export.
+         *
+         * A rolling hash rather than a count and a duration: swapping two clips leaves both
+         * of those identical and is exactly the edit a guard must catch. Ticks, not seconds,
+         * so it is exact and a re-read of an untouched timeline gives the same number. */
+        if (!deep) { return ser(result); }
+        var h = 0, nclips = 0, vt = get(seq, "videoTracks", null);
+        if (vt) {
+            var nt = Number(get(vt, "numTracks", 0));
+            for (var ti = 0; ti < nt; ti++) {
+                var tr = null;
+                try { tr = vt[ti]; } catch (eT) { tr = null; }
+                if (!tr) continue;
+                var cl = get(tr, "clips", null);
+                if (!cl) continue;
+                var nc = Number(get(cl, "numItems", 0));
+                for (var ci = 0; ci < nc; ci++) {
+                    var it = null;
+                    try { it = cl[ci]; } catch (eI) { it = null; }
+                    if (!it) continue;
+                    nclips++;
+                    var st = get(it, "start", null), en = get(it, "end", null);
+                    var sv = st ? String(get(st, "ticks", "")) : "";
+                    var ev = en ? String(get(en, "ticks", "")) : "";
+                    /* Position matters: ti and ci are folded in, so moving a clip to another
+                     * track changes the hash even if its own range does not. */
+                    var piece = ti + ":" + ci + ":" + sv + ":" + ev + ";";
+                    for (var k = 0; k < piece.length; k++) {
+                        h = ((h << 5) - h + piece.charCodeAt(k)) | 0;
+                    }
+                }
+            }
+        }
+        result.clips = nclips;
+        result.fp = String(h) + "." + String(nclips);
     } catch (e) {
         result.error = String(e) + (e.line ? (" (line " + e.line + ")") : "");
     }

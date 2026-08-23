@@ -42,7 +42,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.56"
+VERSION = "3.57"
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -1387,6 +1387,13 @@ class Timeline:
         self.warnings: list[str] = []
         self.sequence_name = ""
         self.sequence_fps = 25.0
+        # ⚠️ WHAT THE AUDIO A-NUMBERS ACTUALLY MEAN ON THIS PATH, and it
+        # defaults to "unknown" ON PURPOSE. The manifest used to hardcode "premiere",
+        # so the dump path advertised Premiere numbering while having applied none of
+        # it — a field that lies is worse than a field that is absent. Each path
+        # opts in beside the code that does the work, so a new one that forgets says
+        # "unknown" rather than claiming credit.
+        self.audio_numbering = "unknown"
         # The sequence's own frame size, from <media><video><format>. Needed because
         # a RENDER is the sequence, not the source: for a cut with no source file to
         # read, these are the only honest dimensions to price an output from.
@@ -1592,6 +1599,11 @@ class Timeline:
             # video tracks as a side effect. Video numbering is not part of this fix.
             lanes = (self.premiere_track_numbers(section, track_type)
                      if track_type == "audio" else [])
+            if track_type == "audio":
+                # Derived from Premiere's own currentExplodedTrackIndex grouping, and
+                # equal to document order when that attribute is absent — which is
+                # Premiere's numbering for a timeline with no exploded lanes.
+                self.audio_numbering = "premiere"
             for t_idx, track in enumerate(section.findall("track"), start=1):
                 p_track = lanes[t_idx - 1] if t_idx - 1 < len(lanes) else t_idx
                 transitions = self._collect_transitions(track)
@@ -2415,6 +2427,13 @@ class DumpTimeline:
         self.available_sequences: list[dict] = []
         self.sequence_name = ""
         self.sequence_fps = 25.0
+        # ⚠️ WHAT THE AUDIO A-NUMBERS ACTUALLY MEAN ON THIS PATH, and it
+        # defaults to "unknown" ON PURPOSE. The manifest used to hardcode "premiere",
+        # so the dump path advertised Premiere numbering while having applied none of
+        # it — a field that lies is worse than a field that is absent. Each path
+        # opts in beside the code that does the work, so a new one that forgets says
+        # "unknown" rather than claiming credit.
+        self.audio_numbering = "unknown"
         # The sequence's own frame size, from <media><video><format>. Needed because
         # a RENDER is the sequence, not the source: for a cut with no source file to
         # read, these are the only honest dimensions to price an output from.
@@ -2478,6 +2497,16 @@ class DumpTimeline:
                 nests += 1
                 continue
             self.cuts.append(cut)
+
+        # ⚠️ CLAIMED ONLY IF AUDIO WAS ACTUALLY NUMBERED, and that condition is the whole
+        # point of the field. The panel walks sequence.audioTracks and passes t + 1, so a
+        # clip's track_index on this path IS Premiere's A-number — no exploded per-channel
+        # lanes to group, which is why the XML path needs premiere_track_numbers() and this
+        # one does not. But a timeline with no audio has had no numbering applied to it, so
+        # it says "unknown" rather than taking credit; that is what makes the manifest field
+        # a report rather than a constant.
+        if any(c.track_type == "audio" for c in self.cuts):
+            self.audio_numbering = "premiere"
 
         # Order the way the XML path does, so indices and filenames line up between
         # the two inputs for the same timeline.
@@ -2558,6 +2587,17 @@ class DumpTimeline:
             clip_name=name,
             track_type=str(e.get("track_type") or "video"),
             track_index=int(e.get("track_index") or 1),
+            # ⚠️ THE DUMP PATH USED TO LEAVE THIS AT ITS DEFAULT OF 1, and main() reads
+            # ONLY premiere_track for the audio menu and the --audio-tracks filter. So four
+            # real audio tracks were advertised as one, and asking for A2 selected nothing
+            # and mixed silence — while the manifest went on publishing
+            # "audio_track_numbering": "premiere".
+            #
+            # On this path track_index ALREADY IS the Premiere A-number: the panel walks
+            # sequence.audioTracks and passes t + 1 (panel/jsx/host.jsx), so there are no
+            # exploded per-channel lanes to group. That is why the XML path needs
+            # premiere_track_numbers() and this one does not.
+            premiere_track=int(e.get("track_index") or 1),
             timeline_in_frames=t_in,
             timeline_out_frames=t_out,
             timeline_in_tc=frames_to_tc(t_in, self.sequence_fps),
@@ -3828,6 +3868,63 @@ def trim_to_whole_frames(cuts: list[Cut]) -> int:
     return n_touched
 
 
+def build_resume_index(out_dir: Path) -> dict:
+    """What the output folder ALREADY holds, keyed by something that does not renumber.
+
+    ⚠️ WHY THIS EXISTS. `--resume` used to be `out_path.exists()`, and `out_path` carries the
+    index that `assign_output_names` hands out with `enumerate()` — AFTER every filter. So a
+    second run with a different selection renumbers everything, last run's `03_…` is this
+    run's `07_…`, and the check misses. Measured on a real folder: it matched 1 of 8 clips,
+    which made the panel's "skip clips already there" tick a control that quietly did almost
+    nothing.
+
+    Two keys, in order of trust:
+
+    * `cut_id` from the folder's own manifest. Authoritative — it is a content hash of the
+      clip, so it survives renumbering, a re-sort, and the cross-dissolve split.
+    * the filename with its index prefix stripped, for a folder written before cut_id
+      existed. `(src_in-src_out)_stem.ext` is stable across renumbering, but it is NOT
+      unique: one source range of one file used at two timeline positions produces the same
+      suffix twice. So a suffix seen more than once is recorded as ambiguous and skips
+      NOTHING — re-encoding a clip costs seconds, skipping the wrong one is silent bad data.
+    """
+    ids: set[str] = set()
+    suffix_count: dict[str, int] = {}
+    how = "nothing"
+    try:
+        names = [p for p in out_dir.iterdir() if p.is_file()]
+    except OSError:
+        return {"ids": ids, "suffix": {}, "how": "unreadable", "files": 0}
+
+    mf = out_dir / "manifest.json"
+    if mf.exists():
+        try:
+            data = json.loads(mf.read_text(encoding="utf-8"))
+            for c in (data.get("clips") or []):
+                cid, out = str(c.get("cut_id") or ""), str(c.get("output_file") or "")
+                if not cid or not out:
+                    continue
+                f = out_dir / out
+                if f.exists() and f.stat().st_size > 0:
+                    ids.add(cid)
+            if ids:
+                how = "manifest"
+        except (OSError, ValueError):
+            pass
+
+    for f in names:
+        if f.name.startswith(".") or f.suffix.lower() in (".csv", ".json", ".mp3"):
+            continue
+        if f.stat().st_size <= 0:
+            continue
+        m = re.match(r"^\d+_(.*)$", f.name)
+        key = m.group(1) if m else f.name
+        suffix_count[key] = suffix_count.get(key, 0) + 1
+    if how == "nothing" and suffix_count:
+        how = "filename"
+    return {"ids": ids, "suffix": suffix_count, "how": how, "files": len(suffix_count)}
+
+
 def assign_output_names(cuts: list[Cut], container: str, seq_fps: float) -> None:
     """Name every clip before anything is cut.
 
@@ -3949,10 +4046,26 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
         f"/{cut.timeline_out_frames} {cut.output_file}")
 
     # --resume: a long run that died halfway shouldn't re-encode what it already wrote.
-    # Only a non-empty file counts; a truncated 0-byte leftover gets redone.
-    if getattr(args, "resume", False) and out_path.exists() and out_path.stat().st_size > 0:
-        cut.status = "skipped_existing"
-        return cut
+    #
+    # ⚠️ NOT `out_path.exists()`. See build_resume_index(): the numbered filename changes with
+    # the selection, so the plain existence check matched 1 of 8 on a real folder. The index
+    # is keyed by cut_id, with the index-free filename as a fallback for older folders — and
+    # an ambiguous fallback key deliberately skips nothing.
+    if getattr(args, "resume", False):
+        idx = getattr(args, "resume_index", None) or {}
+        done = False
+        if cut.cut_id and cut.cut_id in (idx.get("ids") or set()):
+            done = True
+        elif out_path.exists() and out_path.stat().st_size > 0:
+            done = True
+        else:
+            m = re.match(r"^\d+_(.*)$", out_path.name)
+            key = m.group(1) if m else out_path.name
+            if (idx.get("suffix") or {}).get(key) == 1:
+                done = True
+        if done:
+            cut.status = "skipped_existing"
+            return cut
 
     cmd = build_command(cut, out_path, args, seq_fps)
     try:
@@ -4226,6 +4339,10 @@ SHEET_COLUMNS = [
     ("cut length s", "source_duration_seconds"),
     ("frames", "source_consumed_frames"),
     ("timeline length s", "duration_seconds"),
+    # Whether the editor had this clip switched ON. A dataset of finished edits should
+    # hold nothing that says FALSE here; with --disabled keep it can, and then this is the
+    # only column that says which rows those are.
+    ("enabled", "enabled"),
     ("original name", None),          # basename of source_path
     ("original path", "source_path"),
 ]
@@ -4296,9 +4413,14 @@ def export_summary(tl: Timeline, args) -> dict:
             # number frozen at whatever the scan was run with.
             "sequence_width": int(getattr(tl, "sequence_width", 0) or 0),
             "sequence_height": int(getattr(tl, "sequence_height", 0) or 0),
-            "audio_track_numbering": "premiere",
+            # NOT hardcoded: whichever path parsed this timeline says whether it really
+            # applied Premiere's audio track numbering. See Timeline.audio_numbering.
+            "audio_track_numbering": str(getattr(tl, "audio_numbering", "unknown")),
             "nest": str(getattr(args, "nest_effective", "resolve")),
             "nest_applied": str(getattr(args, "nest_applied", "all")),
+            "disabled": str(getattr(args, "disabled", "drop")),
+            "disabled_found": int(getattr(args, "disabled_found", 0) or 0),
+            "disabled_dropped": int(getattr(args, "disabled_dropped", 0) or 0),
             "transitions": str(getattr(args, "transitions", "ignore")),
             "transitions_split": int(getattr(args, "transitions_split", 0) or 0),
             # How much of this folder is duplicated between neighbouring clips. Zero under
@@ -4754,6 +4876,20 @@ def main():
     # `split` keeps the old behaviour reachable, in the same hidden-not-deleted shape as
     # --vcodec libx265: the function and all of its tests stay, one argument away. He has
     # reversed this decision once already today, in both directions.
+    # ⚠️ DEFAULT IS `drop`, AND IT CHANGES WHAT A RUN PRODUCES. A clipitem with
+    # <enabled>FALSE</enabled> is a clip the editor switched OFF on the timeline — material
+    # deliberately removed from the edit. This tool's whole premise is a dataset of
+    # FINISHED edits, so shipping that material alongside what was kept, with the same
+    # status and no way to tell them apart, corrupts the dataset silently. Measured before
+    # this existed: a disabled clip exported as a ~1 MB file with status "ok".
+    #
+    # `keep` restores the old behaviour for anyone who wants the takes that were cut, and
+    # says so in the warnings rather than leaving it to be discovered.
+    ap.add_argument("--disabled", choices=["drop", "keep"], default="drop",
+                    help="what to do with clips the editor DISABLED on the timeline "
+                         "(<enabled>FALSE</enabled>): 'drop' (default) leaves them out, "
+                         "because they are not part of the finished edit; 'keep' cuts them "
+                         "like any other clip")
     ap.add_argument("--transitions", choices=["split", "ignore"], default="ignore",
                     help="what to do where a cross-dissolve makes two clips overlap: "
                          "'ignore' (default) cuts each clip at its own in/out exactly as "
@@ -4963,6 +5099,34 @@ def main():
             merge_notes = ["--tracks audio: the panel overlay adds nothing to audio "
                            "cuts, so it was skipped"]
 
+    # ⚠️ CLIPS THE EDITOR TURNED OFF, REMOVED BEFORE ANYTHING ELSE LOOKS AT THE LIST.
+    #
+    # Cut.enabled has been parsed from <enabled> since the beginning and had ZERO readers:
+    # no filter, no status, no note, no column. So a clip switched off on the timeline came
+    # out as a finished file with status "ok", indistinguishable from the take that
+    # replaced it.
+    #
+    # Done here, ahead of the audio_items capture, so a disabled audio clipitem cannot feed
+    # the voice-over mix either — a muted music bed reaching the mix is the same defect
+    # wearing different clothes.
+    _off = [c for c in tl.cuts if not c.enabled]
+    args.disabled_found = len(_off)
+    args.disabled_dropped = 0
+    if _off and getattr(args, "disabled", "drop") == "drop":
+        tl.cuts = [c for c in tl.cuts if c.enabled]
+        args.disabled_dropped = len(_off)
+    elif _off:
+        # ⚠️ KEPT ON PURPOSE, SO IT IS ON THE RECORD. This is the one direction that puts
+        # material the editor removed INTO a dataset of finished edits, so it goes in the
+        # warnings, which reach the manifest and the top of clips.csv, not just stdout.
+        _names = sorted({c.clip_name or "(unnamed)" for c in _off})
+        tl.warnings.append(
+            f"--disabled keep: {len(_off)} clip(s) that are switched OFF on the timeline "
+            f"were cut anyway: " + ", ".join(_names[:4])
+            + (", …" if len(_names) > 4 else "")
+            + ". They are not part of the finished edit; the `enabled` column in "
+              "clips.csv marks them")
+
     # ⚠️ THE AUDIO ITEMS ARE KEPT even when --tracks drops them as outputs. They are the SOURCE
     # of the voice-over mix, and "should audio clipitems become files of their own" is a different
     # question from "what was playing over this shot". Taken before the filter, because after it
@@ -5067,23 +5231,49 @@ def main():
         for c in tl.cuts:
             if c.track_type == "video":
                 c.render_planned = True
+        # ⚠️ ORDERING CONTRACT WITH THE --ext FILTER BELOW, WHICH READS render_planned.
+        # This marking must stay ABOVE it. It did not for at least three releases, and the
+        # filter then deleted every render-mode row whose source extension was not ticked —
+        # measured at 49 rows on one real timeline, all of them reported cuttable. The
+        # filter re-checks the RESULT of this loop and refuses to run without it.
 
     if args.ext:
+        # ⚠️ THE GUARD, AND IT CHECKS THE FACT RATHER THAN A FLAG. An earlier version of
+        # this stamped a boolean in the marking loop and tested that; moving the loop below
+        # the filter while leaving the stamp behind satisfied it, which is precisely the
+        # class of thing a guard exists to catch. So it asks the cuts themselves: in render
+        # mode, a video cut list with nothing marked means the marking has not run yet, and
+        # continuing would delete every row whose source extension is not ticked.
+        _rmode = bool(getattr(args, "render_planned", False)
+                      or getattr(args, "render_dir", None))
+        _vids = [c for c in tl.cuts if c.track_type == "video"]
+        if _rmode and _vids and not any(c.render_planned for c in _vids):
+            sys.exit("internal error: the --ext filter ran before render_planned was "
+                     "marked, so it would delete render-mode cuts whose source extension "
+                     "is not in --ext. Move the marking loop back above the filter.")
         # Filtered BEFORE the indices are assigned, so a run limited to one type gets a
         # clean 01..N rather than gaps where the other types used to be.
         want = {e.strip().lower().lstrip(".") for e in args.ext.split(",") if e.strip()}
         args.types_kept = sorted(want)
         before = len(tl.cuts)
-        # ⚠️ A CUT WITH NO SOURCE PATH IS NOT A CUT OF THE WRONG TYPE. An adjustment
-        # layer, an Essential Graphics title and a synthetic (Black Video, a colour matte)
-        # have no path at all, so Path("").suffix is "" and "" is in no --ext set — they
-        # were DELETED. Measured: --ext mp4 kept 12 of 17 cuts and the 5 it dropped were
-        # exactly the pathless ones, which is to say the very rows --render-planned had
-        # just declared cuttable. In timeline-render mode the pixels come from Premiere,
-        # so filtering those by a SOURCE extension they do not have answers nothing.
-        # A cut that DOES have a path is filtered exactly as before.
+        # TWO exemptions, and both of them fire. There were three; the third was
+        # `c.render_path`, which attach_renders sets — and attach_renders runs BELOW this
+        # filter, so it was empty here on every run that has ever executed. It is gone.
+        #
+        # ⚠️ THE PATTERN WORTH REMEMBERING: a defensive clause that cannot fire is
+        # indistinguishable from a working one, so it protects nothing AND it makes the
+        # comment above it false. This filter went on deleting cuts for three releases with
+        # a comment explaining why it did not.
+        #
+        #   render_planned  — a render-mode row. The pixels come from Premiere, so a SOURCE
+        #                     extension names a file that is not being read. Live only
+        #                     because the marking loop above runs first; see the guard.
+        #   not source_path — an adjustment layer, an EG title, a synthetic (Black Video, a
+        #                     colour matte). Path("").suffix is "", which is in no --ext
+        #                     set, so these were deleted by an extension test they could
+        #                     never satisfy.
         tl.cuts = [c for c in tl.cuts
-                   if getattr(c, "render_planned", False) or getattr(c, "render_path", "")
+                   if getattr(c, "render_planned", False)
                    or not c.source_path
                    or Path(c.source_path).suffix.lower().lstrip(".") in want]
         print(f"  --ext {','.join(sorted(want))}: kept {len(tl.cuts)} of {before} cuts")
@@ -5195,6 +5385,12 @@ def main():
     print(f"  sequence : {tl.sequence_name}  @ {tl.sequence_fps:g} fps")
     print(f"  duration : {frames_to_tc(tl.sequence_duration_frames, tl.sequence_fps)}")
     print(f"  cuts     : {len(tl.cuts)}  across {len({c.source_path for c in tl.cuts})} source files")
+    if getattr(args, "disabled_found", 0):
+        _n = args.disabled_found
+        print(f"  disabled : {_n} clip(s) switched off on the timeline "
+              + (f"were NOT cut (they are not part of the finished edit — "
+                 f"--disabled keep to include them)" if args.disabled_dropped
+                 else f"were CUT ANYWAY, because --disabled keep was given"))
     nested = sum(1 for c in tl.cuts if c.nested_from)
     if nested:
         names = sorted({c.nested_from for c in tl.cuts if c.nested_from})
@@ -5292,6 +5488,14 @@ def main():
         print()
 
     args.out.mkdir(parents=True, exist_ok=True)
+    if getattr(args, "resume", False):
+        args.resume_index = build_resume_index(args.out)
+        _ri = args.resume_index
+        _amb = sum(1 for v in (_ri.get("suffix") or {}).values() if v > 1)
+        say(f"  --resume: {len(_ri.get('ids') or set())} clip(s) matched by id, "
+            f"{_ri.get('files', 0)} file(s) already in the folder"
+            + (f", {_amb} filename(s) ambiguous and will be re-cut" if _amb else "")
+            + f" (matched by {_ri.get('how')})")
 
     if args.manifest_only:
         csv_p, json_p, sheet_p = write_manifest(tl, args.out, args)

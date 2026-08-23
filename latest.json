@@ -1,6 +1,6 @@
 {
-  "version": "3.56",
-  "notes": "x",
+  "version": "3.57",
+  "notes": "SUA LOI bam Export khong chay gi (kiem tra sequence khong tra loi thi treo im lang; gio cho 4s roi chay tiep va ghi log); Export tu ghi de file trung ten, khong hoi lai; tick skip clips already there gio that su hoat dong (khop 14/19 thay vi 4/19); canh bao khi timeline bi sua sau khi Read; clip da disable khong con bi cat; canh bao !! luc Read gio hien len panel; track audio tren duong dump khong con gop het ve A1.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

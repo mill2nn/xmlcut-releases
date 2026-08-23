@@ -154,16 +154,22 @@
          * never held here — it is read fresh every time, because a remembered ID is exactly
          * the stale fact this whole guard exists to prevent. See checkSequence(). */
         seqOpenName: "",
+        /* The content fingerprint of the timeline AS IT WAS READ. The sequence id answers
+         * "is this the same sequence"; this answers "is it still the same edit". */
+        readFp: "",
+        seqDrift: false,
         /* CANCEL WAS PRESSED for the run that is going. Read by the render phase to decide
          * whether to hand over to the encode phase at all, and by the close handler so a
          * stopped run is reported as stopped rather than as finished. Cleared when a run
          * STARTS, never when one ends — a flag cleared on the way out can be cleared by the
          * very handler that was supposed to read it. */
         cancelled: false,
-        /* --resume for THIS RUN ONLY, because he answered "Skip" to the Replace question.
-         * Kept apart from state.resume, which is his standing choice on the tick: answering
-         * one question must not silently rewrite a setting. Consumed where it is used. */
-        resumeOnce: false,
+        /* resumeOnce is GONE, not merely unset. It existed to carry the Replace prompt's
+         * "Skip" answer into one run, and Skip was removed because --resume matched 1 of
+         * the 8 files it claimed to skip. A field left behind at `false` reads as a feature
+         * that is switched off rather than one that did not work, and is exactly how a
+         * removed option gets wired back in. state.resume — the standing tick — is the only
+         * route to --resume now, and it is deliberately still there. */
         updateInfo: null
     };
 
@@ -581,10 +587,7 @@
      * rows offered, 19 delivered on one real timeline — because the flag that marks a row as
      * render-backed was set AFTER the file-type filter that reads it. Anyone who exported in
      * Timeline render mode on 3.53-3.55 got fewer clips than the panel promised. */
-    var CHANGELOG = {
-        "3.54": CL_354,
-        "3.55": CL_355,
-        "3.56": [
+    var CL_356 = [
             "⚠️ SỬA LỖI MẤT CLIP — quan trọng nhất bản này. Ở Timeline render, panel hiện "
             + "22 clip nhưng export ra ít hơn (có lần chỉ 6). Nguyên nhân: bộ lọc loại file "
             + "chạy TRƯỚC khi đánh dấu clip sẽ được render, nên .mov / .png / graphic bị xoá "
@@ -599,7 +602,32 @@
             + "tick một cái không còn làm mất cả hai.",
             "Bấm Cancel là dừng thật; nếu export lại mà trùng tên file thì panel hỏi Replace.",
             "Clip không có source (nest, title, graphic) giờ cũng có số dung lượng ước lượng."
-        ].concat(CL_355)
+        ].concat(CL_355);
+    /* 3.57 leads with the export that did nothing, because that is what he reported and it
+     * is the one that stops work dead. */
+    var CHANGELOG = {
+        "3.54": CL_354,
+        "3.55": CL_355,
+        "3.56": CL_356,
+        "3.57": [
+            "⚠️ SỬA LỖI BẤM EXPORT KHÔNG CHẠY GÌ. Phần kiểm tra sequence gọi vào Premiere; "
+            + "nếu Premiere không trả lời thì cả export đứng im, không báo gì. Giờ chờ 4 giây "
+            + "là chạy tiếp và ghi rõ lý do. Mỗi lần bấm Export đều được ghi vào Log, nên "
+            + "\"bấm mà không thấy gì\" giờ tra được trong Advanced → Log.",
+            "Export giờ TỰ GHI ĐÈ file trùng tên, không hỏi lại nữa. Log ghi lại đã ghi đè "
+            + "bao nhiêu file — lưu ý file nào export này không tạo ra thì vẫn nằm đó, nên "
+            + "một folder có thể lẫn 2 phiên bản của cùng timeline.",
+            "Tick \"skip clips already there\" giờ mới thật sự hoạt động. Trước đây nó so "
+            + "theo tên file có số thứ tự ở đầu, mà số đó đổi mỗi lần chọn khác — đo được: "
+            + "khớp 4/19, giờ khớp 14/19.",
+            "Nếu sửa timeline sau khi đã bấm Read thì panel báo đỏ và hỏi lại trước khi "
+            + "export — vì tên, số và timecode sẽ là của bản edit cũ.",
+            "Clip đã TẮT (disable) trên timeline không còn bị cắt ra nữa.",
+            "Cảnh báo của engine lúc Read giờ hiện lên panel (media offline, footage bị "
+            + "reinterpret, clip Dynamic Link) — trước đây bị bỏ hết.",
+            "Chọn track audio trên timeline không xuất được XML giờ đúng track, trước đây "
+            + "gộp hết về A1 nên chọn A2 ra file im lặng."
+        ].concat(CL_356)
     };
 
     /* Shown when the running version differs from the one last seen here.
@@ -1057,6 +1085,21 @@
             }
             state.info = r;
             state.dump = r.path;
+            /* ONE EXTRA CHEAP CALL, right after the read that defines the baseline. It reads
+             * two integers per clip and nothing else — a fraction of the dump that just ran —
+             * so the comparison at export time has something to compare against. */
+            state.readFp = "";
+            state.seqDrift = false;
+            cs.evalScript("activeSequenceStamp(true)", function (sraw) {
+                var sr = null;
+                try { sr = JSON.parse(sraw); } catch (eS) {}
+                if (sr && sr.ok && sr.fp) {
+                    state.readFp = String(sr.fp);
+                    log("read fingerprint: " + state.readFp + " (" + sr.clips + " clips)");
+                } else {
+                    log("read fingerprint unavailable — the edited-after-read check is off");
+                }
+            });
             state.folder = r.folder || path.dirname(r.path);
             log("read " + r.sequence + " -> " + r.path);
             setPathLabel(el.savedpath, state.folder, 40);
@@ -1943,6 +1986,11 @@
      * @param cb    called with true when it is safe to carry on, false on a mismatch. Only
      *              the export path passes one.
      */
+    /* How long Premiere gets to answer the cheap stamp question before the export gives up
+     * waiting on it. Generous — an evalScript can queue behind a long ExtendScript call — but
+     * finite, because the alternative is a click that does nothing at all. */
+    var SEQ_ANSWER_MS = 4000;
+
     function checkSequence(when, cb) {
         // Nothing has been read, so there is no identity to compare against and no row.
         if (!state.info) { if (cb) cb(true); return; }
@@ -1951,7 +1999,31 @@
          * that has passed. The export check is exempt because it runs BEFORE anything starts
          * — that is the whole point of it. */
         if (when !== "export" && (state.busy || state.running)) return;
-        cs.evalScript("activeSequenceStamp()", function (raw) {
+        /* Only the export check pays for the timeline walk. The focus check and the timer
+         * ask the cheap question — "is this the same sequence" — several times a minute. */
+        /* ⚠️ AND IT CANNOT HANG FOREVER. evalScript queues behind whatever ExtendScript is
+         * doing, and if Premiere never answers, the callback below never runs — so the export
+         * neither starts nor reports, which is exactly "I pressed export and nothing
+         * happened". A guard that can swallow the work it guards is worse than no guard, so
+         * an unanswered check proceeds and says so, the same choice already made for a reply
+         * that cannot be parsed. */
+        var answered = false;
+        var bail = setTimeout(function () {
+            if (answered) return;
+            answered = true;
+            log("sequence check (" + when + "): NO REPLY in " + SEQ_ANSWER_MS
+                + "ms — proceeding without it");
+            if (when === "export") {
+                say("seq", "warn", "Could not check which sequence is open — Premiere did not "
+                    + "answer. Exporting anyway; make sure the right timeline is in front.");
+            }
+            if (cb) cb(true);
+        }, SEQ_ANSWER_MS);
+        cs.evalScript("activeSequenceStamp(" + (when === "export" ? "true" : "false")
+                      + ")", function (raw) {
+            if (answered) return;
+            answered = true;
+            clearTimeout(bail);
             var r = null;
             try { r = JSON.parse(raw); } catch (e) {}
             if (!r || typeof r !== "object") {
@@ -2003,9 +2075,26 @@
                     + "two sequences of the same name apart");
             }
             if (same) {
-                // RESOLVED: he switched back, or this is simply the ordinary case. A stale
-                // error row is worse than none — it teaches him to ignore the rail.
+                /* SAME SEQUENCE — now ask the second question, which the id cannot answer:
+                 * is it still the same EDIT? Same id, different timeline, and the export
+                 * writes the ranges and names of an edit that no longer exists. In render
+                 * mode Premiere renders the live timeline while every name, number and
+                 * timecode comes from the stale read.
+                 *
+                 * Only when both fingerprints exist. An older host.jsx returns no `fp`, and
+                 * a check that cannot be made must not invent a verdict. */
+                var openFp = String(r.fp || "");
+                state.seqDrift = !!(state.readFp && openFp && openFp !== state.readFp);
                 say("seq", "error", "");
+                if (state.seqDrift) {
+                    say("seq", "error", readSeqName() + " has been edited since you pressed "
+                        + "Read. The clip list, the ranges and the names are the old edit's. "
+                        + "Press Read again.");
+                    log("sequence check (" + when + "): DRIFT — read fp " + state.readFp
+                        + ", open fp " + openFp);
+                    if (cb) cb(false);
+                    return;
+                }
                 if (cb) cb(true);
                 return;
             }
@@ -2030,28 +2119,45 @@
     function confirmMismatch(proceed) {
         var read = readSeqName(), open = state.seqOpenName || "?";
         var msg;
+        if (state.seqDrift) {
+            /* A DIFFERENT PROBLEM FROM A DIFFERENT SEQUENCE, and it needs its own words:
+             * the right sequence is open, it has simply moved on. Naming it "wrong sequence"
+             * would send him looking at the tab bar, where everything is correct. */
+            msg = "Timeline edited since Read.\n\n" + read + "\n\n"
+                + (state.cutFrom === "render"
+                    ? "Premiere renders the timeline as it is NOW, under the old names and timecodes."
+                    : "The list, the ranges and the names are the old edit's.")
+                + "\n\nExport anyway?";
+            log("export held: " + read + " edited since read — asking");
+            cs.evalScript("askConfirm(" + jsStr(msg) + ")", function (raw) {
+                var yes = String(raw === null || raw === undefined ? "" : raw).trim() === "yes";
+                log("timeline drift: " + (yes ? "exported anyway" : "export cancelled"));
+                if (yes) proceed();
+            });
+            return;
+        }
         if (state.cutFrom === "render") {
             /* STRONGER IN RENDER MODE, because the consequence is different in kind rather
              * than in degree: the files themselves would be wrong, not just the list. */
-            msg = "STOP — this is not the sequence you read.\n\n"
-                + "You read:   " + read + "\n"
-                + "Open now:   " + open + "\n\n"
-                + "Timeline render renders WHATEVER SEQUENCE IS OPEN. Premiere will render "
-                + open + ", and every clip will be written under " + read + "'s name, number "
-                + "and timecode. The pictures inside them will be " + open + "'s, and nothing "
-                + "in the files or in the report will say so.\n\n"
-                + "Switch back to " + read + " in Premiere, or press Read on " + open + ".\n\n"
+            /* SHORT ON PURPOSE. The first version explained the whole mechanism in four
+             * sentences and he asked for it "shorter, more to the point" — a modal is read
+             * in about two seconds, and a wall of text is skimmed and dismissed, which is
+             * the opposite of what a guard is for. What survives: the two names, the one
+             * consequence, the question. */
+            msg = "Wrong sequence.\n\n"
+                + "Read:  " + read + "\n"
+                + "Open:  " + open + "\n\n"
+                + "Timeline render uses the OPEN one. You would get " + open
+                + "'s pictures under " + read + "'s names.\n\n"
                 + "Export anyway?";
         } else {
-            msg = "This is not the sequence you read.\n\n"
-                + "You read:   " + read + "\n"
-                + "Open now:   " + open + "\n\n"
-                + "The cut list, the frame ranges and the file names are all " + read
-                + "'s. The clips are cut from " + read + "'s own media, so nothing from "
-                + open + " will be inside them — but this export will not match the "
-                + "timeline you are looking at.\n\n"
-                + "Switch back to " + read + " in Premiere, or press Read on " + open + ".\n\n"
-                + "Export " + read + " anyway?";
+            /* Milder, and shorter still: in source mode the clips come from the read
+             * sequence's own media, so the pictures are right and only the list is stale. */
+            msg = "Wrong sequence.\n\n"
+                + "Read:  " + read + "\n"
+                + "Open:  " + open + "\n\n"
+                + "This exports " + read + ", not what you are looking at.\n\n"
+                + "Export anyway?";
         }
         log("export held: read \"" + read + "\" but \"" + open + "\" is open — asking");
         cs.evalScript("askConfirm(" + jsStr(msg) + ")", function (raw) {
@@ -2070,12 +2176,28 @@
      * all that changes is which file ffmpeg opens.
      */
     function doExport() {
+        /* ⚠️ THE CLICK IS LOGGED BEFORE ANYTHING ELSE HAPPENS. His report was "i press export
+         * and nothing happened", and the log could not tell a click that never registered from
+         * a host call that never answered — because the ordinary success path says nothing.
+         * Every export now leaves a first line, so silence above this line and silence below
+         * it mean different things. */
+        log("export requested: " + state.cutFrom + " mode, " + pickedClips().length
+            + " clip(s) picked");
         /* THE AUTHORITATIVE CHECK, and the reason the rail row is not enough on its own: the
          * row can be up to SEQ_CHECK_MS old and he may never have looked at it. This one runs
          * at the moment the export is asked for, and nothing starts until it has answered. */
         checkSequence("export", function (safe) {
-            if (safe) return startExport();
-            confirmMismatch(startExport);
+            /* ⚠️ WRAPPED. A throw in here used to vanish: this runs inside an evalScript
+             * callback, so nothing above it catches, the button stays enabled and the panel
+             * looks like it ignored the click. Now it says so. */
+            try {
+                if (safe) { log("sequence check passed — starting"); startExport(); return; }
+                confirmMismatch(startExport);
+            } catch (e) {
+                log("export failed to start: " + e);
+                say("export", "error", "The export could not start: " + e
+                    + " — the log has the detail.");
+            }
         });
     }
 
@@ -2202,27 +2324,37 @@
     }
 
     function startExport() {
-        /* THE REPLACE QUESTION. Asked only when the destination already holds something this
-         * run could overwrite — a re-export, or the partial set a cancelled run left behind,
-         * which is exactly the case he asked about.
+        /* NO REPLACE QUESTION. He asked for it gone: "make it auto overwrite all exissting
+         * file". A re-export now overwrites the names it reproduces and starts immediately.
          *
-         * HOW IT COMPOSES with what is already here, because there are now three ways to
-         * answer the same question and they must not contradict each other:
+         * WHAT STILL HOLDS, so the three answers to this question do not contradict:
          *
-         *   the `skip clips already there` tick IS the standing answer. Ticked, he has
-         *   already said "skip", so asking again would be asking a question he has answered
-         *   — no prompt, and --resume goes on the command line as it always did.
+         *   the `skip clips already there` tick is still the standing answer and still wins.
+         *   Ticked, he has said "skip", so --resume goes on the command line and nothing is
+         *   overwritten — and --resume now matches by cut_id, so it actually skips.
          *
-         *   a RETRY is a deliberate request to rewrite the clips that failed. Replacing is
-         *   the entire point of it, so it is never asked either.
+         *   a RETRY is a deliberate request to rewrite the clips that failed, so it always
+         *   overwrote and still does.
          *
-         *   otherwise: Replace overwrites (no --resume, which is today's behaviour), Skip
-         *   passes --resume for this one run without touching his tick, and Cancel — the
-         *   default, and what a dismissed dialog gives — writes nothing.
-         */
+         *   otherwise: overwrite, no prompt.
+         *
+         * ⚠️ THE COUNT IS STILL TAKEN AND STILL SAID, just not asked about. Removing the
+         * question is not a reason to stop recording what it was protecting: a re-export
+         * overwrites the names it reproduces and LEAVES THE REST, so a folder from a
+         * different version of this timeline ends up holding a mix of both — and after this
+         * change nothing stops that happening silently. The log line is what makes it
+         * traceable afterwards. */
         var already = (!state.resume && !state.retryKeys.length) ? clashCount() : 0;
-        if (!already) return beginExport();
-        askReplace(already, beginExport);
+        if (already) {
+            log("overwriting: " + already + " existing clip(s) in " + outDir()
+                + " will be replaced where the names match; anything else is left in place");
+            say("clash", "warn", already + " clip(s) already in that folder are being "
+                + "overwritten. Files this export does not reproduce are left as they are, so "
+                + "the folder can end up holding two versions of this timeline.");
+        } else {
+            say("clash", "warn", "");
+        }
+        beginExport();
     }
 
     /* HOW MANY CLIPS ARE ALREADY IN THE DESTINATION.
@@ -2250,33 +2382,6 @@
         return n;
     }
 
-    function askReplace(already, proceed) {
-        var dest = outDir();
-        var msg = seqFolder() + "/" + outKind() + "/ already holds " + already
-            + " file(s).\n\n" + dest + "\n\n"
-            + "Replace — overwrite the names this export reproduces.\n"
-            + "Skip — keep what is there and write only what is missing.\n"
-            + "Cancel — write nothing.";
-        log("clash: " + already + " file(s) already in " + dest + " — asking");
-        cs.evalScript("askChoice(" + jsStr("Files are already there") + ", " + jsStr(msg)
-            + ", " + jsStr("Replace") + ", " + jsStr("Skip") + ")", function (raw) {
-            var a = String(raw === null || raw === undefined ? "" : raw).trim();
-            if (a === "a") {
-                log("clash: replacing");
-                proceed();
-                return;
-            }
-            if (a === "b") {
-                log("clash: skipping what is already there");
-                state.resumeOnce = true;
-                proceed();
-                return;
-            }
-            /* ⚠️ THE DEFAULT BRANCH, and it is the one that writes nothing. Cancel, Escape,
-             * the close box, a ScriptUI that threw and an unreadable reply all land here. */
-            log("clash: export cancelled");
-        });
-    }
 
     function beginExport() {
         state.cancelled = false;
@@ -2378,9 +2483,17 @@
                     setRunning(false);
                     setBusy(false);
                     cancelLabel();
+                    /* ⚠️ THIS USED TO SAY "choose Skip to carry on from here", and it was
+                     * wrong twice over even before Skip was removed. Skip answered the
+                     * OUTPUT-folder clash, and nothing was cut, so there was no clash to
+                     * answer. And nothing reuses a finished render on a fresh export:
+                     * renderSpec() returns every picked clip and the host has no
+                     * existence check, so Premiere renders the lot again. Only Retry
+                     * re-uses _renders/, and a stop before the encode leaves no report to
+                     * retry from. Say what the state is; promise nothing. */
                     say("renders", "warn", "Stopped after " + r.written + " of "
-                        + spec.length + " clip(s). Nothing was cut. The finished renders are "
-                        + "kept — export again and choose Skip to carry on from here.");
+                        + spec.length + " clip(s). Nothing was cut. The finished ranges are "
+                        + "still in _renders/, but exporting again renders from the start.");
                     log("render: STOPPED at range " + (r.stopped_at === undefined
                         ? "?" : r.stopped_at) + " — the encode was not started");
                     return;
@@ -2443,10 +2556,9 @@
             // for renders it never made.
             if (state.vtrackWant) args.push("--video-track", String(state.vtrackWant));
         }
-        /* His standing choice on the tick, OR the one-run answer to the Replace question.
-         * resumeOnce is consumed here so answering "Skip" once cannot narrow the next run. */
-        if (state.resume || state.resumeOnce) args.push("--resume");
-        state.resumeOnce = false;
+        /* His standing choice on the tick, and now the ONLY route to --resume: the Replace
+         * prompt's one-run "Skip" answer is gone with the option itself. */
+        if (state.resume) args.push("--resume");
         // Only when something is actually unticked; otherwise the flag is noise.
         var retry = state.retryKeys.slice();
         state.retryKeys = [];          // consumed here, so it cannot narrow the next run
@@ -2579,8 +2691,10 @@
              * names the way forward, because the folder now holds an incomplete set and the
              * next export has to be told what to do about it. */
             if (state.cancelled) {
+                // Skip is gone, so this no longer names it. Exporting again offers Replace,
+                // which rewrites the names it reproduces — including the ones already there.
                 say("renders", "warn", "Stopped. The clips already written are in the folder; "
-                    + "export again and choose Skip to finish the rest.");
+                    + "exporting again rewrites them along with the rest.");
                 log("run stopped by Cancel (exit " + code + ")");
             }
             cancelLabel();
@@ -2676,6 +2790,15 @@
         }
         var errbuf = "";
         var stail = "";
+        /* ⚠️ THIS READ'S NOTES, NOT THIS READ'S PLUS EVERY EARLIER ONE'S.
+         *
+         * scanClips() runs again on a Re-measure and on several settings changes — six
+         * callers — and nothing between them emptied state.merge, so the same '++' lines
+         * were appended once per re-read and the rail grew "12 merge notes" out of four
+         * distinct facts. The teardown at the top of a fresh read clears it; a rescan is
+         * not a fresh read. runEngineExport() already clears it for the same reason and
+         * says so; this is the read-side half that was missing. */
+        state.merge = [];
         proc.stdout.on("data", function (c) {
             stail += String(c);
             var parts = stail.split("\n");
@@ -2684,7 +2807,28 @@
                 var ln = parts[i].replace(/\r$/, "");
                 if (ln) log(ln);
                 var mm = ln.match(/^\s*\+\+\s*(.+)$/);
-                if (mm) state.merge.push(mm[1]);
+                if (mm) {
+                    state.merge.push(mm[1]);
+                    continue;
+                }
+                /* ⚠️ '!!' IS THE ENGINE'S OWN WARNING, AND THE READ THREW EVERY ONE AWAY.
+                 *
+                 * Only the export path matched this. But the engine prints all of them
+                 * BEFORE it honours --manifest-only, so a read emits the full set and the
+                 * panel logged them and dropped them: offline media, footage Premiere has
+                 * reinterpreted, a nest with no usable timeline position, Dynamic Link
+                 * comps. Those are precisely the rows someone then asks about — they are
+                 * why a cut is not what it looks like — and they were reachable only by
+                 * opening the Advanced log.
+                 *
+                 * The manifest's own top-level `warnings` array is ALSO unread here, and
+                 * deliberately left so: it holds a strict subset (the per-clip ones), so
+                 * reading both would print the same warning twice. stdout is the superset.
+                 *
+                 * "⚠ " is the rail's warn marker, matching the export path exactly, so a
+                 * warning reads the same whichever phase produced it. */
+                var mw = ln.match(/^\s*!!\s*(.+)$/);
+                if (mw) state.merge.push("⚠ " + mw[1]);
             }
         });
         proc.stderr.on("data", function (c) { errbuf += String(c); });
