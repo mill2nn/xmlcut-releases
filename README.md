@@ -1,7 +1,59 @@
 # Raw-cutter
 
-Every cut of an Adobe Premiere Pro timeline, as its own video file — read straight from the
-sequence you have open, with a manifest row per clip describing exactly where it came from.
+**Turn a finished Premiere Pro edit into a labelled library of its individual shots — in one
+click, from the timeline you already have open.**
+
+An editor cuts a 40-second ad from 60 takes. The edit ships; the *decisions* — which take,
+which two seconds of it, at what speed, with which grade — stay locked inside a `.prproj` that
+nothing else can read. Raw-cutter opens that up: every cut becomes its own video file, next to
+a spreadsheet row saying exactly where it came from.
+
+It was built to assemble training datasets out of finished edits. It turns out to be just as
+useful for reusing a shot you know you cut three months ago and cannot find.
+
+## What you get
+
+Point it at an open sequence, press **Read timeline**, tick what you want, press **Export**:
+
+| | |
+|---|---|
+| **One file per cut** | `07_(04.03-04.73)_B_roll_wide.mp4` — index, the exact seconds used from the source, and the source's own name |
+| **A row per cut** | `clips.csv`: source file, timeline position, timecode, speed %, whether it was reversed, frame count, and whether the clip was switched off |
+| **A manifest** | `manifest.json` — the same, machine-readable, plus every setting the run used, so a dataset built from it is reproducible |
+| **The voice-over** | one MP3 as long as the sequence, voice at its timeline positions, silence in the gaps |
+
+## Two ways to cut, and the second one is the point
+
+**Source media** reads your original camera files. The clips are the untouched footage, frame
+for frame — no grade, no titles, no transforms. That is what you want for a clean library.
+
+**Timeline render** has Premiere render each cut with everything on it baked in — colour,
+titles, Motion, speed ramps, adjustment layers — and cuts from that instead. Same filenames,
+same manifest, same rows. **Measured at ≈0.65 seconds per cut** (17 cuts, 1,119 frames, 11
+seconds — about 3.5× realtime), so a 60-cut timeline costs under a minute of Premiere's time.
+
+No AI, and the XML is not thrown away: the timeline supplies the positions, Premiere supplies
+the pixels.
+
+## Frame-exact, and it tells you when it isn't
+
+Cuts hold exactly the frames the timeline used. A sped-up clip therefore comes out **longer**
+than it looks on the timeline — that is correct, not a bug, and the manifest records the
+speed. Exactly one setting breaks frame-exactness (forcing an output frame rate), and the
+panel says so in red when you choose it.
+
+## Built to be checked, not trusted
+
+- **Nine automated test suites**, run on every change. They cut real video and measure the
+  result — the panel suite alone carries over 450 assertions.
+- Every fix is **mutation-tested**: the code is deliberately broken to confirm the test
+  actually fails. A test nobody has watched fail is not a test.
+- Verified against **30 real Premiere exports**, not only synthetic fixtures.
+- **No Python packages.** Both files import nothing outside the standard library — no
+  virtualenv, no pip, nothing to keep up to date.
+- Nothing leaves your machine except the update check, which reads one small file from GitHub.
+
+---
 
 ## Install
 
