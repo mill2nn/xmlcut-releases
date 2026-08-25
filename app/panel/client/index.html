@@ -296,7 +296,7 @@
          it is rather than pretending to work. -->
     <div class="opts">
         <label class="tick" id="wfwrap"><input type="checkbox" id="wholeframes">whole frames only
-            <span class="q" data-tip="Keeps only the frames that lie WHOLLY inside each cut's own source range: a start that falls mid-frame moves up to the next frame, an end that falls mid-frame moves down to the previous one. A tick-derived in-point rarely lands on a frame boundary, so without this a cut can hold one frame at each end that was never on screen at that position. Costs at most one frame per end, and never empties a cut.">?</span>
+            <span class="q" data-tip="Pulls each cut onto whole frames. A start that falls mid-frame keeps the frame it lands IN — the one Premiere was showing at that instant — and an end that falls mid-frame moves down to the previous one. A tick-derived in-point rarely lands on a frame boundary, so without this the tail can hold a frame that was never on screen at that position. Costs at most one frame at the end, and never empties a cut.">?</span>
             <i class="tickwhy" id="wfwhy" hidden>· nothing to trim in timeline mode</i>
         </label>
         <label class="tick"><input type="checkbox" id="resume">skip clips already there

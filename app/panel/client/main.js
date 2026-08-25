@@ -136,6 +136,34 @@
         scale: 100,      // output resolution, percent of each source's own
         merge: [],       // the '++' lines xmlcut printed about the merge
         busy: false,
+        /* ⚠️ A SCAN IS IN FLIGHT, and this is NOT the same thing as state.busy.
+         *
+         * busy is held by the export too — setBusy(true, "Exporting…") — so anything that
+         * explains a dead Export button by testing busy would explain it DURING THE EXPORT,
+         * on the one screen he is watching. Only scanClips() sets this, and endRescan()
+         * clears it at every one of that function's exits. */
+        scanning: false,
+        /* AN EXPORT HAS BEEN ASKED FOR AND HAS NOT STARTED YET — the window in which
+         * checkSequence is waiting on Premiere or a confirm modal is up. The button is
+         * still enabled through all of it, because nothing has begun; measured, a second
+         * press inside that window started a SECOND full export with identical argv into
+         * the same folder, concurrently. Cleared at every exit of that window, including
+         * the ones where no export follows, or a cancelled confirm would leave the button
+         * dead until the panel was reloaded. */
+        exportPending: false,
+        /* HOW LONG PREMIERE GETS TO ANSWER A CONFIRM MODAL before the export gives up on it.
+         *
+         * Far longer than SEQ_ANSWER_MS on purpose: a HUMAN is inside this one, reading five
+         * lines and deciding, whereas the stamp check is a machine answering a machine. The
+         * bound exists for the case where the modal never appeared at all — an evalScript
+         * queued behind minutes of ExtendScript — which from here is indistinguishable from
+         * one nobody has answered yet, so the timeout must be long enough that it never
+         * fires on someone who is simply reading.
+         *
+         * ⚠️ ON state RATHER THAN IN A const, so the suite can shrink it. A test that had to
+         * wait a real minute to watch this fire is a test that would never be run, and an
+         * unwatched test is not a test. */
+        confirmWaitMs: 60000,
         jobs: {},            // output_file -> {status, t0, t1} while cutting
         jobOrder: [],
         jobTimer: null,      // 1s tick so elapsed times move even when quiet
@@ -537,7 +565,7 @@
      * be read first. */
     var RAIL_KEYS = ["seq", "err", "failures", "audionum", "audio", "fps", "readmode",
                      "ramps", "types", "preset", "dest", "stall", "sizes", "rendermode",
-                     "complete", "renders", "scan", "saved"];
+                     "complete", "renders", "exportwait", "scan", "saved"];
     var railRows = {};        // key -> {sev, text, title}
 
     /* Delegated. renderRail() replaces innerHTML, so a listener bound to a row dies with
@@ -605,11 +633,7 @@
         ].concat(CL_355);
     /* 3.57 leads with the export that did nothing, because that is what he reported and it
      * is the one that stops work dead. */
-    var CHANGELOG = {
-        "3.54": CL_354,
-        "3.55": CL_355,
-        "3.56": CL_356,
-        "3.57": [
+    var CL_357 = [
             "⚠️ SỬA LỖI BẤM EXPORT KHÔNG CHẠY GÌ. Phần kiểm tra sequence gọi vào Premiere; "
             + "nếu Premiere không trả lời thì cả export đứng im, không báo gì. Giờ chờ 4 giây "
             + "là chạy tiếp và ghi rõ lý do. Mỗi lần bấm Export đều được ghi vào Log, nên "
@@ -627,7 +651,55 @@
             + "reinterpret, clip Dynamic Link) — trước đây bị bỏ hết.",
             "Chọn track audio trên timeline không xuất được XML giờ đúng track, trước đây "
             + "gộp hết về A1 nên chọn A2 ra file im lặng."
-        ].concat(CL_356)
+    ].concat(CL_356);
+
+    var CHANGELOG = {
+        "3.54": CL_354,
+        "3.55": CL_355,
+        "3.56": CL_356,
+        "3.58": [
+            "⚠️ QUAN TRỌNG — CHỌN FRAME RATE TRÙNG VỚI TIMELINE KHÔNG CÒN LÀM HỎNG CLIP. "
+            + "Trước đây chọn 30 fps trên timeline vốn đã 30 fps vẫn ép ffmpeg resample: "
+            + "frame đầu bị GHI HAI LẦN và frame cuối bị mất — đo được clip ra "
+            + "[57, 57, 58 … 84] trong khi timeline dùng 57–85. Với source 24 fps còn nặng "
+            + "hơn: clip bị cắt cụt còn 1.600s thay vì 2.000s, mất gần 20% đuôi mà không "
+            + "báo gì. Giờ rate nào đã trùng thì bỏ qua hẳn, rate nào thật sự khác thì đếm "
+            + "đúng số frame đầu ra.",
+            "Dòng chữ đỏ \"Forcing N fps RESAMPLES\" chỉ hiện khi THẬT SỰ có clip bị "
+            + "resample, và ghi rõ bao nhiêu trên tổng bao nhiêu clip. Trước đây nó hiện với "
+            + "mọi lựa chọn frame rate, kể cả lựa chọn an toàn nhất — và vì frame rate được "
+            + "nhớ trong máy nên mở lại Premiere là nó đỏ tiếp, trông y như panel lưu lịch "
+            + "sử lỗi. Nó cũng chỉ là cảnh báo (vàng), không phải lỗi.",
+            "frame_exact trong manifest giờ tính theo TỪNG clip. Trước đây chỉ cần có chọn "
+            + "frame rate là mọi clip bị đánh dấu sai — kể cả clip audio và ảnh tĩnh vốn "
+            + "không bao giờ đi qua bước resample.",
+            "Tick \"whole frames only\" giờ giữ đúng frame Premiere đang hiện tại điểm in. "
+            + "Trước đây nó nhảy LÊN frame kế tiếp, tức là bỏ mất frame mà editor nhìn thấy "
+            + "— đo trên bản render của chính Premiere: khớp 8/8 với cách mới.",
+            "⚠️ Bấm Export trong lúc panel đang đọc lại danh sách clip thì trước đây KHÔNG "
+            + "CÓ GÌ XẢY RA và cũng không ghi log — nút bị disable nên cú bấm không tới được "
+            + "code. Giờ panel nói rõ đang chờ đọc xong. Bấm Export hai lần liên tiếp cũng "
+            + "không còn chạy hai bản export song song vào cùng một folder nữa.",
+            "Danh sách clip giờ ĐÚNG THỨ TỰ TIMELINE như dòng chữ phía trên vẫn ghi. Trước "
+            + "đây clip đã export bị dồn xuống nhóm \"Written\" ở dưới cùng, nên clip 01 "
+            + "nằm dưới clip 18. Clip đã ghi vẫn có dấu ✓ ngay tại vị trí của nó.",
+            "Bấm vào ô Path là mở ra full đường dẫn, chọn/copy được — trước đây đường dẫn bị "
+            + "cắt cả hai đầu và không bôi đen được.",
+            "Chữ trong phần cài đặt không còn bị cắt ngang (\"FULL · SOUR\").",
+            "Hai chip \"written\" và \"retimed\" giờ có giải thích khi rê chuột vào.",
+            "Bỏ chip \".(none)\" trong phần File types. Nó không phải định dạng file — đó là "
+            + "các clip KHÔNG có file media (nest, title, graphic, adjustment layer). Tick hay "
+            + "bỏ tick nó đều không lọc được gì: ở chế độ render cả hàng chip bị ẩn, ở chế độ "
+            + "source thì engine luôn bỏ qua nó. Trên timeline nhiều nest nó lại là con số lớn "
+            + "nhất trong hàng nên gây hiểu nhầm.",
+            "Update giờ hiện đúng changelog. Trước đây panel đánh dấu \"đã xem\" TRƯỚC khi "
+            + "tìm nội dung, mà lúc update thì code đang chạy vẫn là bản cũ — chưa có changelog "
+            + "của bản mới — nên phần \"có gì mới\" bị mất luôn, khởi động lại cũng không thấy.",
+            "Ở chế độ render, phần ước tính dung lượng tính theo khung hình của SEQUENCE "
+            + "chứ không theo file source nữa — vì cái Premiere render ra là kích thước "
+            + "sequence, không phải kích thước file gốc."
+        ].concat(CL_357),
+        "3.57": CL_357,
     };
 
     /* Shown when the running version differs from the one last seen here.
@@ -646,10 +718,24 @@
                           || window.localStorage.getItem("xmlcut.script"));
         } catch (e) { return; }
         if (seen === ver) return;
-        try { window.localStorage.setItem("xmlcut.seenver", ver); } catch (e) {}
-        if (!seen && !hadPrior) return;
+        /* A fresh install gets nothing and is marked as seen: a changelog for a version you
+         * never had is noise. */
+        if (!seen && !hadPrior) {
+            try { window.localStorage.setItem("xmlcut.seenver", ver); } catch (e) {}
+            return;
+        }
+        /* ⚠️ THE MARKER IS WRITTEN LAST, AND THAT ORDERING IS THE WHOLE FIX.
+         * Premiere loads this file once, at launch. applyUpdate() replaces the engine on
+         * disk and then calls readVersion() -> noteVersion(newVer) while THIS code is still
+         * the previous release — which has no CHANGELOG key for the new version. Writing
+         * the marker first meant the old build consumed the notes it could not render, and
+         * after the restart the new build saw seen === ver and stayed silent too. Measured
+         * across a real 3.57 -> 3.58 transition: 4052 characters of notes, shown to nobody.
+         * No key here means this panel is older than the engine; leave the marker alone and
+         * let the next launch, running the newer code, do the telling. */
         var lines = CHANGELOG[ver];
         if (!lines || !lines.length) return;
+        try { window.localStorage.setItem("xmlcut.seenver", ver); } catch (e) {}
         say("changelog", "info", "Bản " + ver + " có gì mới:\n• "
             + lines.join("\n• "), "", true);
     }
@@ -794,9 +880,65 @@
         return "…/" + out;
     }
 
-    function setPathLabel(node_, full, keep) {
-        node_.textContent = full ? shortPath(full, keep) : "—";
+    /* ⚠️ TWO ELISIONS ON ONE STRING, AND BETWEEN THEM THE PATH WAS UNREADABLE.
+     *
+     * shortPath() above drops the HEAD to keep the TAIL — "the part that identifies it" —
+     * and then `.path`'s own overflow:hidden + text-overflow:ellipsis drops that TAIL. The
+     * exact substring the first elision exists to preserve is the one CSS throws away.
+     * MEASURED at a true 320px dock: the #outpath box is 153.8px, and a 134-character path
+     * renders as "…/Videos/Output/Fac…" — about 20 of its 134 characters. There is no caret
+     * either (these are spans, not inputs) and body sets user-select:none, so even a
+     * programmatic Range.selectNodeContents(#outpath) came back "". The reviewer could not
+     * check his own destination: "phần Save to này a ko bấm vào cái ô Path để check xem đã
+     * đúng Path hay chưa được".
+     *
+     * So a box OPENS. Click it and it wraps to as many lines as the path needs, selectable,
+     * with neither elision applied; click again and it is one line again. It costs 0px of
+     * width — the Change button's right edge does not move — and it fixes all four boxes at
+     * once: #scriptpath, #savedpath, #outpath, #repdest.
+     *
+     * The Copy buttons are untouched and still copy the FULL path: they read state.out and
+     * outDir(), never this label. */
+    function paintPath(node_) {
+        if (!node_) return;
+        var full = node_._full || "";
+        var open = !!node_._open && !!full;
+        node_.className = (node_._base || "path") + (open ? " open" : "");
+        node_.textContent = full ? (open ? full : shortPath(full, node_._keep || 40)) : "—";
+        // Kept on the closed box as well: hovering is the cheaper way to check a path you
+        // only want to glance at, and it is what this element has always offered.
         node_.title = full || "";
+    }
+
+    function setPathLabel(node_, full, keep) {
+        if (!node_) return;
+        node_._full = full || "";
+        node_._keep = keep || 40;
+        paintPath(node_);
+    }
+
+    /* Every path box, wired once. The list is here rather than derived from a selector
+     * because querySelectorAll would also catch a `.path` added inside some future overlay
+     * and quietly give it behaviour nobody asked for. */
+    var PATH_BOXES = ["scriptpath", "savedpath", "outpath", "repdest"];
+
+    function wirePathBoxes() {
+        for (var i = 0; i < PATH_BOXES.length; i++) {
+            (function (node_) {
+                if (!node_) return;
+                node_._base = node_.className || "path";
+                node_.addEventListener("click", function () {
+                    /* ⚠️ SELECTING THE PATH IS THE POINT OF OPENING IT, so the mouseup that
+                     * ends a drag must not close the box out from under the selection. */
+                    try {
+                        var sel = window.getSelection && window.getSelection();
+                        if (sel && !sel.isCollapsed && String(sel) !== "") return;
+                    } catch (e) {}
+                    node_._open = !node_._open;
+                    paintPath(node_);
+                });
+            })(el[PATH_BOXES[i]]);
+        }
     }
 
     /* ------------------------------------------------- locating the tool */
@@ -1358,6 +1500,17 @@
             return d !== 0 ? d : (a < b ? -1 : a > b ? 1 : 0);
         });
         for (var i = 0; i < exts.length; i++) {
+            /* ⚠️ "(none)" IS NOT A FILE TYPE, AND ITS CHIP COULD NEVER DO ANYTHING.
+             * It is the bucket for cuts with no media file at all — nests, titles,
+             * graphics, adjustment layers, colour mattes. It cannot filter in EITHER mode:
+             * in render mode this whole block is hidden (`show(el.types, !render)`), and in
+             * source mode selectedExts() never puts it in --ext and the engine exempts it,
+             * so the pathless rows stay listed whether it is ticked or not — the check in
+             * tests/check_panel.js that the pathless graphic survives is the proof.
+             * So it was a control that changed nothing, wearing a label shaped like a file
+             * extension, and on a nest-heavy timeline it carried the LARGEST count in the
+             * row. The reviewer asked what it meant twice, then asked for it to go. */
+            if (exts[i] === "(none)") continue;
             (function (ext) {
                 var t = state.types[ext];
                 var col = colorFor(ext);
@@ -1535,6 +1688,34 @@
         el["export"].textContent = n > 0
             ? ("Export " + n + " clip" + (n === 1 ? "" : "s"))
             : "Nothing selected";
+        /* ⚠️ A DEAD BUTTON THAT EXPLAINS ITSELF.
+         *
+         * MEASURED with a real mouse gesture on a real disabled <button> in Chromium:
+         * pointerdown and pointerup fire and there is NO click at all — so the press cannot
+         * reach doExport() and does not even write the log line doExport() opens with. The
+         * label meanwhile still reads "Export 19 clips", and when the scan lands the button
+         * silently comes back: "1 lúc sau nút Export tự nhiên refresh lại, a ấn lại thì lại
+         * được". Several scans run without anyone pressing Read — the "Shots from" radio,
+         * Re-measure, the script picker, the engine download, the host's findXmlcut reply —
+         * and every scan ffprobes every distinct source before honouring --manifest-only, so
+         * on a shared drive that window is not short.
+         *
+         * ⚠️ GATED ON THE SCAN, NOT ON state.busy, and a verifier measured why. setBusy(true,
+         * "Exporting…") and setBusy(true, "Rendering…") hold state.busy for the whole EXPORT,
+         * where dump, script, out and n are all satisfied too — so `state.busy && …` puts
+         * "Export is waiting for the cut list" on the rail during every single export, while
+         * the export is running. !state.running is belt to state.scanning's braces: a scan
+         * and a run cannot overlap today, and this row must not be one refactor away from
+         * appearing mid-run.
+         *
+         * The COUNT stays on the button — it is the previous read's and still true — and the
+         * reason goes beside it. */
+        say("exportwait", "info",
+            (state.scanning && !state.running
+             && !!(state.dump && state.script && state.out && n > 0))
+                ? ("Export is waiting for the cut list to finish reading. The button comes "
+                   + "back on its own when the read lands — nothing has been lost.")
+                : "");
         if (!state.script && state.dump) {
             el["export"].textContent = "Find xmlcut.py first";
             // The gear, not Advanced: the engine row moved there, so opening Advanced
@@ -2105,6 +2286,53 @@
         });
     }
 
+    /* BOTH GATES ASK THE SAME WAY, AND BOTH ARE BOUNDED.
+     *
+     * ⚠️ NEITHER OF THEM WAS. checkSequence bounds its stamp call with SEQ_ANSWER_MS and says
+     * exactly why — "a guard that can swallow the work it guards is worse than no guard" —
+     * and then handed a mismatch to an evalScript with no bail at all. If the host never
+     * dispatches it the export neither starts nor reports, and the panel has silently eaten
+     * the click: the same symptom, one layer further in.
+     *
+     * WHAT A TIMEOUT MEANS HERE IS NOT WHAT IT MEANS THERE. An unanswered stamp check
+     * PROCEEDS — it is an optional check, and refusing to cut because a check could not be
+     * made would strand a job. An unanswered confirm does the opposite and exports NOTHING,
+     * because the modal's own default is no and the whole doctrine of this gate is that the
+     * safe branch is the one that happens by default, by accident and by failure.
+     *
+     * A reply that arrives after the wait was given up is IGNORED, loudly. Acting on it
+     * would start an export minutes after he stopped looking, and possibly beside one he has
+     * since started by hand.
+     *
+     * @param what  what to call this in the log, so a row can be traced to the gate that
+     *              raised it.
+     */
+    function askExportConfirm(msg, what, proceed) {
+        var answered = false;
+        var bail = setTimeout(function () {
+            if (answered) return;
+            answered = true;
+            state.exportPending = false;
+            log(what + ": NO REPLY in " + state.confirmWaitMs + "ms — nothing was exported");
+            say("export", "warn", "Premiere never answered the confirmation, so nothing has "
+                + "been exported. Look for a dialog behind the Premiere window, then press "
+                + "Export again.");
+        }, state.confirmWaitMs);
+        cs.evalScript("askConfirm(" + jsStr(msg) + ")", function (raw) {
+            if (answered) {
+                log(what + ": answered after the " + state.confirmWaitMs
+                    + "ms wait had been given up — ignored, nothing was exported");
+                return;
+            }
+            answered = true;
+            clearTimeout(bail);
+            state.exportPending = false;
+            var yes = String(raw === null || raw === undefined ? "" : raw).trim() === "yes";
+            log(what + ": " + (yes ? "exported anyway" : "export cancelled"));
+            if (yes) proceed();
+        });
+    }
+
     /* THE GATE, and nothing about it may be passable by accident.
      *
      * askConfirm() puts up an ExtendScript modal whose default is NO, so Return, Escape and
@@ -2116,6 +2344,7 @@
      * ⚠️ askConfirm() BLOCKS PREMIERE'S MAIN THREAD while it is up, as every ExtendScript
      * modal does. That is why it is raised only here: as the direct consequence of a click
      * he made a moment ago, never from the focus check and never from the timer. */
+
     function confirmMismatch(proceed) {
         var read = readSeqName(), open = state.seqOpenName || "?";
         var msg;
@@ -2129,11 +2358,7 @@
                     : "The list, the ranges and the names are the old edit's.")
                 + "\n\nExport anyway?";
             log("export held: " + read + " edited since read — asking");
-            cs.evalScript("askConfirm(" + jsStr(msg) + ")", function (raw) {
-                var yes = String(raw === null || raw === undefined ? "" : raw).trim() === "yes";
-                log("timeline drift: " + (yes ? "exported anyway" : "export cancelled"));
-                if (yes) proceed();
-            });
+            askExportConfirm(msg, "timeline drift", proceed);
             return;
         }
         if (state.cutFrom === "render") {
@@ -2160,11 +2385,7 @@
                 + "Export anyway?";
         }
         log("export held: read \"" + read + "\" but \"" + open + "\" is open — asking");
-        cs.evalScript("askConfirm(" + jsStr(msg) + ")", function (raw) {
-            var yes = String(raw === null || raw === undefined ? "" : raw).trim() === "yes";
-            log("sequence mismatch: " + (yes ? "exported anyway" : "export cancelled"));
-            if (yes) proceed();
-        });
+        askExportConfirm(msg, "sequence mismatch", proceed);
     }
 
     /* THE EXPORT, in one or two phases.
@@ -2183,6 +2404,19 @@
          * it mean different things. */
         log("export requested: " + state.cutFrom + " mode, " + pickedClips().length
             + " clip(s) picked");
+        /* ⚠️ ONE PRESS, ONE EXPORT.
+         *
+         * Nothing has STARTED yet at this point — checkSequence gives Premiere up to
+         * SEQ_ANSWER_MS to answer and confirmMismatch can hold a modal open for as long as it
+         * takes to read one — so state.running is still false and the button is still live
+         * through all of it. MEASURED: a second press inside it ran doExport twice, and two
+         * engines started with identical argv into the same folder, concurrently, each
+         * overwriting the other's clips as it went. */
+        if (state.exportPending || state.running) {
+            log("export ignored: one is already starting");
+            return;
+        }
+        state.exportPending = true;
         /* THE AUTHORITATIVE CHECK, and the reason the rail row is not enough on its own: the
          * row can be up to SEQ_CHECK_MS old and he may never have looked at it. This one runs
          * at the moment the export is asked for, and nothing starts until it has answered. */
@@ -2191,9 +2425,18 @@
              * callback, so nothing above it catches, the button stays enabled and the panel
              * looks like it ignored the click. Now it says so. */
             try {
-                if (safe) { log("sequence check passed — starting"); startExport(); return; }
+                if (safe) {
+                    log("sequence check passed — starting");
+                    // Cleared as the run BEGINS, not after: from here setRunning(true) holds
+                    // the door, and leaving both flags up would need two things to be
+                    // cleared correctly instead of one.
+                    state.exportPending = false;
+                    startExport();
+                    return;
+                }
                 confirmMismatch(startExport);
             } catch (e) {
+                state.exportPending = false;
                 log("export failed to start: " + e);
                 say("export", "error", "The export could not start: " + e
                     + " — the log has the detail.");
@@ -2738,6 +2981,14 @@
      * second implementation of the tick maths, drifting from the one that is tested —
      * so the preview is produced by exactly the code that will do the cutting. */
     function scanClips() {
+        /* ⚠️ THE SCAN IS IN FLIGHT, SAID OUT LOUD, AND REPAINTED HERE RATHER THAN LEFT TO
+         * THE NEXT CALLER. Every caller does its setBusy(true, "…") BEFORE calling this, so
+         * the refresh inside setBusy has already run by the time we get here — without this
+         * repaint the Export button would sit dead and unexplained until some unrelated
+         * render happened along. Cleared in endRescan(), which every exit below goes
+         * through. */
+        state.scanning = true;
+        refreshExportEnabled();
         /* ⚠️ DO NOT EMPTY THE LIST TO RE-READ IT.
          *
          * This used to clear state.clips and hide the table on every scan, including a
@@ -2877,8 +3128,13 @@
     /* Both halves of "the scan is over", together. They were separate lines at four
      * exits, which is four chances to hide the hint and leave the table dimmed. */
     function endRescan() {
+        state.scanning = false;
         say("scan", "info", "");
         el.tablewrap.className = "tablewrap";
+        // The Export button's reason for being dead goes with the scan that caused it. The
+        // button itself is re-enabled by the setBusy(false) each caller does next; this is
+        // the row beside it, and leaving it up would outlive what it describes.
+        refreshExportEnabled();
     }
 
     function loadClips(dir) {
@@ -2948,8 +3204,13 @@
              * ⚠️ DEMOTED HERE RATHER THAN IN THE ENGINE, because the panel is the only side
              * that knows the mode. The identical manifest row IS a failure in source mode,
              * where there is no file to cut from — so a kind changed engine-side would paint
-             * a genuinely broken row amber. estimate_basis "sequence" is the engine saying
-             * "this cut has no source", which is exactly the population. */
+             * a genuinely broken row amber.
+             *
+             * ⚠️ estimate_basis "sequence" NO LONGER MEANS "this cut has no source" — since
+             * the render-mode pricing fix, EVERY render-mode video row carries it, because a
+             * render really is sequence-sized whether or not a source file exists. What still
+             * selects the right population here is `kind === "bad"`, which a row with a
+             * readable source never is. Do not drop that clause thinking the basis carries it. */
             if (kind === "bad" && cuttable && state.cutFrom === "render"
                 && String(c.estimate_basis || "") === "sequence") {
                 kind = "warn";
@@ -2986,7 +3247,8 @@
                  * ceiling · unknown. The panel does not use the engine's estimated_bytes —
                  * it recomputes, so the number keeps following the crf and scale controls
                  * instead of freezing at scan time — but it does use this to know WHICH kind
-                 * of row it is looking at. "sequence" is the one with no source file. */
+                 * of row it is looking at. ⚠️ "sequence" is now EVERY render-mode video row,
+                 * not just the ones with no source file — see the demotion above. */
                 estBasis: String(c.estimate_basis || ""),
                 cutId: String(c.cut_id || ""),
                 // MEASURED bits per second, from the engine encoding a second or so of
@@ -3062,6 +3324,13 @@
      * shot — a still, an adjustment layer, a title with no <file> path at all. */
     function typeOn(c) {
         if (state.cutFrom === "render") return true;
+        /* ⚠️ THE "(none)" BUCKET IS ALWAYS ON, AND THIS LINE IS LOAD-BEARING.
+         * Its chip is gone (see renderTypes), but the tick was remembered in
+         * localStorage "xmlcut.types" — so anyone who unticked it in an earlier version
+         * still has `"(none)": false` saved. Without this, their nests, titles and
+         * graphics would vanish from the list on upgrade with no control left anywhere to
+         * bring them back, and nothing on screen would say why. */
+        if (c.ext === "(none)") return true;
         return state.types[c.ext] ? state.types[c.ext].on : true;
     }
 
@@ -3146,20 +3415,27 @@
      * That is not cosmetic: xmlcut filters by type and THEN assigns 1..N in the same
      * order, so renumbering the visible rows reproduces exactly the indices the
      * filenames will carry. */
-    /* WHICH GROUP A ROW BELONGS TO. Ranked by what needs attention, not by what is
-     * pleasant to report — the two failures on a 23-cut timeline were at rows 6 and 20,
-     * which is a poor place to keep the only things you have to act on.
+    /* WHICH GROUP A ROW BELONGS TO — for its COLOUR and for the counts over the list, and
+     * for nothing else.
      *
-     * Before a run there are two groups: everything is Ready, and whatever cannot be cut
-     * is at the bottom. That is the old divider, generalised. */
+     * ⚠️ THE LIST IS IN TIMELINE ORDER AND THE HEADING SAYS SO. This used to carry a `rank`
+     * per group and sort the rows by it, which is a partition, not an order: clip 01 was
+     * rendered BELOW clip 18 because 18 had been written and 01 had not, under a heading
+     * reading "Every cut, in timeline order". The list contradicted its own label, and the
+     * numbers in the index column — which ARE the filenames — ran 03, 07, 01, 02. Nothing
+     * is lost by dropping the sort: each row already carries a "✓" mark and a coloured rail
+     * of its own, "only problems" still floats the failures out on demand, and the counts
+     * the group headings used to hold are now in #listnote above the table.
+     *
+     * `title` survives for those counts. `rank` and `cls` are gone with the headings.
+     * Timeline order is the order the manifest arrives in, so it costs nothing to keep. */
     var GROUPS = [
-        { key: "bad",   rank: 0, title: "Problems",       cls: "g-bad" },
-        { key: "run",   rank: 1, title: "Encoding now",   cls: "g-run" },
-        { key: "ready", rank: 2, title: "Ready",          cls: "" },
-        { key: "ok",    rank: 3, title: "Written",        cls: "g-ok" },
-        { key: "kept",  rank: 4, title: "Already there",  cls: "g-kept" },
-        { key: "dead",  rank: 5, title: "Cannot be cut — fix these or untick their type",
-          cls: "g-dead" }
+        { key: "bad",   title: "failed" },
+        { key: "run",   title: "encoding" },
+        { key: "ready", title: "ready" },
+        { key: "ok",    title: "written" },
+        { key: "kept",  title: "already there" },
+        { key: "dead",  title: "cannot be cut" }
     ];
     function groupOf(rail, rst, isDead) {
         if (isDead) return "dead";
@@ -3171,10 +3447,8 @@
         if (rst === "ok" || rail === "over") return "ok";
         return "ready";
     }
-    function groupDef(key) {
-        for (var i = 0; i < GROUPS.length; i++) if (GROUPS[i].key === key) return GROUPS[i];
-        return GROUPS[2];
-    }
+    /* groupDef() is gone with the headings. Nothing looks a group up by key any more: the
+     * row's colour comes from _grp directly and the counts walk GROUPS in order. */
 
     function renderClips() {
         var body = el.clipbody;
@@ -3223,12 +3497,14 @@
                 : gOver && grst ? "over" : grst === "kept" ? "kept"
                 : grst === "ok" ? "ok" : "";
             gv._grp = groupOf(gRail, grst, gv.group !== 0);
-            gv._rank = groupDef(gv._grp).rank;
         }
-        visible = visible.slice().sort(function (a, b) { return a._rank - b._rank; });
+        /* ⚠️ NO SORT. `visible` stays in the order the manifest gave it, which is timeline
+         * order, which is what the heading over this table promises and what the index
+         * column's numbers mean. */
 
-        // How many rows each group will actually SHOW, counted before any are built so a
-        // heading can carry its own total. Rows the filter removes are not counted.
+        // How many rows each group will actually SHOW, counted before any are built. The
+        // group headings that used to carry these are gone; #listnote states them once,
+        // above the table. Rows the filter removes are not counted.
         var counts = {};
         for (var cq = 0; cq < visible.length; cq++) {
             var cv = visible[cq];
@@ -3240,7 +3516,6 @@
             counts[cv._grp] = (counts[cv._grp] || 0) + 1;
         }
 
-        var headed = {};
         for (var j = 0; j < visible.length; j++) {
             var v = visible[j];
             var tr = document.createElement("tr");
@@ -3272,26 +3547,11 @@
             /* Filtered AFTER numbering, never before: the numbers are the filenames the
              * run produced, so hiding a row must not renumber the ones that remain. */
             if (onlyProb && rst !== "bad" && !over && v.group === 0) continue;
-            /* ⚠️ AFTER the filter, never before: a heading built for a group whose every
-             * row is then filtered away is a heading over nothing. Class keeps "divider"
-             * in it so everything that already skips dividers still does. */
-            if (!headed[v._grp]) {
-                headed[v._grp] = true;
-                var gd = groupDef(v._grp);
-                var hr = document.createElement("tr");
-                hr.className = "divider grouphead " + gd.cls;
-                var hc = document.createElement("td");
-                hc.setAttribute("colspan", "5");
-                var ht = document.createElement("span");
-                ht.className = "ghtitle";
-                ht.textContent = gd.title;
-                var hn = document.createElement("b");
-                hn.textContent = String(counts[v._grp] || 0);
-                hc.appendChild(ht);
-                hc.appendChild(hn);
-                hr.appendChild(hc);
-                body.appendChild(hr);
-            }
+            /* ⚠️ NO GROUP HEADING HERE ANY MORE, and the reason is the missing sort above.
+             * A heading was written before the first row of its group; with the rows in
+             * timeline order that heading would appear wherever its first member happened to
+             * fall, with no heading at all over the rows above it — a label that describes
+             * three of the nineteen rows under it. The counts moved to #listnote. */
             tr.className = "k-" + v.kind + (picked ? "" : " unpicked")
                 + (over ? " over" : "") + (rail ? " st-" + rail : "");
 
@@ -3393,10 +3653,29 @@
             cuttable++;
             if (isPicked(visible[m])) chosen++;
         }
-        el.listnote.textContent = (chosen === cuttable)
-            ? (cuttable + " of " + visible.length + " cuttable")
-            : (chosen + " of " + cuttable + " ticked");
+        /* WHAT THE GROUP HEADINGS USED TO SAY, said ONCE, above the list instead of scattered
+         * through it. The headings could not survive timeline order — see renderClips' loop —
+         * but their counts are the half worth keeping: "how many did write" is a question
+         * about the run, not about any one row.
+         *
+         * "ready" is left out on purpose. It is the default state of every row before a run,
+         * so naming it would restate the total that is already the first thing on this line —
+         * the same reason a plain "ready" is blanked in the status column. */
+        var tallyBits = [];
+        for (var gi = 0; gi < GROUPS.length; gi++) {
+            var gk = GROUPS[gi].key;
+            if (gk === "ready" || !counts[gk]) continue;
+            tallyBits.push(counts[gk] + " " + GROUPS[gi].title);
+        }
+        el.listnote.textContent = ((chosen === cuttable)
+                ? (cuttable + " of " + visible.length + " cuttable")
+                : (chosen + " of " + cuttable + " ticked"))
+            + (tallyBits.length ? " · " + tallyBits.join(" · ") : "");
         syncPickAll();
+        // The frame-rate caveat counts TICKED clips against their own source rates, so it
+        // has to be re-asked whenever the list or the selection changes — not only when a
+        // control in the strip moves.
+        renderFpsNote();
         renderSizeEstimate();
     }
 
@@ -3799,7 +4078,8 @@
         /* The voice-over, and which tracks it reads. One control, two flags: --audio is the
          * switch and --audio-tracks narrows it, so "every track" needs no second argument and
          * the ordinary case stays a short command line. */
-        // Only the frames wholly inside each cut's source range.
+        // Pulls each cut onto whole frames: the head keeps the frame the in-point falls
+        // IN (the one the timeline displayed), the tail moves down to the previous frame.
         if (s.wholeFrames) a.push("--whole-frames");
         if (s.audio) {
             a.push("--audio");
@@ -4705,15 +4985,73 @@
             : "");
     }
 
+    /* WHAT A FORCED FRAME RATE WOULD ACTUALLY RESAMPLE — and silence when it would
+     * resample nothing.
+     *
+     * ⚠️ THIS ROW USED TO FIRE ON ANY NON-EMPTY RATE, compared against nothing at all. The
+     * reviewer's timeline is 30 fps, he chose 30 fps, and got a red row telling him his
+     * frames would be wrong; he reported it as "cannot export with this setting". A warning
+     * that is right only by accident teaches you to ignore the rail.
+     *
+     * THE COMPARISON IS NOT THE SAME IN THE TWO MODES, because ffmpeg is not opening the
+     * same file:
+     *
+     *   SOURCE — ffmpeg opens each camera file, so the rate that matters is each CLIP's
+     *   own. A 24 fps source in a 30 fps timeline IS resampled at 30 even though the
+     *   sequence matches, so this is per clip and counts them.
+     *
+     *   RENDER — ffmpeg opens Premiere's render, which comes out at the SEQUENCE rate
+     *   whatever the sources were. One comparison, not one per clip.
+     *
+     * A clip whose source rate is unknown COUNTS AS AFFECTED. Silence there would be a
+     * promise the panel has no way to keep.
+     *
+     * ⚠️ "warn", NEVER "error". renderRail() sorts by RAIL_SEV, so red here would sit above
+     * a clip that actually failed to write. Nothing about this stops an export: it is a
+     * caveat about what the files will contain.
+     */
+    function fpsResampleNote() {
+        var want = parseFloat(el.fps.value);
+        if (!el.fps.value || !(want > 0)) return "";
+        // Rates are rationals: 29.97 is 30000/1001 and is not 30. A thousandth is the same
+        // tolerance renderSequence() prints the sequence rate at.
+        var TOL = 0.001;
+        var tail = " Frames are dropped or duplicated to hit that rate, so those clips will "
+                 + "NOT hold the frames the timeline used, and the manifest records them as "
+                 + "frame_exact = false.";
+        if (state.cutFrom === "render") {
+            var seq = state.info ? Number(state.info.fps || 0) : 0;
+            if (seq > 0 && Math.abs(seq - want) < TOL) return "";
+            return "Forcing " + el.fps.value + " fps RESAMPLES the render"
+                + (seq > 0
+                    ? " — this timeline is " + (Math.round(seq * 1000) / 1000) + " fps."
+                    : ".")
+                + tail;
+        }
+        var picked = pickedClips(), n = 0, unknown = 0;
+        for (var i = 0; i < picked.length; i++) {
+            var sf = Number(picked[i].srcFps || 0);
+            if (!(sf > 0)) { unknown++; n++; continue; }
+            if (Math.abs(sf - want) >= TOL) n++;
+        }
+        if (!n) return "";
+        return "Forcing " + el.fps.value + " fps RESAMPLES " + n + " of " + picked.length
+            + " ticked clip" + (picked.length === 1 ? "" : "s")
+            + " — their sources are not already at that rate"
+            + (unknown
+                ? " (" + unknown + " of them because the source rate could not be read)."
+                : ".")
+            + tail;
+    }
+
+    /* Called from BOTH renderSettings and renderClips: the note is a function of the rate
+     * AND of what is ticked, and a rate chosen before the read would otherwise keep
+     * answering for an empty list. */
+    function renderFpsNote() { say("fps", "warn", fpsResampleNote()); }
+
     function renderSettings() {
         applyScale();
-        // The one setting that changes what the files CONTAIN rather than how big
-        // they are. Said in red, and not folded into a tooltip.
-        say("fps", "error", el.fps.value
-            ? ("Forcing " + el.fps.value + " fps RESAMPLES: frames are dropped or "
-               + "duplicated to hit that rate, so these clips will NOT hold the frames "
-               + "the timeline used. The manifest records them as frame_exact = false.")
-            : "");
+        renderFpsNote();
         renderAudioTracks();
         renderVideoTracks();
         applyCutFrom();
@@ -5212,22 +5550,55 @@
             if (Math.abs(Number(cc.speed_percent || 100) - 100) > 0.01) n.retimed++;
         }
 
+        /* ⚠️ "WRITTEN" AND "RETIMED" WERE THE ONLY TWO WORDS IN THE PANEL WITH NO
+         * EXPLANATION ANYWHERE, and the reviewer had to ask what "Written" meant. Every other
+         * region carries a `?`; #tally has none of its own, and each chip was a className and
+         * a textContent and nothing else — no title, no tip.
+         *
+         * So the chip IS the `?`: same data-tip idiom, same bubble, and it costs no pixels,
+         * which is what matters on a 320px dock where eight of these can be on screen at
+         * once. Each has to be wired as it is built — see wireTip(). */
+        var PILL_TIP = {
+            written: "The cut's file has been written into the output folder. It is on disk "
+                   + "now; nothing else has to happen to it.",
+            kept: "The file was already in the folder and “skip clips already there” "
+                + "is ticked, so it was left exactly as it was rather than written again.",
+            failed: "The engine could not write this cut. Its row says why, and Retry below "
+                  + "runs just these again.",
+            missing: "Premiere has no file behind this clip — the media is offline or the "
+                   + "link is broken — so there was nothing to cut from.",
+            unsupported: "Not something that can be cut from a source file: a title, a "
+                       + "graphic or an effect layer. Cutting from a timeline render "
+                       + "includes these.",
+            ramps: "The clip's speed CHANGES across the cut rather than sitting at one "
+                 + "value, so its source range is the engine's best reading of the ramp.",
+            retimed: "The clip's speed was changed in the timeline, so the cut is longer or "
+                   + "shorter than the piece of source it comes from.",
+            reversed: "The clip runs backwards in the timeline."
+        };
         var pills = [];
-        function pill(text, cls) { pills.push({ t: text, c: cls || "" }); }
-        pill(n.ok + " written", n.ok > 0 ? "good" : "");
-        if (n.kept) pill(n.kept + " already there", "");
-        if (n.failed) pill(n.failed + " failed", "bad");
-        if (n.missing) pill(n.missing + " offline", "bad");
-        if (n.unsupported) pill(n.unsupported + " not media", "warnp");
-        if (n.ramps) pill(n.ramps + " ramp" + (n.ramps === 1 ? "" : "s"), "warnp");
-        if (n.retimed) pill(n.retimed + " retimed");
-        if (n.reversed) pill(n.reversed + " reversed");
+        function pill(text, cls, tip) {
+            pills.push({ t: text, c: cls || "", tip: tip || "" });
+        }
+        pill(n.ok + " written", n.ok > 0 ? "good" : "", PILL_TIP.written);
+        if (n.kept) pill(n.kept + " already there", "", PILL_TIP.kept);
+        if (n.failed) pill(n.failed + " failed", "bad", PILL_TIP.failed);
+        if (n.missing) pill(n.missing + " offline", "bad", PILL_TIP.missing);
+        if (n.unsupported) pill(n.unsupported + " not media", "warnp", PILL_TIP.unsupported);
+        if (n.ramps) pill(n.ramps + " ramp" + (n.ramps === 1 ? "" : "s"), "warnp",
+                          PILL_TIP.ramps);
+        if (n.retimed) pill(n.retimed + " retimed", "", PILL_TIP.retimed);
+        if (n.reversed) pill(n.reversed + " reversed", "", PILL_TIP.reversed);
 
         el.tally.innerHTML = "";
         for (var p = 0; p < pills.length; p++) {
             var d = document.createElement("span");
             d.className = "pill " + pills[p].c;
             d.textContent = pills[p].t;
+            if (pills[p].tip) {
+                d.setAttribute("data-tip", pills[p].tip);
+                wireTip(d, pills[p].tip);
+            }
             el.tally.appendChild(d);
         }
 
@@ -5390,30 +5761,38 @@
 
     /* -------------------------------------------------------------- tips */
 
+    /* ONE ELEMENT'S TIP, wired. Split out of wireTips() because wireTips runs ONCE at boot
+     * over the markup, and the report's chips are built fresh on every run — a data-tip on
+     * an element that did not exist at boot would never show a bubble. */
+    /* @param text  the tip itself, passed rather than read back off the attribute at hover
+     *              time: these are fixed the moment the element is made, and a bubble that
+     *              re-reads the DOM to find out what it says is a round trip for nothing. */
+    function wireTip(q, text) {
+        if (!q) return;
+        var tipText = String(text === null || text === undefined ? "" : text);
+        q.addEventListener("mouseenter", function () {
+            el.tip.textContent = tipText;
+            el.tip.hidden = false;
+            var r = q.getBoundingClientRect();
+            var top = r.bottom + 6;
+            el.tip.style.left = "0px";
+            el.tip.style.top = top + "px";
+            // Measure after showing, then nudge back inside the panel — a
+            // narrow panel would otherwise clip the bubble off the edge.
+            var w = el.tip.getBoundingClientRect().width;
+            var left = Math.min(Math.max(4, r.left), window.innerWidth - w - 4);
+            el.tip.style.left = left + "px";
+            if (top + el.tip.getBoundingClientRect().height > window.innerHeight) {
+                el.tip.style.top = Math.max(4, r.top - 6
+                    - el.tip.getBoundingClientRect().height) + "px";
+            }
+        });
+        q.addEventListener("mouseleave", function () { el.tip.hidden = true; });
+    }
+
     function wireTips() {
         var qs = document.querySelectorAll("[data-tip]");
-        for (var i = 0; i < qs.length; i++) {
-            (function (q) {
-                q.addEventListener("mouseenter", function () {
-                    el.tip.textContent = q.getAttribute("data-tip");
-                    el.tip.hidden = false;
-                    var r = q.getBoundingClientRect();
-                    var top = r.bottom + 6;
-                    el.tip.style.left = "0px";
-                    el.tip.style.top = top + "px";
-                    // Measure after showing, then nudge back inside the panel — a
-                    // narrow panel would otherwise clip the bubble off the edge.
-                    var w = el.tip.getBoundingClientRect().width;
-                    var left = Math.min(Math.max(4, r.left), window.innerWidth - w - 4);
-                    el.tip.style.left = left + "px";
-                    if (top + el.tip.getBoundingClientRect().height > window.innerHeight) {
-                        el.tip.style.top = Math.max(4, r.top - 6
-                            - el.tip.getBoundingClientRect().height) + "px";
-                    }
-                });
-                q.addEventListener("mouseleave", function () { el.tip.hidden = true; });
-            })(qs[i]);
-        }
+        for (var i = 0; i < qs.length; i++) wireTip(qs[i], qs[i].getAttribute("data-tip"));
     }
 
     /* -------------------------------------------------------------- wiring */
@@ -6145,6 +6524,7 @@
         renderSettings();
         if (state.script) loadPresets();
         wireTips();
+        wirePathBoxes();
         // Off the critical path: a slow or absent network must never delay the panel.
         if (state.script) checkUpdate(false);
         // Deliberately does NOT read on open. Reading exports an XML as a side effect,

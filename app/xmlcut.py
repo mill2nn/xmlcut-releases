@@ -42,7 +42,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.57"
+VERSION = "3.58"
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -141,6 +141,8 @@ JOBS = min(8, os.cpu_count() or 4)
 #   fps        ⚠️ CHANGING THIS BREAKS FRAME EXACTNESS. Resampling to another rate
 #              drops or duplicates frames, so the file no longer holds the frames the
 #              timeline used. Recorded per clip as frame_exact=false, and said out loud.
+#              Asked PER CUT — forcing the rate the media already has is a no-op and is
+#              not emitted at all, because emitting it corrupts the head.
 
 # Output bitrate relative to the SOURCE's, measured per crf on the fixture media:
 #     crf  1 -> 2.77x    crf 14 -> 1.26x    crf 18 -> 0.94x
@@ -2987,6 +2989,87 @@ def codec_flags(cut: Cut, args) -> list[str]:
     return out
 
 
+# How close two frame rates must be to count as THE SAME rate. Deliberately far below
+# the gap that matters: 30000/1001 is 29.97003, which sits 0.03 from 30 — thirty times
+# this epsilon — so 29.97 media asked for 30 fps is still correctly called a resample.
+# Only float noise and a rate typed to a few decimals fall inside it.
+FPS_EPS = 1e-3
+
+
+def retime_to_timeline(cut: Cut, args, seq_fps: float) -> bool:
+    """Does this cut have to be resampled to the SEQUENCE rate to play as it did on screen?
+
+    --speed timeline means "the clip as it played", which a speed ramp obviously needs —
+    but so does a 100%-speed 24 fps clip in a 30 fps timeline: without it the clip is
+    pinned to its 48 native frames instead of the 60 sequence frames it occupies, and
+    comes out 20% short.
+
+    ONE definition because build_command takes a different branch on it and
+    forced_rate_resamples() has to know which branch that will be. Two copies of this
+    expression would let the command and the frame_exact flag disagree about the same cut.
+    """
+    rate_mismatch = cut.source_fps > 0 and abs(cut.source_fps - seq_fps) > 0.01
+    return (getattr(args, "speed", "native") == "timeline"
+            and (is_retimed(cut.speed_percent) or rate_mismatch))
+
+
+def forced_rate_resamples(cut: Cut, args, seq_fps: float) -> bool:
+    """Would --fps actually drop or duplicate frames in THIS cut?
+
+    ⚠️ ASKING THE QUESTION PER CUT IS THE WHOLE POINT. --fps used to emit `-r` on every
+    video cut and mark every cut frame_exact=false, without ever comparing a rate to
+    anything. Measured on real media: a 30 fps source cut at --fps 30 is not merely a
+    no-op, it is HARMFUL — the half-frame seek below lands the wanted frame at PTS +0.5
+    frame and ffmpeg's CFR converter resolves that ambiguity by DUPLICATING it, so a
+    29-frame cut came back as [57, 57, 58 … 84]: the head twice and the tail missing.
+    Without -r the same cut is a clean 57..85.
+
+    False (nothing is resampled) when:
+
+    * no --fps was given, or the rate ffmpeg will read already equals it;
+    * the cut takes a branch of build_command that emits no `-r` at all. MEASURED by a
+      verifier at --fps 60: a still, an audio-track cut and the retime/reverse branch all
+      return before the flag is reached, yet a naive predicate marked all three
+      not-frame-exact — on the real fixture, 4 audio cuts and a still wrongly flagged.
+
+    WHICH rate is the input depends on the mode. In source mode ffmpeg opens the camera
+    file, so a 24 fps source in a 30 fps timeline IS resampled at --fps 30. In render mode
+    it opens Premiere's render, which comes back at the SEQUENCE rate whatever the source
+    was. A rate we do not know counts as AFFECTED: never promise exactness that cannot be
+    verified.
+    """
+    out_fps = float(getattr(args, "fps", None) or 0.0)
+    if out_fps <= 0:
+        return False
+    # Render mode first, exactly as build_command branches: the render replaces the
+    # source, and render_planned is the scan-time form of the same thing.
+    # ⚠️ ASK WHAT RATE THE FILE COMES OUT AT, NOT WHICH BRANCH BUILT IT. An earlier
+    # version exempted the still, audio and retime branches outright, on the belief that
+    # none of them emits a rate flag. Two of the three do — the retime branch emits
+    # `-r seq_fps` below and the still branch pins `-framerate seq_fps` — so --fps was
+    # silently dropped on those cuts AND they were recorded frame_exact=true. Measured on
+    # tests/PROMO_MASTER_v7.xml at --fps 60: 13 of 25 cuts came out at 30 fps while the
+    # manifest claimed 60 and called every one of them exact. Both branches now honour
+    # --fps, and this predicate compares against the rate each one will actually use.
+    if cut.track_type == "audio":
+        return False                       # no picture, so no frame to drop or duplicate
+    if cut.render_path or (cut.render_planned and cut.track_type == "video"):
+        in_fps = cut.render_fps or seq_fps or 0.0
+    elif cut.media_kind == "still":
+        return False                       # every frame identical, and emitted AT out_fps
+    elif retime_to_timeline(cut, args, seq_fps):
+        # A retime is already resampled against the sequence by construction, and that is
+        # the rate it lands on. Asking for a different one resamples it a SECOND time;
+        # asking for the sequence's own rate adds nothing. A REVERSE is different — it
+        # keeps the source rate — so it falls through to the source comparison below.
+        in_fps = seq_fps or 0.0
+    else:
+        in_fps = cut.source_fps or 0.0
+    if in_fps <= 0:
+        return True
+    return abs(in_fps - out_fps) > FPS_EPS
+
+
 def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
 
@@ -3001,14 +3084,14 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     #
     # -frames:v still pins the count, so a render that came back a frame long is
     # trimmed here rather than quietly lengthening the clip. The one exception is a
-    # --fps override, which resamples: the frame count is deliberately left to ffmpeg
-    # there, because pinning the sequence's own count at a different rate would change
-    # the clip's duration instead of preserving it.
+    # --fps override that REALLY resamples: the frame count is deliberately left to
+    # ffmpeg there, because pinning the sequence's own count at a different rate would
+    # change the clip's duration instead of preserving it. A --fps that matches the rate
+    # the render already carries is not that case — it emits no -r and keeps the pin.
     if cut.render_path:
         cmd += ["-i", cut.render_path]
-        out_fps = getattr(args, "fps", None)
-        if out_fps:
-            cmd += ["-r", f"{float(out_fps):.6f}"]
+        if forced_rate_resamples(cut, args, seq_fps):
+            cmd += ["-r", f"{float(args.fps):.6f}"]
         else:
             cmd += ["-frames:v", str(max(1, cut.duration_frames))]
         sf = scale_filter(args)
@@ -3023,7 +3106,8 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         # The even-rounding scale that has always been here IS scale_filter at 100%, so
         # the two are one expression rather than a special case bolted beside a general
         # one. A still with an odd dimension still cannot be encoded, scaled or not.
-        cmd += ["-loop", "1", "-framerate", f"{seq_fps:.6f}", "-i", cut.source_path,
+        _out = float(getattr(args, "fps", None) or 0.0) or seq_fps
+        cmd += ["-loop", "1", "-framerate", f"{_out:.6f}", "-i", cut.source_path,
                 "-t", f"{cut.source_duration_seconds:.6f}",
                 *codec_flags(cut, args),
                 "-movflags", "+faststart",
@@ -3040,9 +3124,7 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     # 100%-speed 24 fps clip in a 30 fps timeline needs it just as much: without
     # it the clip is pinned to its 48 native frames instead of the 60 sequence
     # frames it occupies, and comes out 20% short.
-    rate_mismatch = cut.source_fps > 0 and abs(cut.source_fps - seq_fps) > 0.01
-    retime = (getattr(args, "speed", "native") == "timeline"
-              and (is_retimed(cut.speed_percent) or rate_mismatch))
+    retime = retime_to_timeline(cut, args, seq_fps)
 
     ss, t = cut.source_in_seconds, cut.source_duration_seconds
     fps = cut.source_fps or 0
@@ -3118,9 +3200,24 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         if vf:
             cmd += ["-filter:v", ",".join(vf)]
         if retime:
-            cmd += ["-r", f"{seq_fps:.6f}", "-frames:v", str(max(1, cut.duration_frames))]
+            # --fps applies here too. The frame count is a TIMELINE count at seq_fps, so it
+            # has to be restated in output frames or the clip is truncated the same way the
+            # source branch was.
+            _out = float(getattr(args, "fps", None) or 0.0) or seq_fps
+            _n = (max(1, int(round(cut.duration_frames * _out / seq_fps)))
+                  if seq_fps > 0 else max(1, cut.duration_frames))
+            cmd += ["-r", f"{_out:.6f}", "-frames:v", str(_n)]
         else:
-            cmd += ["-frames:v", str(max(1, n_frames))]
+            # A reverse with no retime emits no -r, so --fps was silently dropped here as
+            # well. `select` counts INPUT frames and runs before the resample, so only the
+            # output pin has to be restated.
+            _out = float(getattr(args, "fps", None) or 0.0)
+            _src = cut.source_fps or 0.0
+            if _out > 0 and _src > 0 and abs(_out - _src) > FPS_EPS:
+                cmd += ["-r", f"{_out:.6f}",
+                        "-frames:v", str(max(1, int(round(n_frames * _out / _src))))]
+            else:
+                cmd += ["-frames:v", str(max(1, n_frames))]
 
         cmd += [*codec_flags(cut, args),
                 "-movflags", "+faststart", "-an"]
@@ -3129,17 +3226,31 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
 
     cmd += ["-ss", f"{ss:.6f}", "-i", cut.source_path]
     cmd += ["-t", f"{t:.6f}"]
-    # Frame count, not duration, is what must be exact — -t alone loses the last
-    # frame to timestamp rounding on roughly half of real-world clips.
-    if n_frames:
-        cmd += ["-frames:v", str(n_frames)]
-
     # ⚠️ An explicit output rate RESAMPLES: ffmpeg drops or duplicates frames to hit it.
     # The file then no longer holds the frames the timeline used, which is the property
     # every check in tests/verify.py rests on. Recorded per clip as frame_exact=false.
-    out_fps = getattr(args, "fps", None)
-    if out_fps:
-        cmd += ["-r", f"{float(out_fps):.6f}"]
+    #
+    # Asked per cut, not off the flag: --fps 30 on 30 fps media changes nothing about the
+    # pixels and, emitted anyway, actively corrupts the head — see forced_rate_resamples.
+    resample = forced_rate_resamples(cut, args, seq_fps)
+
+    # Frame count, not duration, is what must be exact — -t alone loses the last
+    # frame to timestamp rounding on roughly half of real-world clips.
+    #
+    # ⚠️ -frames:v COUNTS OUTPUT FRAMES, AFTER -r HAS RESAMPLED. Pinning the SOURCE count
+    # under a resample truncates the clip, and silently: measured on 24 fps media at
+    # --fps 30, `-frames:v 48 -r 30` wrote 48 output frames covering 1.600s and source
+    # frames 24..61, losing the last 10 frames of a 2.000s range. Converted to output
+    # frames (60) the same command covers 2.000s and source 24..71 — the identical range
+    # the cut holds with no --fps at all.
+    if n_frames:
+        want = n_frames
+        if resample:
+            want = max(1, int(round(n_frames * float(args.fps) / fps)))
+        cmd += ["-frames:v", str(want)]
+
+    if resample:
+        cmd += ["-r", f"{float(args.fps):.6f}"]
 
     # Added only when it does something. At 100% this branch had no -filter:v at all and
     # still should not: an identity scale is a full decode-filter-encode pass that changes
@@ -3492,7 +3603,19 @@ def size_probe(cut: Cut, args, seq_fps: float) -> None:
 
 
 def probe_sizes(cuts: list[Cut], args, seq_fps: float) -> None:
-    """Every cuttable clip, probed in parallel — the same pool width as the export."""
+    """Every cuttable clip, probed in parallel — the same pool width as the export.
+
+    ⚠️ NOT IN RENDER MODE, AND THAT IS DELIBERATE. The probe encodes a second of each
+    SOURCE, but in render mode ffmpeg never opens the source: the pixels come back from
+    Premiere at the sequence's frame size and rate, and estimate_sizes() prices those rows
+    from the sequence. So the probe spent real encode time on a number that was then
+    thrown away — measured, one clip probed at 794,472 bytes against a sequence estimate
+    of 1,312,064 — while probe_bps went into the manifest for the panel to read, where it
+    disagreed with the size the same manifest showed. Nothing to probe against: no probe.
+    """
+    if bool(getattr(args, "render_planned", False)
+            or getattr(args, "render_dir", None)):
+        return
     todo = [c for c in cuts
             if c.media_kind != "unsupported" and c.source_exists
             and (c.source_duration_seconds or 0) > 0]
@@ -3546,7 +3669,16 @@ def estimate_sizes(cuts: list[Cut], args) -> None:
         # source and renders to one second of 1080; pricing that from the source would be
         # wrong on both counts, and the resolution readout would name the wrong pixels.
         in_w, in_h, _fps, _codec, _rate = encode_input(c)
-        secs = (c.duration_seconds if c.render_path else c.source_duration_seconds) or 0.0
+        # ⚠️ A RENDER ROW IS PRICED FROM THE SEQUENCE, WHETHER OR NOT IT HAS A SOURCE, and
+        # `track_type == "video"` is load-bearing rather than tidy: an audio cut has no
+        # render coming, and pricing one by the sequence's PIXEL COUNT took a real
+        # voice-over row from 44,995 to 656,288 bytes (14.6x) and gave it a frame size of
+        # 640x360 in a column that should read 0x0.
+        from_render = bool(c.render_path) or (render_mode and c.track_type == "video")
+        # A render is a TIMELINE range: it is as long as the clip LOOKED, not as long as
+        # the source it ate. A 2x sped-up clip consumes two seconds of source to occupy one
+        # second of timeline, and pricing it over the source seconds overstates it by 2x.
+        secs = (c.duration_seconds if from_render else c.source_duration_seconds) or 0.0
         c.output_width, c.output_height = scaled_dims(in_w, in_h, pct)
         # In render mode the source's own state no longer disqualifies a cut: the pixels
         # come from Premiere, so an offline clip or a Dynamic Link comp still has a file.
@@ -3554,37 +3686,62 @@ def estimate_sizes(cuts: list[Cut], args) -> None:
         if secs <= 0:
             c.estimate_basis = "unknown"
             continue
-        if unusable and not c.render_path:
-            # ⚠️ NO SOURCE TO READ, AND THAT USED TO MEAN A BLANK SIZE CELL. He asked why
-            # the red rows show no estimate and guessed they were exporting twice; they were
-            # not. A nest cut as one clip, an adjustment layer, a title and an offline clip
-            # all have no source file, so every input the size model reads — dimensions,
-            # frame rate, bitrate — is absent, on both sides: the engine scored 0 and the
-            # panel's own clipBytes() returned 0 for the same reason.
+        if from_render and not c.render_path and seq_w > 0 and seq_h > 0:
+            # ⚠️ THE SEQUENCE, NOT THE SOURCE — and this gate used to read
+            # `unusable and not c.render_path`, so it only ever ran for rows with NO
+            # SOURCE AT ALL. Every render-mode row that did resolve a source fell through
+            # and was priced from the camera file: the wrong frame size, the wrong frame
+            # rate, and for a still the wrong model entirely (1.5 frames of jpeg against a
+            # render that is N real frames of sequence-sized video).
             #
-            # In RENDER mode the size is nonetheless knowable, and from better inputs than
-            # a source would give: the render IS the sequence, so it comes out at the
-            # sequence's frame size and rate for as long as the clip sits on the timeline.
-            # That is the same bits-per-pixel model every other row uses, applied to the
-            # dimensions that actually decide this output. Marked "sequence" so nobody
-            # reads it as having come from a source clip that does not exist.
-            if not render_mode or seq_w <= 0 or seq_h <= 0:
-                c.estimate_basis = "unknown"
-                continue
+            # encode_input() cannot save it either: it returns the render's dimensions
+            # only `if cut.render_path`, which is always "" during a scan — which is
+            # exactly when the panel is showing these numbers to someone deciding whether
+            # to press Export.
+            #
+            # The render IS the sequence, so it comes out at the sequence's frame size and
+            # rate for as long as the clip sits on the timeline. Same bits-per-pixel model
+            # as every other row, applied to the dimensions that actually decide this
+            # output. Marked "sequence" so nobody reads it as having come from a source.
+            #
+            # ⚠️ seq_w/seq_h > 0 IS NOT BELT-AND-BRACES. DumpTimeline never assigns the
+            # sequence size, so on the dump fallback path this clause is the only thing
+            # that keeps every size cell from going blank: without a frame size there is
+            # nothing to price, and the source-based branches below are the right answer.
             c.output_width, c.output_height = scaled_dims(seq_w, seq_h, pct)
             if rate:
                 c.estimated_bytes = int(rate * secs / 8)
                 c.estimate_basis = "ceiling"
                 continue
             sw, sh = c.output_width, c.output_height
-            if not sw or not sh:
-                c.estimate_basis = "unknown"
-                continue
-            bpp = _interp(BPP_INTER, crf_of(args)) * codec_ratio(vcodec_of(args),
-                                                                 crf_of(args))
-            c.estimated_bytes = int(bpp * sw * sh * (seq_fps or 25.0) * secs / 8
-                                    + CONTAINER_FIXED)
+            bpp = _interp(BPP_INTER, crf_of(args))
+            if c.media_kind == "still":
+                # ⚠️ A RENDER OF A STILL IS STILL A STILL, and this is the one place the
+                # first version of this branch got it badly wrong. The frame COUNT does go
+                # up — the render is however many frames the graphic held on screen — but
+                # those frames are identical, so all but the first cost a few bytes of
+                # "nothing changed". MEASURED end to end at crf 18, on a real 45-frame
+                # 640x360 render of the fixture's logo that actually weighs 3,142 bytes:
+                #   priced as 45 frames of video   187,136 bytes   59.6x   ← the naive fix
+                #   priced as STILL_FRAMES         ~  6,700 bytes    2.1x
+                # So only the FRAME SIZE moves to the sequence, which is the correction
+                # that mattered anyway: the source model was reading the logo's own
+                # 320x240 into a column describing a 640x360 output.
+                # No codec_ratio, for the same measured reason as estimate_bytes_for: a
+                # still gives x265 no inter prediction to be better at.
+                n_out = STILL_FRAMES
+            else:
+                bpp *= codec_ratio(vcodec_of(args), crf_of(args))
+                n_out = (seq_fps or 25.0) * secs
+            c.estimated_bytes = int(bpp * sw * sh * n_out / 8 + CONTAINER_FIXED)
             c.estimate_basis = "sequence"
+            continue
+        if unusable and not c.render_path:
+            # NO SOURCE TO READ, and in source mode that really is the end of it: a nest
+            # cut as one clip, an adjustment layer, a title and an offline clip all have no
+            # source file, so every input the size model reads — dimensions, frame rate,
+            # bitrate — is absent. Say so rather than invent a number.
+            c.estimate_basis = "unknown"
             continue
         if rate:
             c.estimated_bytes = int(rate * secs / 8)
@@ -3822,17 +3979,23 @@ def split_transition_overlaps(cuts: list[Cut], seq_fps: float) -> int:
 
 
 def trim_to_whole_frames(cuts: list[Cut]) -> int:
-    """Pull every cut in to the frames that lie WHOLLY inside its own source range.
+    """Pull every cut back to whole frames: the frame Premiere SHOWED at the in-point,
+    through the last frame that ends inside its own source range.
 
     "for any cut that the start frame land on an non rounded integer you move it up by 1 (+1) and
     end frame that not rounded you move it down by 1 (-1) so the cut dont get move outside each
     safe source range" — 18 Aug.
 
-    A tick-derived in-point almost never lands on a frame boundary. The default takes the frame
-    that CONTAINS the in-point, which is partly before the range the timeline actually used, and
-    counts frames whose start falls inside it — so a cut can hold a frame at each end that the
-    editor never saw at that position. This moves a fractional start up to the next whole frame
-    and a fractional end down to the previous one.
+    A tick-derived in-point almost never lands on a frame boundary, and only the END of the
+    range is fractional in a way the timeline never used — so only the end moves DOWN.
+
+    ⚠️ THE HEAD FLOORS, AND THAT IS MEASURED AGAINST PREMIERE ITSELF. It used to ceil, on
+    the reasoning that the containing frame starts before the in-point. Premiere does not
+    agree: it DISPLAYS the frame that contains a fractional in-point, and its own render
+    export of frame 0 matched source frame 57 for an in-point of 57.7318 frames — floor,
+    8 times out of 8, where round matched 3 of 8 and ceil none. Ceiling started every
+    fractional-in-point cut one frame LATER than the frame the editor saw, which on the
+    reviewer's timeline was 7 of 20 clips.
 
     ⚠️ APPLIED TO THE CUT, not inside build_command, and that is the whole reason it is a
     separate pass. The manifest reports source_consumed_frames as the file's label and verify.py
@@ -3851,7 +4014,7 @@ def trim_to_whole_frames(cuts: list[Cut]) -> int:
             continue
         in_f = c.source_in_seconds * fps
         out_f = (c.source_in_seconds + c.source_duration_seconds) * fps
-        first = math.ceil(in_f - e)             # a fractional start moves UP
+        first = math.floor(in_f + e)            # the frame Premiere SHOWS at the in-point
         last = math.floor(out_f + e)            # a fractional end moves DOWN
         n = last - first
         if n < 1:
@@ -4348,8 +4511,14 @@ SHEET_COLUMNS = [
 ]
 
 
-def describe_encode(args) -> str:
-    """One line naming what was actually used, for the manifest and the sheet."""
+def describe_encode(args, cuts=None) -> str:
+    """One line naming what was actually used, for the manifest and the sheet.
+
+    `cuts` is optional only so a caller with nothing but settings can still describe them.
+    ⚠️ Pass it whenever there IS a cut list: --fps only resamples the cuts whose input
+    rate differs from it, and this line used to announce "not frame exact" off the flag
+    alone — flatly contradicting a manifest that now says frame_exact=true.
+    """
     rate = getattr(args, "bitrate", None)
     q = f"bitrate {rate}" if parse_bitrate(rate or "") else f"crf {crf_text(crf_of(args))}"
     vcodec = vcodec_of(args)
@@ -4360,7 +4529,15 @@ def describe_encode(args) -> str:
     if pct < 100.0:
         bits.append(f"scaled to {pct:g}% of source resolution")
     if getattr(args, "fps", None):
-        bits.append(f"RESAMPLED to {float(args.fps):g} fps — not frame exact")
+        rate = f"{float(args.fps):g} fps"
+        n = None if cuts is None else sum(1 for c in cuts if not c.frame_exact)
+        if n is None:
+            bits.append(f"RESAMPLED to {rate} — not frame exact")
+        elif n == 0:
+            bits.append(f"output rate {rate} — already the input rate, nothing resampled")
+        else:
+            bits.append(f"RESAMPLED to {rate} — {n} of {len(cuts)} cut(s) "
+                        f"not frame exact")
     return ", ".join(bits)
 
 
@@ -4385,7 +4562,7 @@ def export_summary(tl: Timeline, args) -> dict:
             "duration_tc": frames_to_tc(tl.sequence_duration_frames, tl.sequence_fps),
         },
         "settings": {
-            "encode": describe_encode(args),
+            "encode": describe_encode(args, tl.cuts),
             # ⚠️ The panel reads this back to decide whether measured sizes still describe
             # the settings on screen. crf and scale_percent were already here; the encoder
             # was not, so switching to x265 left every measured size claiming to describe
@@ -4462,7 +4639,13 @@ def export_summary(tl: Timeline, args) -> dict:
             # ⚠️ Present and non-null means the clips were RESAMPLED and are no longer
             # frame-exact. A dataset built from them is a different dataset.
             "output_fps": (float(args.fps) if getattr(args, "fps", None) else None),
-            "frame_exact": not bool(getattr(args, "fps", None)),
+            # ⚠️ THE AND OVER THE CUTS, not a reading of the flag. This used to be
+            # `not bool(args.fps)`, which never compared a rate to anything: forcing a
+            # rate the media already had marked a byte-identical export as inexact and
+            # made tests/verify.py refuse to grade it. True here means EVERY cut kept its
+            # frames; one resampled cut is enough to make the export a different dataset,
+            # so the per-clip flags below are where the detail lives.
+            "frame_exact": all(c.frame_exact for c in tl.cuts),
             # Percent of each source's own resolution. Unlike output_fps this does NOT
             # touch frame_exact: the cuts still hold exactly the frames the timeline used,
             # at fewer pixels each. Per-clip dimensions are on the clips themselves,
@@ -4841,7 +5024,8 @@ def main():
                     help="force an output frame rate. ⚠️ This RESAMPLES — frames are "
                          "dropped or duplicated — so the clips no longer hold the frames "
                          "the timeline used. Every affected cut is recorded with "
-                         "frame_exact=false.")
+                         "frame_exact=false. A cut whose input is ALREADY at this rate is "
+                         "not touched, and neither are stills, audio cuts or retimed cuts.")
     ap.add_argument("--export-preset", metavar="NAME",
                     help="load saved export settings by name (see --list-presets)")
     ap.add_argument("--save-preset", metavar="NAME",
@@ -5325,8 +5509,14 @@ def main():
 
     for i, c in enumerate(tl.cuts, start=1):
         c.index = i
-        if getattr(args, "fps", None):
-            c.frame_exact = False
+        # PER CUT, and it compares rates rather than reading the flag. --fps 30 on a
+        # 30 fps source emits no -r and keeps every frame.
+        # ⚠️ PROVISIONAL. cut.source_fps is still the XML's DECLARED <rate> here, and
+        # apply_probe() replaces it with ffprobe's further down — so this pass can decide
+        # against a rate the encode will never see. Interpret Footage ("assume this frame
+        # rate") makes Premiere declare a rate that is deliberately not the file's, and
+        # VFR media differs routinely. Recomputed after the probe; see below.
+        c.frame_exact = not forced_rate_resamples(c, args, tl.sequence_fps)
     # Named now, while the list is final — so --manifest-only and the sheet can show the
     # filenames without a single frame being encoded.
     # BEFORE the names and the manifest: both are built from the ranges this may change.
@@ -5401,15 +5591,26 @@ def main():
         print(f"  reversed : {reversed_n} cut(s) play backwards")
     if tl.markers:
         print(f"  markers  : {len(tl.markers)}")
-    print(f"  encode   : {describe_encode(args)}")
+    print(f"  encode   : {describe_encode(args, tl.cuts)}")
     for w in tl.warnings:
         print(f"  !! {w}")
     if getattr(args, "fps", None):
         # Loud, and not buried among the other warnings: this is the one setting that
         # changes what the files CONTAIN rather than how big they are.
-        print(f"\n  !! OUTPUT RESAMPLED to {float(args.fps):g} fps. Frames are dropped or "
-              f"duplicated to hit that rate, so these clips no longer hold the frames the "
-              f"timeline used. Every cut is recorded with frame_exact=false.")
+        # ⚠️ COUNTED, not assumed. It used to say "every cut is recorded with
+        # frame_exact=false" whatever the rates were, which now contradicts the manifest
+        # it is describing — and on a matched rate the warning was pure alarm about an
+        # export that changes nothing.
+        _resampled = [c for c in tl.cuts if not c.frame_exact]
+        if _resampled:
+            print(f"\n  !! OUTPUT RESAMPLED to {float(args.fps):g} fps. Frames are dropped "
+                  f"or duplicated to hit that rate, so {len(_resampled)} of {len(tl.cuts)} "
+                  f"cut(s) no longer hold the frames the timeline used. Those cuts are "
+                  f"recorded with frame_exact=false.")
+        else:
+            print(f"\n  ++ --fps {float(args.fps):g} matches what every cut already reads, "
+                  f"so nothing is resampled and no -r is emitted. The cuts stay frame "
+                  f"exact.")
     for n in merge_notes:
         print(f"  ++ {n}")
 
@@ -5420,12 +5621,26 @@ def main():
         cache: dict = {}
         for c in tl.cuts:
             apply_probe(c, cache)
+        # ⚠️ RE-DECIDED HERE, AND THIS IS THE PASS THAT COUNTS. apply_probe has just
+        # replaced every declared rate with the measured one, and build_command runs later
+        # still — so a flag decided before this point could disagree with the command built
+        # after it about the same cut. Measured: an XML declaring 30 fps for 24 fps media,
+        # exported at --fps 30, was recorded frame_exact=true beside source_fps 24.0 while
+        # the encode emitted `-r 30` and duplicated 12 of 60 frames.
+        for c in tl.cuts:
+            c.frame_exact = not forced_rate_resamples(c, args, tl.sequence_fps)
         # OPT-IN. Encoding a second of every clip is the accurate way to size an export and
         # it is the slow way: on the fixture a scan goes 0.21s -> 0.99s, and on media behind
         # Google Drive it is far worse. The default is estimate_bps(), which reads metadata,
         # costs nothing and lets a slider update live. --size-probe buys accuracy when the
         # export is big enough to be worth a wait.
         if getattr(args, "size_probe", False):
+            if (getattr(args, "render_planned", False)
+                    or getattr(args, "render_dir", None)):
+                # Said out loud rather than silently skipped: a tick that stopped costing
+                # a minute should not look like a tick that stopped working.
+                print("\n  --size-probe has nothing to probe in render mode: the pixels "
+                      "come from Premiere, so sizes are priced from the sequence")
             probe_sizes(tl.cuts, args, tl.sequence_fps)
         # After probing, because the crf estimate scales the SOURCE's own bitrate. The
         # print lives here rather than in the header block above for the same reason —

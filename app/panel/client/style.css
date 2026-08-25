@@ -1087,6 +1087,22 @@ input.num:disabled { color: var(--off); border-color: #1a1f27; }
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    /* Click to open — see paintPath() in main.js. Closed, this box shows about 20 of a
+     * 134-character path at a 320px dock and cannot be selected; the pointer is the only
+     * thing on screen saying that is not all there is. */
+    cursor: pointer;
+}
+
+/* THE OPEN STATE. Neither elision applies here: shortPath() hands over the whole path and
+ * these three declarations let it wrap instead of being cut. They are the same three that
+ * make .pre and .log readable, plus the user-select body switches off globally — a `.path`
+ * never opted back in, which is why even a programmatic selection of #outpath came back
+ * empty. Costs 0px of width: the row grows downwards only while a box is open. */
+.path.open {
+    white-space: pre-wrap;
+    word-break: break-all;
+    -webkit-user-select: text;
+    user-select: text;
 }
 
 /* ------------------------------------------------------------- progress */
@@ -1117,6 +1133,10 @@ input.num:disabled { color: var(--off); border-color: #1a1f27; }
     background: var(--card);
     font-size: var(--fs-small);
 }
+
+/* Each chip explains itself now — see PILL_TIP in main.js. Same cursor as the panel's `?`,
+ * because it is the same affordance: hover for what this word means. */
+.pill[data-tip] { cursor: help; }
 
 .pill.good { border-color: var(--ok); color: var(--ok); }
 .pill.bad { border-color: var(--bad); color: var(--bad); }
@@ -1290,6 +1310,25 @@ code, .log {
     display: flex;
     align-items: baseline;
     gap: 5px;
+    /* ⚠️ THE READOUT DROPS TO ITS OWN LINE RATHER THAN BEING CUT MID-WORD.
+     *
+     * "RESOLUTION  FULL · SOUR" was on screen. The label line is a flex box with
+     * overflow:hidden (.flbl, above) and white-space:nowrap inherited into it; margin-left
+     * on .crfread resolves to 0 once the line overflows, so the readout ran past the label's
+     * right edge and was clipped there — no ellipsis, no wrap, just gone mid-word.
+     *
+     * MEASURED over a 320-900px sweep in headless Chrome, one iframe per width, on the real
+     * index.html and this file: RESOLUTION clipped at 370-460, 540-670 and 710-900 — 45 of
+     * the 59 widths sampled at a 10px step, not the two or three it looked like — and
+     * QUALITY at 370-410. With this one declaration, re-swept at a 5px step (117 widths):
+     * 0 clipped labels and 0px of horizontal overflow anywhere from 320 to 900. It costs at
+     * most 20px of strip height (415->435 at 400px, 318->338 at 720-840) and NOTHING at a
+     * 320px dock, where each field already has the whole width.
+     *
+     * Wrapping rather than shrinking because the readout is the VALUE — "HALF · 1080×1920",
+     * "QUARTER · MIXED SOURCES" — and an ellipsis on a value is the same loss with a mark
+     * over it. */
+    flex-wrap: wrap;
 }
 /* The readout sits at the right end of its own label, so a value and its name are one
    line rather than two things at different heights. */
