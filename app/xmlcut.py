@@ -42,7 +42,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.58"
+VERSION = "3.59"
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -1121,6 +1121,54 @@ def read_timeremap(clip: ET.Element) -> tuple[float, bool, bool, str, list]:
     return (speed or 100.0), reverse, varies, span, others
 
 
+def read_audio_level(node: ET.Element) -> tuple[float, bool]:
+    """The Audio Levels fader Premiere wrote on this clipitem or track, as a LINEAR ratio.
+
+    Returns (level, keyframed). 1.0 — unity, 0 dB — when there is no such filter, which is
+    what an untouched clip looks like, so a timeline nobody rode the faders on is unchanged.
+
+    ⚠️ THIS IS THE MIX, AND NOTHING READ IT UNTIL NOW. `<effectid>audiolevels</effectid>`
+    with `<parameterid>level</parameterid>` is where every fader move on a clip and every
+    track fader ends up in the XML, and _timeline_audio.mp3 summed every part at unity
+    through amix(normalize=0) regardless. MEASURED on 61 real exports (46 of them distinct):
+    436 clipitem levels and 163 track levels are NOT 1.0, spread over 53 files — so on this
+    corpus the un-levelled mix is the normal case, not the corner case. On a controlled
+    fixture whose two tones are normalised to an identical peak (voice mono at 1.0, bed
+    stereo at 0.25) the delivered mp3 put the bed 3.10 dB ABOVE the voice where Premiere has
+    it 12.04 dB below: 15.14 dB of inverted balance.
+
+    Values run either side of unity — the measured corpus holds 0.1408 (-17.0 dB) through
+    3.5398 (+11.0 dB) — so this both attenuates and boosts, and a make-up stage has to
+    expect both.
+
+    A KEYFRAMED fader is reduced to its FIRST key and reported, exactly as read_timeremap
+    does with a speed ramp: following the curve means writing a volume expression per part
+    and getting it subtly wrong is worse than a documented approximation. 6 of the corpus's
+    599 level parameters are keyframed. Note the `<value>` beside the keyframes is NOT the
+    first key (measured: value 1 with keys 0.561226 then 1), so the keys win when present.
+    """
+    for filt in node.findall("filter"):
+        eff = filt.find("effect")
+        if eff is None:
+            continue
+        eid = txt(eff, "effectid").strip().lower()
+        ename = txt(eff, "name").strip().lower().replace(" ", "")
+        if eid != "audiolevels" and ename != "audiolevels":
+            continue
+        for p in eff.findall("parameter"):
+            if txt(p, "parameterid").strip().lower() != "level":
+                continue
+            keys = [num(kf, "value", None) for kf in p.findall("keyframe")]
+            keys = [k for k in keys if k is not None]
+            if keys:
+                return (max(0.0, float(keys[0])),
+                        len({round(abs(k), 6) for k in keys}) > 1)
+            v = num(p, "value", None)
+            if v is not None:
+                return max(0.0, float(v)), False
+    return 1.0, False
+
+
 def human_bytes(n: float) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if abs(n) < 1024 or unit == "GB":
@@ -1259,6 +1307,25 @@ class Cut:
     # something does, the data is already in the manifest.
     ramp_keys: list = field(default_factory=list)
     enabled: bool = True
+    # ⚠️ WHY the clip is off, kept apart from `enabled` itself. The eye/mute toggle on a
+    # whole TRACK is written as <enabled>FALSE</enabled> on the <track> element while every
+    # clipitem inside stays TRUE — a different XML shape from a clip switched off on its
+    # own, and by far the commoner one: on 46 unique real exports the clipitem-level flag
+    # is FALSE exactly zero times, while 6 of them carry a muted track (one an entire
+    # voice-over read, 37 cuts in all). `enabled` is the AND of the two so
+    # the existing --disabled machinery covers both; this records which half said no,
+    # because an editor who muted a layer will not recognise "disabled clips".
+    track_enabled: bool = True
+    # The Premiere Audio Levels fader for this item, as a LINEAR ratio, with the clipitem's
+    # own level and every enclosing track's and nest's multiplied together — which is what
+    # the signal actually passes through on its way to the master. 1.0 is unity / 0 dB.
+    # Read by the timeline-audio mix; see read_audio_level for the measurement.
+    # ffprobe's own reason for not answering about this source, empty when it did answer.
+    # The difference between "the probe said there is no audio" and "the probe never ran"
+    # — see probe(); run_cut refuses to make a claim about the media without it.
+    probe_error: str = ""
+    audio_level: float = 1.0
+    audio_level_varies: bool = False   # the fader is keyframed; this is its first key
     transition_in: str = ""
     transition_out: str = ""
     edge_in_transition: str = ""   # "head", "tail" or "both" — edge reconstructed
@@ -1335,6 +1402,35 @@ class SequenceChoice(Exception):
     """Raised when the XML holds several sequences and none was chosen."""
     def __init__(self, options):
         self.options = options
+
+
+def _mark_audio_level(cuts: list, level: float, varies: bool) -> None:
+    """Multiply an enclosing track's or nest's fader into the cuts underneath it.
+
+    Gains COMPOUND — a clip at 0.5 on a track at 0.5 reaches the master at 0.25 — so this
+    multiplies rather than assigns, and is a no-op at unity, which is what an untouched
+    track looks like.
+    """
+    if not varies and abs(level - 1.0) <= 1e-9:
+        return
+    for c in cuts:
+        c.audio_level = round((c.audio_level or 1.0) * level, 9)
+        c.audio_level_varies = c.audio_level_varies or varies
+
+
+def _mark_track_enabled(cuts: list, track_on: bool) -> None:
+    """Fold a TRACK's eye/mute toggle into the cuts that came off it.
+
+    A no-op on an ordinary track, which is why it is safe to call at every emit site: only
+    a <track> carrying <enabled>FALSE</enabled> reaches the second line. `enabled` is ANDed
+    rather than assigned so a clip switched off inside a track that is on stays off, and a
+    nest on a muted track stays off no matter what its inner tracks said.
+    """
+    if track_on:
+        return
+    for c in cuts:
+        c.track_enabled = False
+        c.enabled = False
 
 
 class Timeline:
@@ -1608,8 +1704,28 @@ class Timeline:
                 self.audio_numbering = "premiere"
             for t_idx, track in enumerate(section.findall("track"), start=1):
                 p_track = lanes[t_idx - 1] if t_idx - 1 < len(lanes) else t_idx
-                transitions = self._collect_transitions(track)
-                edges = self.resolve_transition_edges(track)
+                # ⚠️ THE TRACK'S OWN EYE/MUTE TOGGLE, which nothing here read until now.
+                # Premiere writes it as <enabled>FALSE</enabled> on the <track>; the
+                # clipitems inside stay TRUE, so _parse_clipitem's clipitem-level read
+                # cannot see it. MEASURED on 46 unique real exports: 6 of them carry a
+                # muted track holding 37 clipitems, and NOT ONE clipitem anywhere in that
+                # corpus carries the flag on its own — so the check the code did have has
+                # never once fired on this reviewer's work, and the case that does occur is
+                # the one it could not see. Shipping 3.58 delivered all 37 as
+                # finished-edit material, every row `enabled: true`, `disabled_found: 0`,
+                # completeness "all N cuts on the timeline". One was an entire voice-over
+                # read the editor had switched off. Folded into Cut.enabled rather than
+                # given a flag of its own so --disabled already covers it — and because
+                # this runs at parse time, ahead of the audio_items capture in main(), a
+                # muted VO track also stops reaching _timeline_audio.mp3 and the panel's
+                # VO menu. <enabled> is absent on an ordinary track, so the default TRUE
+                # leaves every timeline without a hidden track byte-identical.
+                track_on = txt(track, "enabled", "TRUE").strip().upper() != "FALSE"
+                # The TRACK fader, which multiplies with every clip's own. 163 of the
+                # measured corpus's track-level Audio Levels filters are not unity.
+                track_level, track_level_kf = read_audio_level(track)
+                transitions = self._collect_transitions(track, self.sequence_fps)
+                edges = self.resolve_transition_edges(track, self.sequence_fps)
                 for clip in track.findall("clipitem"):
                     # A clipitem holds EITHER a <file> or a nested <sequence>. Skipping
                     # the latter silently drops every cut inside the nest — real
@@ -1626,18 +1742,27 @@ class Timeline:
                                                        transitions, edges=edges,
                                                        premiere_track=p_track)
                             if cut:
+                                _mark_track_enabled([cut], track_on)
+                                _mark_audio_level([cut], track_level, track_level_kf)
                                 self.nests_one_cut.append(cut.clip_name)
                                 self.cuts.append(cut)
                             continue
-                        self.cuts.extend(
-                            self._parse_nested(clip, track_type, t_idx,
-                                               depth=1, edges=edges,
-                                               premiere_track=p_track))
+                        # A nest sitting on a muted track is muted whatever its inner
+                        # tracks say, so the parent's flag is applied to everything the
+                        # nest gave back — the inner loop applies the inner tracks' own.
+                        _nested = self._parse_nested(clip, track_type, t_idx,
+                                                     depth=1, edges=edges,
+                                                     premiere_track=p_track)
+                        _mark_track_enabled(_nested, track_on)
+                        _mark_audio_level(_nested, track_level, track_level_kf)
+                        self.cuts.extend(_nested)
                         continue
                     cut = self._parse_clipitem(clip, track_type, t_idx,
                                                transitions, edges=edges,
                                                premiere_track=p_track)
                     if cut:
+                        _mark_track_enabled([cut], track_on)
+                        _mark_audio_level([cut], track_level, track_level_kf)
                         self.cuts.append(cut)
 
         # order by timeline position, video first
@@ -1725,7 +1850,18 @@ class Timeline:
                    round(c.source_in_seconds or 0.0, 6),
                    round(c.source_duration_seconds or 0.0, 6),
                    round(c.speed_percent or 100.0, 6),
-                   bool(c.reversed))
+                   bool(c.reversed),
+                   # ⚠️ ENABLED IS PART OF THE IDENTITY, and its absence deleted the clip
+                   # the editor KEPT. This merge runs at parse time; `--disabled drop` runs
+                   # ~3600 lines later in main(). Stack the same shot on two inner layers of
+                   # a nest and switch the lower one off — an ordinary move, and the engine's
+                   # own _assign_cut_ids notes record 7 such pairs in one real nest — and the
+                   # disabled copy is the one Premiere writes FIRST, so it won the merge and
+                   # the visible take was discarded as "identical". `--disabled drop` then
+                   # removed the survivor. Measured on a fixture: 21 cuts became 20, the
+                   # enabled clip had no manifest row, no file and no warning naming it,
+                   # while both explanatory messages described the switched-off copy.
+                   bool(c.enabled))
             if key in seen:
                 self.merged_duplicates.append({
                     "name": c.clip_name or "(unnamed)",
@@ -1880,7 +2016,7 @@ class Timeline:
         return out
 
     @staticmethod
-    def resolve_transition_edges(track: ET.Element) -> dict:
+    def resolve_transition_edges(track: ET.Element, seq_fps: float = 0.0) -> dict:
         """Timeline bounds for clipitems whose <start>/<end> is -1.
 
         FCP7 writes -1 for a clipitem boundary that an ADJACENT TRANSITION defines. The
@@ -1910,7 +2046,46 @@ class Timeline:
         # whose valid range includes 0.
         def frame(node, field):
             v = num(node, field, -1)
-            return -1 if v is None else int(v)
+            if v is None:
+                return -1
+            # ⚠️ A TRANSITIONITEM'S start/end ARE COUNTED IN ITS OWN <rate>, A CLIPITEM'S
+            # ARE NOT. Premiere takes a transitionitem's rate from the media on either side,
+            # and it interprets a still at 25 fps by default — so a dissolve between stills
+            # on a 30 fps timeline is written at 25 while the clipitems around it are
+            # already in sequence frames. Reading the raw integer as a sequence frame put
+            # every clip whose edge a transition defines at 25/30 of its true position.
+            #
+            # PROVED ON REAL DATA, two ways that leave no room for argument. Reading one
+            # real export's V2 track in document order: an 'Adjustment Layer' clipitem at
+            # 1056-1106, then a rate-30 start-black transition at 1198-1208, then a chain of
+            # PNG stills separated by rate-25 transitions starting at 1013. (a) Positions on
+            # one track are monotonic in document order, and 1198 followed by 1013 is
+            # impossible unless the two are in different units. (b) The unscaled chain
+            # 1013-1164 OVERLAPS the Adjustment Layer in the SAME <track> element, which
+            # Premiere cannot write. Scaled by 30/25 the chain runs 1198->1419: contiguous,
+            # ending exactly on the sequence's last frame, filling the end card that V1 and
+            # V7 both run at 1194-1419, no collision.
+            #
+            # The clipitem half is proved the same way: a rate-25 PNG clipitem with
+            # start=1194 end=1419 sits flush against its rate-30 neighbours, so its numbers
+            # are ALREADY sequence frames and scaling them would be the mirror bug. Hence
+            # the tag guard — it is load-bearing, not defensive.
+            #
+            # MEASURED HERE on 46 unique real exports: 145 of their 1281 transitionitems
+            # declare a rate that is not the sequence's, in 12 of the 46. Diffing the cut
+            # list before and after, 133 cuts move — by up to 260 frames, 8.7 s at 30 fps —
+            # 11 cuts that were dropped entirely come back, and NOTHING is lost. The 11 are
+            # the first clip of each chain: its start came from a correctly-rated
+            # start-black fade and its end from a 25 fps centre dissolve, so the resolved
+            # start landed AFTER the resolved end, the guard below rejected the pair, and
+            # the engine's own warning said "no transition beside it to take one from" —
+            # false, the transition is the immediately preceding sibling. The other 34
+            # exports are byte-identical.
+            if seq_fps > 0 and node.tag == "transitionitem":
+                own = parse_rate(node.find("rate"), seq_fps)
+                if own > 0 and abs(own - seq_fps) > 1e-9:
+                    v = v * seq_fps / own
+            return int(round(v))
 
         kids = [k for k in track if k.tag in ("clipitem", "transitionitem")]
         fixed: dict = {}
@@ -1938,12 +2113,22 @@ class Timeline:
                 fixed[id(node)] = (start, end)
         return fixed
 
-    def _collect_transitions(self, track: ET.Element) -> list[dict]:
+    def _collect_transitions(self, track: ET.Element, seq_fps: float = 0.0) -> list[dict]:
         out = []
         for tr in track.findall("transitionitem"):
+            # ⚠️ THE SAME RATE CONVERSION resolve_transition_edges does, and it is not
+            # optional: these values feed the transition_in / transition_out columns, and
+            # with resolve_transition_edges patched alone two of the real export's stills
+            # lost their labels entirely ('Cross Dissolve' -> ''), because the transition
+            # was no longer found beside the clip's corrected position.
+            _k = 1.0
+            if seq_fps > 0:
+                _own = parse_rate(tr.find("rate"), seq_fps)
+                if _own > 0 and abs(_own - seq_fps) > 1e-9:
+                    _k = seq_fps / _own
             out.append({
-                "start": int(num(tr, "start", 0) or 0),
-                "end": int(num(tr, "end", 0) or 0),
+                "start": int(round((num(tr, "start", 0) or 0) * _k)),
+                "end": int(round((num(tr, "end", 0) or 0) * _k)),
                 "alignment": txt(tr, "alignment"),
                 "name": txt(tr, "effect/name") or txt(tr, "effect/effectid") or "transition",
             })
@@ -2062,9 +2247,34 @@ class Timeline:
                 self._skip(f"a nested sequence with no <{track_type}> section", name)
             return []
 
-        # The visible window inside the nested timeline, in seconds
+        # The visible window inside the nested timeline, in seconds.
+        #
+        # ⚠️ <in>/<out> ON A RETIMED CLIPITEM ARE PRE-REMAP TIMELINE FRAMES, NOT NEST
+        # FRAMES — the same thing the note at the top of this file already records for
+        # file clipitems, and the reason `win_hi = nest_out / clip_fps` dropped the tail of
+        # every sped-up nest. The frames a nest instance actually consumes are
+        # (end - start) * speed/100; on a 140.9% nest the old window was short by exactly
+        # that factor and every inner clip past it was discarded by the `hi - lo <= 1e-9`
+        # test below, in silence.
+        #
+        # MEASURED ON REAL EXPORTS, not reasoned: across 60 real Premiere exports holding
+        # 57 retimed nest instances, `out - in` equals `end - start` on every instance with
+        # real start/end, while (pproTicksOut - pproTicksIn) converted to nest frames equals
+        # (end - start) * speed/100 EXACTLY. Shipping 3.58 left 1,539 parent frames of
+        # finished edit covered by no cut across 26 of those 60 exports — and the set of
+        # exports with a gap was exactly the set with a retimed nest.
+        #
+        # The ticks are preferred over the k_nest arithmetic because Premiere's own <speed>
+        # is a ROUNDED percentage (140.937, 178.808, 43.8356): the ticks are the number it
+        # rounded, so they land on the frame the nest really ends on. `_to > _ti` is the
+        # guard for an export that carries neither.
         win_lo = nest_in / clip_fps
-        win_hi = nest_out / clip_fps
+        win_hi = win_lo + (nest_out - nest_in) / clip_fps * k_nest
+        _ti = num(clip, "pproTicksIn", None)
+        _to = num(clip, "pproTicksOut", None)
+        if _ti is not None and _to is not None and _to > _ti:
+            win_lo = _ti / PPRO_TICKS_PER_SECOND
+            win_hi = _to / PPRO_TICKS_PER_SECOND
         parent_lo_s = nest_start / self.sequence_fps
 
         out: list[Cut] = []
@@ -2078,9 +2288,16 @@ class Timeline:
         # one — so the splitter is right more often than it is wrong here, and narrowing to
         # one track would have discarded the four correct ones along with the two wrong.
         inner_clipitems = 0
+        outside_window = 0
         for track in section.findall("track"):
-            transitions = self._collect_transitions(track)
-            edges = self.resolve_transition_edges(track)
+            # The nest's OWN tracks have the same eye/mute toggle as the parent
+            # sequence's, and an inner layer switched off is just as much material the
+            # editor removed. Applied to everything this track contributes, including a
+            # nest-inside-a-nest.
+            inner_track_on = txt(track, "enabled", "TRUE").strip().upper() != "FALSE"
+            inner_level, inner_level_kf = read_audio_level(track)
+            transitions = self._collect_transitions(track, nest_fps)
+            edges = self.resolve_transition_edges(track, nest_fps)
             for inner in track.findall("clipitem"):
                 inner_clipitems += 1
                 if inner.find("sequence") is not None:
@@ -2089,9 +2306,12 @@ class Timeline:
                     # needs. Not forwarding them is why a nest-inside-a-nest with a
                     # transition on both sides had start = end = -1, could not be
                     # positioned, and was dropped with "no usable timeline position".
-                    out.extend(self._parse_nested(inner, track_type, t_idx, depth + 1,
-                                                  edges=edges,
-                                                  premiere_track=premiere_track))
+                    _deeper = self._parse_nested(inner, track_type, t_idx, depth + 1,
+                                                 edges=edges,
+                                                 premiere_track=premiere_track)
+                    _mark_track_enabled(_deeper, inner_track_on)
+                    _mark_audio_level(_deeper, inner_level, inner_level_kf)
+                    out.extend(_deeper)
                     continue
                 # The nest's inner cuts report the PARENT's track, both the lane ordinal and
                 # the Premiere number — they are placed on the parent's timeline, so the
@@ -2101,11 +2321,20 @@ class Timeline:
                                          premiere_track=premiere_track)
                 if c is None:
                     continue
+                _mark_track_enabled([c], inner_track_on)
+                _mark_audio_level([c], inner_level, inner_level_kf)
 
                 a = c.timeline_in_frames / nest_fps      # inner extent, nest seconds
                 b = c.timeline_out_frames / nest_fps
                 lo, hi = max(a, win_lo), min(b, win_hi)
                 if hi - lo <= 1e-9:
+                    # ⚠️ COUNTED, NOT JUST SKIPPED. Falling outside the window is a real and
+                    # ordinary thing — a nest is usually trimmed — but until this the only
+                    # report was the all-or-nothing advisory below, which fires only when a
+                    # nest yields ZERO cuts. That silence is why a window that was wrong by
+                    # the speed factor deleted 1,539 parent frames of finished edit across
+                    # 26 real exports without anything anywhere saying so.
+                    outside_window += 1
                     continue                             # scrolled out of the window
 
                 head = lo - a
@@ -2145,6 +2374,21 @@ class Timeline:
                 c.speed_varies = c.speed_varies or nest_varies
                 c.nested_from = name
                 out.append(c)
+
+        # The nest clipitem's own fader rides on everything inside it, the same way a
+        # track's does — a nest is a submix, and Premiere lets you pull it down as one.
+        _mark_audio_level(out, *read_audio_level(clip))
+
+        # ⚠️ PER NEST INSTANCE, not only when the whole nest yields nothing. A nest that
+        # gives back SOME cuts and drops others looked identical to a nest that gave back
+        # everything, and that is the exact shape the retimed-window defect wore for years:
+        # 14 cuts came out, two stills did not, and `completeness` still read "all 88 cuts
+        # on the timeline". A future window that is wrong again will at least say so.
+        if out and outside_window:
+            self.warnings.append(
+                f"{name}: {outside_window} of {inner_clipitems} clipitem(s) inside the "
+                f"nest fall outside the window this instance shows "
+                f"({win_lo:.3f}-{win_hi:.3f}s in the nest's own time) and were not cut")
 
         if not out:
             # ⚠️ IN THE NEW TERMS. This used to be able to mean "its shots are on a track
@@ -2364,6 +2608,9 @@ class Timeline:
             edge_in_transition=edge,
             media_kind=kind,
         )
+        # The clip's OWN fader. Enclosing tracks and nests multiply theirs in afterwards,
+        # at the emit sites — see _mark_audio_level.
+        cut.audio_level, cut.audio_level_varies = read_audio_level(clip)
         if varies:
             self.warnings.append(
                 f"{cut.clip_name}: keyframed speed ramp ({span_txt}) treated as a "
@@ -2887,26 +3134,63 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
 # ffprobe / ffmpeg
 # --------------------------------------------------------------------------
 
-def probe(path: str) -> dict:
+# How long one ffprobe may take before it counts as unreadable. A default rather than a
+# constant everywhere: every caller that has an args passes args.timeout, because "media
+# that is slow to reach" is exactly what that flag exists for.
+PROBE_READ_TIMEOUT = 60
+
+
+def probe(path: str, timeout: float = PROBE_READ_TIMEOUT) -> dict:
+    """ffprobe's JSON for this file — or `{"_probe_failed": <reason>}`, never a bare `{}`.
+
+    ⚠️ "ffprobe SAID THERE IS NO AUDIO" AND "ffprobe DID NOT ANSWER" ARE DIFFERENT FACTS, and
+    this function used to return `{}` for both, log nothing, and put nothing in the manifest.
+    The empty result was then read downstream as a statement ABOUT THE MEDIA: run_cut's
+    audio guard saw an empty audio_codec and refused the clip with "source has no audio
+    stream — nothing to extract on an audio track", which is a confident sentence about a
+    file it had never managed to open.
+
+    MEASURED two ways. (1) Truncate a source .m4a to 55% of its bytes — an ordinary
+    partly-downloaded cloud file: ffprobe exits 1 with `moov atom not found` and the run
+    prints `Done: 20 written, 0 failed, … 3 silent source` with every voice-over row blaming
+    the media. The audio is in the file; only the bytes are incomplete. (2) With a shim that
+    fails -show_streams, a control run of `23 written` becomes `19 written … 4 silent
+    source` — four real audio clips lost, nothing anywhere naming ffprobe. The manifest's
+    media columns collapse in the same silence: same clip, control vs shim, codec 'h264'->'',
+    width 640->None, pix_fmt 'yuv420p'->'', bitrate 1096193->None.
+
+    The timeout is the caller's, not a hard-coded 60 s: the whole point of --timeout is media
+    that is slow to reach, and a fixed limit here made that flag a half-measure. The `except`
+    deliberately catches TimeoutExpired and OSError alike — a stall and a fault are both
+    "could not read it", and both must be reported rather than shrugged off.
+    """
     try:
         r = subprocess.run(
             ["ffprobe", "-v", "error", "-print_format", "json",
              "-show_streams", "-show_format", path],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=timeout,
         )
         if r.returncode != 0:
-            return {}
+            tail = [ln for ln in (r.stderr or "").strip().splitlines() if ln.strip()]
+            return {"_probe_failed": (tail[-1][:200] if tail
+                                      else f"ffprobe exited {r.returncode}")}
         return json.loads(r.stdout)
-    except Exception:
-        return {}
+    except Exception as e:                                  # noqa: BLE001 — see docstring
+        return {"_probe_failed": f"{type(e).__name__}: {e}"[:200]}
 
 
-def apply_probe(cut: Cut, cache: dict) -> None:
+def apply_probe(cut: Cut, cache: dict, timeout: float = PROBE_READ_TIMEOUT) -> None:
     if not cut.source_exists:
         return
     if cut.source_path not in cache:
-        cache[cut.source_path] = probe(cut.source_path)
+        cache[cut.source_path] = probe(cut.source_path, timeout)
     data = cache[cut.source_path]
+    # ⚠️ RECORDED ON THE CUT, and nothing else is read out of a failed probe. Leaving the
+    # loop below to iterate an empty dict is how "ffprobe never answered" became "this file
+    # has no audio" — the emptiness was indistinguishable from a real answer.
+    if data.get("_probe_failed"):
+        cut.probe_error = str(data["_probe_failed"])
+        return
     for s in data.get("streams", []):
         if s.get("codec_type") == "video" and not cut.codec:
             cut.codec = s.get("codec_name", "")
@@ -3071,7 +3355,19 @@ def forced_rate_resamples(cut: Cut, args, seq_fps: float) -> bool:
 
 
 def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    # ⚠️ -progress IS THE RECEIPT, and it is on every branch because run_cut had no way to
+    # tell a finished encode from a truncated one. `-frames:v N` is a LIMIT, not a promise:
+    # when the input runs out first ffmpeg writes fewer frames, exits 0 and says NOTHING.
+    # Measured on a 480-frame source: asking for 6 frames one frame before the end exits 0
+    # with stderr exactly 0 bytes and writes 5; asking for 24 frames entirely past the end
+    # exits 0 with stderr exactly 0 bytes and writes a 261-byte mp4 with no video stream at
+    # all. Both were delivered as `OK`, status ok, frame_exact true. `-progress pipe:1`
+    # reports frame=5 and frame=0 for those two, costs no extra process, and does not
+    # depend on the container carrying an nb_frames tag. Nothing else in the tool reads
+    # ffmpeg's stdout, so the channel is free — see the frame check in run_cut.
+    # -nostats keeps the interactive status line off it.
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
+           "-progress", "pipe:1", "-y"]
 
     # RENDER MODE, and it comes first because it replaces everything below rather than
     # adding to it. The input IS this cut's timeline range: Premiere rendered from the
@@ -3090,13 +3386,18 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     # the render already carries is not that case — it emits no -r and keeps the pin.
     if cut.render_path:
         cmd += ["-i", cut.render_path]
-        if forced_rate_resamples(cut, args, seq_fps):
-            cmd += ["-r", f"{float(args.fps):.6f}"]
-        else:
+        # ⚠️ `fps=X`, NOT `-r X` — the same measured mis-mapping the source branch documents
+        # below. MEASURED here too: a 30-frame (1 s) render under --render-dir --fps 24 came
+        # out 26 frames / 1.083 s, 8% long, and reads 24 frames / 1.000 s with the filter.
+        _vf = ([f"fps={float(args.fps):.6f}"]
+               if forced_rate_resamples(cut, args, seq_fps) else [])
+        if not _vf:
             cmd += ["-frames:v", str(max(1, cut.duration_frames))]
         sf = scale_filter(args)
         if sf:
-            cmd += ["-filter:v", sf]
+            _vf.append(sf)
+        if _vf:
+            cmd += ["-filter:v", ",".join(_vf)]
         cmd += [*codec_flags(cut, args), "-movflags", "+faststart", "-an",
                 str(out_path)]
         return cmd
@@ -3129,7 +3430,29 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     ss, t = cut.source_in_seconds, cut.source_duration_seconds
     fps = cut.source_fps or 0
     n_frames = 0
-    if fps > 0:
+    # ⚠️ VIDEO ONLY, AND THAT IS THE WHOLE FIX FOR AUDIO. Everything in this block — the
+    # frame-grid snap and the half-frame lead — exists because a PICTURE stream quantises:
+    # ffmpeg takes the first frame whose PTS is >= the seek time, so aiming half a frame
+    # early lands ON the wanted frame. Audio does not quantise. -ss on an audio stream is
+    # honoured to the sample, so the same lead is not compensation, it is a straight offset,
+    # and the audio branch below then used the mutated `ss` while passing the UNMUTATED
+    # source_duration_seconds as -t — so the head gained material from before the in-point
+    # and the tail lost exactly as much.
+    #
+    # MEASURED with a click train (one click every 0.250000 s), each delivered file against
+    # a control encode with an exact -ss so the AAC priming cancels:
+    #   file rate 25 in a 30 fps sequence, in-point 12.666667 s -> emitted -ss 12.620000,
+    #     first click 0.130021 s vs control 0.083354 s   = +46.667 ms = 1.4 video frames
+    #   file rate 25, in-point on the 25 grid (5.0 s)   -> -ss 4.980000  = +20.000 ms
+    #   file rate 30 == sequence rate, on the grid      -> -ss 3.316667  = +16.667 ms
+    # The best case was half a video frame early; it was never zero. Every one of those rows
+    # published frame_exact true and its exact intended source_in_seconds.
+    #
+    # `fps` here is cut.source_fps, which for an audio-only file is the XML's <file><rate>
+    # (apply_probe only overwrites source_fps from a VIDEO stream), so there was no
+    # configuration in which the offset was absent. n_frames is not read by the audio branch
+    # at all, so nothing else in it changes.
+    if fps > 0 and cut.track_type != "audio":
         # Tolerance is expressed in FRAMES, not seconds — a hair over a frame
         # boundary must floor down, but float noise and any upstream rounding must
         # not. 1e-4 of a frame is far above the noise and far below half a frame,
@@ -3190,8 +3513,32 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         elif cut.reversed:
             # reverse hands on the buffered timestamps; restamp for a clean CFR mux
             vf.append("setpts=N/FRAME_RATE/TB")
-        # LAST in the chain, after select/reverse/setpts. Scaling first would resize every
-        # frame `reverse` buffers, including the ones `select` is about to throw away.
+
+        # ⚠️ THE RESAMPLE IS A FILTER, NOT THE OUTPUT OPTION -r. This is worked out here,
+        # ahead of the scale filter, because `fps=X` has to sit in the chain after
+        # select/reverse/setpts and BEFORE any scale — see the note below the branch.
+        _pin = 0
+        if retime:
+            # --fps applies here too. The frame count is a TIMELINE count at seq_fps, so it
+            # has to be restated in output frames or the clip is truncated the same way the
+            # source branch was.
+            _out = float(getattr(args, "fps", None) or 0.0) or seq_fps
+            _pin = (max(1, int(round(cut.duration_frames * _out / seq_fps)))
+                    if seq_fps > 0 else max(1, cut.duration_frames))
+            vf.append(f"fps={_out:.6f}")
+        else:
+            # A reverse with no retime resampled nothing, so --fps was silently dropped here
+            # as well. `select` counts INPUT frames and runs before the resample, so only the
+            # output pin has to be restated.
+            _out = float(getattr(args, "fps", None) or 0.0)
+            _src = cut.source_fps or 0.0
+            if _out > 0 and _src > 0 and abs(_out - _src) > FPS_EPS:
+                vf.append(f"fps={_out:.6f}")
+                _pin = max(1, int(round(n_frames * _out / _src)))
+            else:
+                _pin = max(1, n_frames)
+        # LAST in the chain, after select/reverse/setpts/fps. Scaling first would resize
+        # every frame `reverse` buffers, including the ones `select` is about to throw away.
         sf = scale_filter(args)
         if sf:
             vf.append(sf)
@@ -3199,25 +3546,7 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         cmd += ["-ss", f"{ss:.6f}", "-t", f"{t:.6f}", "-i", cut.source_path]
         if vf:
             cmd += ["-filter:v", ",".join(vf)]
-        if retime:
-            # --fps applies here too. The frame count is a TIMELINE count at seq_fps, so it
-            # has to be restated in output frames or the clip is truncated the same way the
-            # source branch was.
-            _out = float(getattr(args, "fps", None) or 0.0) or seq_fps
-            _n = (max(1, int(round(cut.duration_frames * _out / seq_fps)))
-                  if seq_fps > 0 else max(1, cut.duration_frames))
-            cmd += ["-r", f"{_out:.6f}", "-frames:v", str(_n)]
-        else:
-            # A reverse with no retime emits no -r, so --fps was silently dropped here as
-            # well. `select` counts INPUT frames and runs before the resample, so only the
-            # output pin has to be restated.
-            _out = float(getattr(args, "fps", None) or 0.0)
-            _src = cut.source_fps or 0.0
-            if _out > 0 and _src > 0 and abs(_out - _src) > FPS_EPS:
-                cmd += ["-r", f"{_out:.6f}",
-                        "-frames:v", str(max(1, int(round(n_frames * _out / _src))))]
-            else:
-                cmd += ["-frames:v", str(max(1, n_frames))]
+        cmd += ["-frames:v", str(_pin)]
 
         cmd += [*codec_flags(cut, args),
                 "-movflags", "+faststart", "-an"]
@@ -3249,15 +3578,42 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
             want = max(1, int(round(n_frames * float(args.fps) / fps)))
         cmd += ["-frames:v", str(want)]
 
-    if resample:
-        cmd += ["-r", f"{float(args.fps):.6f}"]
-
+    # ⚠️ THE RESAMPLE IS A FILTER, NOT THE OUTPUT OPTION -r, AND THAT IS NOT A STYLE CHOICE.
+    # MEASURED on byte-identical inputs with a burned-in frame index, `-r X` resolves the
+    # input-to-output frame mapping differently from `fps=X`: it emits several CONSECUTIVE
+    # source frames at the head and then runs a permanent lag, never reaching the last frames
+    # of the requested range.
+    #
+    #   30 fps source, frames 100..119 at 25% (80 output frames):
+    #       -r 30  -> last delivered frame is 120 — a frame from OUTSIDE the cut
+    #       fps=30 -> last is 119, clean 4-frame groups, the exact range
+    #   30 fps source, frames 120..179 REVERSED at 200% (30 output frames):
+    #       -r 30  -> [179,178,177,176,175,173,171,...,125] — five consecutive frames at the
+    #                 head, and the tail stops 4 source frames early
+    #       fps=30 -> [179,177,175,...,121] — exact, no head stutter
+    #   30 fps source, 20 frames REVERSED at 50% (40 output frames):
+    #       -r 30  -> 39 frames written for a pinned 40. Nothing at all filled the last
+    #                 output slot, so the file is one frame shorter than the timeline hole
+    #                 it has to fill; before the frame check in run_cut this shipped as `ok`
+    #                 with frame_exact true, and it now fails the whole clip instead.
+    #       fps=30 -> 40 frames, [219,219,218,218,...,200,200]
+    #   60 fps source at --fps 30: -r -> last=235 (4 source frames lost); fps= -> last=238.
+    #
+    # The obvious alternative explanations were ruled out by measurement rather than argued
+    # away: making setpts STARTPTS-relative, and removing the half-frame seek lead entirely,
+    # each change the output not at all.
+    #
+    # It goes in the SAME -filter:v as the scale, ahead of it — resampling after a scale
+    # would resize frames that are about to be dropped.
+    _vf = ([f"fps={float(args.fps):.6f}"] if resample else [])
     # Added only when it does something. At 100% this branch had no -filter:v at all and
     # still should not: an identity scale is a full decode-filter-encode pass that changes
     # nothing, and it would silently become the norm for every export.
     sf = scale_filter(args)
     if sf:
-        cmd += ["-filter:v", sf]
+        _vf.append(sf)
+    if _vf:
+        cmd += ["-filter:v", ",".join(_vf)]
 
     cmd += [
         # crf/bitrate/preset come from codec_flags; the PROFILE stays pinned inside it, so
@@ -3313,14 +3669,58 @@ def write_timeline_audio(tl, args) -> dict:
                 "outside_sequence": len(outside)}
     total = frames / fps
     out_path = args.out / "_timeline_audio.mp3"
+
+    # ⚠️ THE CHANNEL COUNT OF EACH PART, because the mono up-mix penalty cannot be fixed
+    # blind. A mono part fed to a stereo mix loses 3 dB to libswresample's power-preserving
+    # rematrix (measured -3.30 dB on a fixture voice) and vo_mix_command corrects it with an
+    # explicit pan — but that same pan on a STEREO part would throw the right channel away,
+    # so the correction is applied only where the probe actually said 1. `probe_channels`
+    # returns None when it could not tell, and None means leave it alone. One ffprobe per
+    # DISTINCT source, not per part: a 90-part voice-over track is three files.
+    _ch: dict = {}
+    for d in parts:
+        if d["path"] not in _ch:
+            _ch[d["path"]] = probe_channels(d["path"])
+        d["channels"] = _ch[d["path"]]
+
+    # ⚠️ GAIN STAGING, MEASURED RATHER THAN GUESSED. amix(normalize=0) sums its inputs, so a
+    # timeline of commercially mastered material runs off the top: MEASURED here, two
+    # sources normalised to -0.2 dBFS (commercial master level) sum to +5.80 dBFS, and the
+    # delivered mp3 read 0.00 dBFS — clipped — because there was nothing between the sum and
+    # the encoder. With the make-up it reads -1.30 dBFS. A first pass to the
+    # null muxer costs a decode and no encode, and tells us the real peak; the second pass
+    # applies exactly enough attenuation to sit at TIMELINE_AUDIO_CEILING_DBFS and records
+    # the number. Attenuation ONLY — a quiet mix is left where the editor put it, because
+    # normalising a mix upward would misrepresent the edit just as badly in the other
+    # direction. When the peak cannot be read the mix is written unchanged, as before.
+    peak_db = mix_peak_dbfs(vo_mix_command(whole, parts, total, Path(os.devnull)),
+                            getattr(args, "timeout", 3600))
+    gain_db = 0.0
+    if peak_db is not None and peak_db > TIMELINE_AUDIO_CEILING_DBFS:
+        gain_db = round(TIMELINE_AUDIO_CEILING_DBFS - peak_db, 3)
     try:
-        r = subprocess.run(vo_mix_command(whole, parts, total, out_path),
+        r = subprocess.run(vo_mix_command(whole, parts, total, out_path, gain_db),
                            capture_output=True, text=True, timeout=args.timeout)
     except (subprocess.TimeoutExpired, OSError) as e:
         return {"note": f"timeline audio failed: {e}"}
     if r.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
         tail = (r.stderr or "").strip().splitlines()
         return {"note": "timeline audio failed: " + (tail[-1][:120] if tail else "no output")}
+    # ⚠️ SAID OUT LOUD WHEN THE MIX IS NOT THE EDIT'S OWN BALANCE. A keyframed fader is
+    # reduced to its first key (read_audio_level), and a mix that had to be pulled down to
+    # stay under full scale is no longer at the level Premiere's master would show. Both are
+    # defensible; neither may be silent, because the whole claim of this file is "what the
+    # timeline sounds like".
+    _kf = sum(1 for d in parts if d.get("gain_varies"))
+    if _kf:
+        note = ((note + "; ") if note else "") + (
+            f"{_kf} part(s) have a KEYFRAMED Audio Level — the first keyframe's value was "
+            f"used for the whole part, so a fade inside those items is not in the mix")
+    if gain_db:
+        note = ((note + "; ") if note else "") + (
+            f"the mix summed to {peak_db:+.2f} dBFS, so {gain_db:+.2f} dB was applied to "
+            f"the whole file to keep it under full scale — levels between items are "
+            f"unchanged, the file is quieter than the edit's master by that amount")
     # ⚠️ WHAT ACTUALLY WENT IN, BY NAME. Before this, `grep -c <a music file's name> manifest.json`
     # returned 0: no artefact anywhere named the material in the mix, which is exactly why
     # "A2 only" shipped a full copy of the background music for a whole release with every
@@ -3333,6 +3733,19 @@ def write_timeline_audio(tl, args) -> dict:
     return {"file": out_path.name, "bytes": out_path.stat().st_size,
             "seconds": round(total, 6), "parts": len(parts), "note": note,
             "sources": sources,
+            # ⚠️ THE FILE'S LEVEL, AS A STATED NUMBER. Before this the manifest reported the
+            # mix as complete and said nothing about what happened to it on the way — a
+            # reader could not tell an un-levelled sum from the edit's own balance, nor a
+            # clipped file from a clean one. levels_applied is the answer to "is this the
+            # mix the editor made"; peak_dbfs and mix_gain_db are the answer to "and at what
+            # level". peak_dbfs is the sum BEFORE the make-up, so it is also the evidence
+            # that the make-up was needed.
+            "levels_applied": True,
+            "levels_keyframed": _kf,
+            "mono_parts_upmixed": sum(1 for d in parts if d.get("channels") == 1),
+            "peak_dbfs": (None if peak_db is None else round(peak_db, 3)),
+            "mix_gain_db": gain_db,
+            "ceiling_dbfs": TIMELINE_AUDIO_CEILING_DBFS,
             "outside_sequence": len(outside)}
 
 
@@ -3356,6 +3769,84 @@ def parse_track_list(raw) -> set[int]:
 
 VO_RATE = 48000
 VO_BITRATE = "192k"
+
+# How close to full scale _timeline_audio.mp3 is allowed to sum. -1.0 dBFS rather than 0.0
+# because an mp3 decoder's reconstruction overshoots the encoded samples slightly, and a mix
+# that measured exactly 0.0 dBFS before encoding comes back over it.
+TIMELINE_AUDIO_CEILING_DBFS = -1.0
+
+_PEAK_LEVEL_RE = re.compile(r"Peak level dB:\s*(-?\d+(?:\.\d+)?|-?inf)")
+
+
+def probe_channels(path: str) -> Optional[int]:
+    """How many channels this file's first audio stream has, or None when it cannot be read.
+
+    None, never a guess: vo_mix_command's mono correction discards a channel if it is applied
+    to a stereo part, so "I could not tell" has to be distinguishable from "one".
+    """
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0",
+                            "-show_entries", "stream=channels", "-of", "csv=p=0", path],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    for line in (r.stdout or "").splitlines():
+        try:
+            return int(line.strip().rstrip(","))
+        except ValueError:
+            continue
+    return None
+
+
+def mix_peak_dbfs(cmd: list[str], timeout: float) -> Optional[float]:
+    """Run a built mix command to the null muxer and return the peak it reaches, in dBFS.
+
+    The command is the REAL one, with its output path swapped for os.devnull, so the number
+    measured is the number the second pass will produce — measuring a rebuilt approximation
+    of the chain is how a gain stage ends up correcting something the encode never did.
+
+    Measured on the SUM before the encode, not on the finished mp3: by then the samples are
+    already clipped and a clipped file reports 0.0 dBFS no matter how far over it went.
+
+    ⚠️ `astats` IN FLOAT, NOT `volumedetect`. volumedetect measures in fixed point and
+    saturates: MEASURED on the two-source fixture at -0.2 dBFS per source it reported
+    max_volume 0.0 dB for a sum that is genuinely +5.80 dB over, so the make-up from it
+    was -1.0 dB and the delivered mp3 still peaked at 0.00 dBFS. `aformat=sample_fmts=fltp`
+    ahead of astats keeps the sum in float, where Peak level dB reads above zero and the
+    make-up lands.
+
+    ⚠️ AND IT GOES INSIDE the filter_complex, not on `-af`. Measured: ffmpeg refuses the pair
+    outright — "Simple and complex filtering cannot be used together for the same stream" —
+    and exits non-zero, which this function would have read as "unmeasurable" and quietly
+    skipped the whole gain stage.
+
+    Returns None when ffmpeg or the parse fails, and None means "write it unchanged".
+    """
+    probe_cmd = list(cmd)
+    try:
+        i = probe_cmd.index("-map")
+        j = probe_cmd.index("-filter_complex")
+    except ValueError:
+        return None
+    # Everything after -map is the encode; replace it with a measurement and no file.
+    probe_cmd = probe_cmd[:i + 2] + ["-f", "null", "-"]
+    probe_cmd[j + 1] = (probe_cmd[j + 1] + ";[out]aformat=sample_fmts=fltp,"
+                        "astats=measure_perchannel=none:"
+                        "measure_overall=Peak_level[det]")
+    probe_cmd[i + 1] = "[det]"
+    probe_cmd[probe_cmd.index("-loglevel") + 1] = "info"
+    try:
+        r = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    m = _PEAK_LEVEL_RE.findall((r.stderr or "") + (r.stdout or ""))
+    if not m or m[-1].endswith("inf"):
+        return None
+    return float(m[-1])
 
 
 def vo_contributions(cut: Cut, items: list[Cut], seq_fps: float) -> tuple[list[dict], str]:
@@ -3395,6 +3886,12 @@ def vo_contributions(cut: Cut, items: list[Cut], seq_fps: float) -> tuple[list[d
             "dur": (end - start) / seq_fps,
             # Where in the OUTPUT it goes. Silence everywhere else, which is the gap.
             "at": (start - c_in) / seq_fps,
+            # ⚠️ THE FADER, carried per part because it is per part. Without it every
+            # contribution was summed at unity through amix(normalize=0) and the mix bore
+            # no relation to the balance the editor set: measured 15.14 dB of INVERTED
+            # balance on a fixture whose voice sits 12 dB above its music bed.
+            "gain": float(a.audio_level or 1.0),
+            "gain_varies": bool(a.audio_level_varies),
         })
     out.sort(key=lambda d: d["at"])
     # ⚠️ DE-DUPLICATED, and this is part of the numbering fix rather than a follow-up.
@@ -3431,7 +3928,8 @@ def vo_contributions(cut: Cut, items: list[Cut], seq_fps: float) -> tuple[list[d
     return out, note
 
 
-def vo_mix_command(cut: Cut, parts: list[dict], total: float, out_path: Path) -> list[str]:
+def vo_mix_command(cut: Cut, parts: list[dict], total: float, out_path: Path,
+                   mix_gain_db: float = 0.0) -> list[str]:
     """One MP3, exactly `total` seconds long, holding every contribution at its own offset.
 
     The base input is SILENCE of the full length, and `amix=duration=first` pins the result to
@@ -3451,11 +3949,43 @@ def vo_mix_command(cut: Cut, parts: list[dict], total: float, out_path: Path) ->
     labels = ["[0:a]"]
     for i, p in enumerate(parts, start=1):
         ms = int(round(p["at"] * 1000))
-        chains.append(f"[{i}:a]aresample={VO_RATE},"
+        # ⚠️ THREE THINGS IN ORDER, and each was measured on a fixture whose two tones are
+        # normalised to an identical peak by construction:
+        #
+        #   volume  — the Premiere fader for this part (see read_audio_level). Without it
+        #             every part summed at unity and the delivered balance was 15.14 dB
+        #             INVERTED against the edit: bed +3.10 dB over voice where Premiere has
+        #             the voice 12.04 dB over the bed.
+        #   pan     — MONO PARTS ONLY, and only when the probe actually said mono.
+        #             libswresample's default mono->stereo rematrix is POWER-preserving, so
+        #             a mono part arrives 3 dB under a stereo one of the same peak; measured
+        #             -3.00 dB on the voice, and the voice is the mono one on every ordinary
+        #             timeline, so the two errors compound in the same direction. An explicit
+        #             copy to both channels restores unity exactly (measured -0.30 dB, which
+        #             is the mp3 alone). NOT applied when the channel count is unknown: on a
+        #             stereo input `c1=c0` would discard the right channel outright, so an
+        #             unreadable probe must leave the signal alone.
+        #   adelay  — unchanged; where in the output this part lands.
+        _g = float(p.get("gain", 1.0) or 0.0)
+        _pre = f"volume={_g:.6f}," if abs(_g - 1.0) > 1e-9 else ""
+        _pan = "pan=stereo|c0=c0|c1=c0," if p.get("channels") == 1 else ""
+        chains.append(f"[{i}:a]{_pre}aresample={VO_RATE},{_pan}"
                       f"adelay=delays={ms}:all=1[v{i}]")
         labels.append(f"[v{i}]")
     chains.append("".join(labels)
                   + f"amix=inputs={len(labels)}:duration=first:normalize=0[out]")
+    # ⚠️ THE MAKE-UP STAGE, which is the difference between a mix that documents its own
+    # level and one whose level is an accident. amix(normalize=0) sums, so with commercially
+    # mastered beds the sum runs off the top: MEASURED at +5.80 dBFS from two sources at
+    # -0.2 dBFS, delivered at 0.00 dBFS — clipped — before this, and -1.30 dBFS after. Every
+    # fixed-point consumer hard-clips that, and clipping is data loss nothing can undo, so
+    # the mp3's own peak cannot be the measurement. `mix_gain_db` is
+    # measured by write_timeline_audio in a first null pass and recorded in
+    # settings.timeline_audio, so the file's level is a stated number rather than whatever
+    # fell out. 0.0 emits nothing at all, which keeps a mix that never needed it byte-identical.
+    _mix_db = float(mix_gain_db or 0.0)
+    _tail = "[out]" if abs(_mix_db) <= 1e-9 else f"[mixed];[mixed]volume={_mix_db:.3f}dB[out]"
+    chains[-1] = chains[-1][:-len("[out]")] + _tail
     cmd += ["-filter_complex", ";".join(chains), "-map", "[out]",
             "-t", f"{total:.6f}",
             "-c:a", "libmp3lame", "-b:a", VO_BITRATE, "-ar", str(VO_RATE), "-ac", "2",
@@ -3463,34 +3993,14 @@ def vo_mix_command(cut: Cut, parts: list[dict], total: float, out_path: Path) ->
     return cmd
 
 
-def audio_sidecar_command(cut: Cut, out_path: Path, seq_fps: float) -> list[str]:
-    """The VOICE of a video cut, as its own file, covering exactly the frames the video holds.
-
-    "có nút xuất voice ra y như track audio, y như video lenght" — the AI Product team, 18 Aug.
-    A sidecar rather than a soundtrack, and that is not a shortcut: build_command pins `-an` on
-    every video exit on purpose, because an AAC track made each container declare a duration one
-    frame longer than its own video stream, and a frame-exact dataset cannot have its own
-    manifest disagree with its files. Muxing the audio back in would undo that.
-
-    ⚠️ NO atempo, EVEN ON A RETIMED CLIP. A retimed cut's video is written at the SOURCE's own
-    speed — a 200% clip comes out twice as long as it looks on the timeline, which is documented
-    everywhere in this tool — so re-timing the audio would make the pair disagree. Same source
-    range, same length, both untouched.
-    """
-    fps = cut.source_fps or seq_fps or 25.0
-    n_frames = max(1, cut.source_consumed_frames
-                   or consumed_frames(cut.source_in_seconds,
-                                      cut.source_duration_seconds, fps))
-    # The same half-frame-early seek the video uses, so both files start on the same frame.
-    ss = max(0.0, (cut.source_in_seconds - 0.5 / fps))
-    # Length from the FRAME COUNT the video will hold, not from the clip's own duration
-    # field: those differ by a rounding on roughly half of real clips, and "y như video
-    # lenght" is the requirement.
-    t = n_frames / fps
-    return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-ss", f"{ss:.6f}", "-t", f"{t:.6f}", "-i", cut.source_path,
-            "-vn", "-map", "0:a:0",
-            "-c:a", "aac", "-b:a", "192k", str(out_path)]
+# ⚠️ audio_sidecar_command WAS DELETED HERE, not fixed. It built a per-cut voice file with
+# `ss = cut.source_in_seconds - 0.5 / fps` — the video branch's half-frame lead, on an audio
+# stream that is seeked to the SAMPLE, so it carried the identical straight offset the audio
+# branch of build_command just lost (see the note there: measured 16.7-46.7 ms, never zero).
+# It had NO CALL SITE anywhere in the engine, the panel or the tests, so leaving a corrected
+# copy in place would only preserve a template of the defect for the next person to copy.
+# The two live audio paths are build_command's audio branch and vo_mix_command, and both
+# now seek exactly.
 
 
 PROBE_SECONDS = 1.0
@@ -4031,6 +4541,20 @@ def trim_to_whole_frames(cuts: list[Cut]) -> int:
     return n_touched
 
 
+_INDEX_PREFIX_RE = re.compile(r"^\d+_(.*)$")
+
+
+def index_free(name: str) -> str:
+    """A filename with the numbering prefix assign_output_names hands out taken off.
+
+    `03_(05.71-07.71)_CAM_A.mp4` -> `(05.71-07.71)_CAM_A.mp4`. The index comes from an
+    enumerate() over the PICKED set, so it moves whenever a tick moves; everything after it
+    is decided by the cut and the settings, which is exactly what --resume has to compare.
+    """
+    m = _INDEX_PREFIX_RE.match(name)
+    return m.group(1) if m else name
+
+
 def build_resume_index(out_dir: Path) -> dict:
     """What the output folder ALREADY holds, keyed by something that does not renumber.
 
@@ -4051,25 +4575,40 @@ def build_resume_index(out_dir: Path) -> dict:
       suffix twice. So a suffix seen more than once is recorded as ambiguous and skips
       NOTHING — re-encoding a clip costs seconds, skipping the wrong one is silent bad data.
     """
-    ids: set[str] = set()
+    ids: dict[str, str] = {}
     suffix_count: dict[str, int] = {}
+    # The one file that wears each index-free name, for the unambiguous case. Parallel to
+    # `ids` and for the same reason: a skip has to be able to adopt the name that satisfied
+    # it, and on a folder written before cut_id existed the filename is all there is.
+    suffix_name: dict[str, str] = {}
     how = "nothing"
+    settings: dict = {}
     try:
         names = [p for p in out_dir.iterdir() if p.is_file()]
     except OSError:
-        return {"ids": ids, "suffix": {}, "how": "unreadable", "files": 0}
+        return {"ids": ids, "suffix": {}, "suffix_name": {}, "how": "unreadable",
+                "files": 0, "settings": settings}
 
     mf = out_dir / "manifest.json"
     if mf.exists():
         try:
             data = json.loads(mf.read_text(encoding="utf-8"))
+            settings = data.get("settings") or {}
             for c in (data.get("clips") or []):
                 cid, out = str(c.get("cut_id") or ""), str(c.get("output_file") or "")
                 if not cid or not out:
                     continue
+                # ⚠️ THE NAME, NOT JUST THE ID — because cut_id is a digest of the SOURCE
+                # cut and carries nothing about the deliverable. Change --container (or tick
+                # whole frames, which moves the (in-out) seconds in the stem) and this run's
+                # filename differs from the one that id was earned under, while the id is
+                # unchanged: `--container mov --resume` into a folder of .mp4 reported
+                # `23 already there`, wrote ZERO files, exited 0, and published a manifest
+                # naming 19 .mov files that do not exist while orphaning the 19 .mp4 that do.
+                # run_cut compares the recorded name with the one it is about to write.
                 f = out_dir / out
-                if f.exists() and f.stat().st_size > 0:
-                    ids.add(cid)
+                if f.exists() and f.stat().st_size > 0 and cid not in ids:
+                    ids[cid] = out
             if ids:
                 how = "manifest"
         except (OSError, ValueError):
@@ -4080,12 +4619,56 @@ def build_resume_index(out_dir: Path) -> dict:
             continue
         if f.stat().st_size <= 0:
             continue
-        m = re.match(r"^\d+_(.*)$", f.name)
-        key = m.group(1) if m else f.name
-        suffix_count[key] = suffix_count.get(key, 0) + 1
+        suffix_count[index_free(f.name)] = suffix_count.get(index_free(f.name), 0) + 1
+        suffix_name.setdefault(index_free(f.name), f.name)
     if how == "nothing" and suffix_count:
         how = "filename"
-    return {"ids": ids, "suffix": suffix_count, "how": how, "files": len(suffix_count)}
+    return {"ids": ids, "suffix": suffix_count, "suffix_name": suffix_name, "how": how,
+            "files": len(suffix_count), "settings": settings}
+
+
+# What a run re-encodes rather than skips when the folder was written with them set
+# differently. Deliberately NOT container or whole_frames: those two move the FILENAME, so
+# the recorded-name comparison in run_cut already catches them clip by clip and re-cuts only
+# the rows that actually moved. These eight change the delivered pixels or bytes while
+# leaving every filename identical, which is the half a name comparison cannot see —
+# --scale 50 --resume kept a folder of full-size clips and called them "already there".
+RESUME_DRIFT_FIELDS = ("crf", "bitrate", "vcodec", "x264_preset", "scale_percent",
+                       "output_fps", "speed", "cut_from")
+
+
+def resume_settings_drift(previous: dict, args) -> list[str]:
+    """Which encode settings this run does not share with the folder it is resuming into.
+
+    Reported as a warning and acted on by re-cutting, rather than by refusing the run: the
+    panel lets someone re-export into the same folder at a different crf with the tick on,
+    and a hard stop turns a working flow into a dead end. Silently keeping the old pixels
+    is the one option that is not available.
+    """
+    if not previous:
+        return []
+    now = {
+        "crf": (None if parse_bitrate(getattr(args, "bitrate", None) or "")
+                else crf_of(args)),
+        "bitrate": (getattr(args, "bitrate", None) or None),
+        "vcodec": vcodec_of(args),
+        "x264_preset": getattr(args, "x264_preset", None) or X264_PRESET,
+        "scale_percent": scale_of(args),
+        "output_fps": (float(args.fps) if getattr(args, "fps", None) else None),
+        "speed": getattr(args, "speed", "native"),
+        "cut_from": "render" if getattr(args, "render_dir", None) else "source",
+    }
+    out = []
+    for k in RESUME_DRIFT_FIELDS:
+        if k not in previous:
+            continue                      # a folder written before the field existed
+        was, is_ = previous.get(k), now.get(k)
+        if isinstance(was, (int, float)) and isinstance(is_, (int, float)):
+            if abs(float(was) - float(is_)) > 1e-9:
+                out.append(f"{k} {was} -> {is_}")
+        elif was != is_:
+            out.append(f"{k} {was!r} -> {is_!r}")
+    return out
 
 
 def assign_output_names(cuts: list[Cut], container: str, seq_fps: float) -> None:
@@ -4114,6 +4697,63 @@ def say(line: str) -> None:
     """Print one line atomically from a worker thread."""
     with _SAY_LOCK:
         print(line, flush=True)
+
+
+def pinned_frame_count(cmd: list[str]) -> Optional[int]:
+    """How many frames this command ASKED ffmpeg for, or None when it pinned nothing.
+
+    Read out of the built command rather than off `cut.duration_frames`, and that is the
+    whole point: under --fps the pin is converted to OUTPUT frames (see build_command),
+    under a reverse or a ramp it is the resampled count, and comparing the delivery with
+    the cut's timeline length instead would fail every retimed clip. The command is the
+    only place the two numbers are already reconciled.
+
+    Last occurrence wins — nothing emits two today, but a later branch that overrode the
+    pin would mean the last one is the one ffmpeg obeys.
+    """
+    want = None
+    for i in range(len(cmd) - 1):
+        if cmd[i] == "-frames:v":
+            try:
+                want = int(cmd[i + 1])
+            except (TypeError, ValueError):
+                want = None
+    return want
+
+
+_PROGRESS_FRAME_RE = re.compile(r"^frame=\s*(\d+)\s*$", re.M)
+
+
+def progress_frames(stdout: str) -> Optional[int]:
+    """The frame count ffmpeg's own -progress stream ended on, or None if it said none.
+
+    -progress writes a block of key=value lines every second and one final block, so the
+    LAST frame= is the finished count. None (rather than 0) when there is no frame= at
+    all, because "no evidence" and "zero frames" have to be told apart: an audio-only
+    encode legitimately reports neither, and treating that as zero would fail every audio
+    cut in the export.
+    """
+    m = _PROGRESS_FRAME_RE.findall(stdout or "")
+    return int(m[-1]) if m else None
+
+
+def output_stream_count(path: Path) -> int:
+    """How many media streams the delivered file actually holds.
+
+    Only asked on the branches that pin no frame count, where there is nothing else to
+    contradict a container that muxed a header and no payload. Returns -1 — "could not
+    tell" — when ffprobe itself cannot be run, so an unavailable probe never invents a
+    failure for a file that may be perfectly good.
+    """
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=index",
+                            "-of", "csv=p=0", str(path)],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return -1
+    if r.returncode != 0:
+        return -1
+    return len([ln for ln in (r.stdout or "").splitlines() if ln.strip()])
 
 
 def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
@@ -4154,6 +4794,19 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
     if not cut.source_exists and not cut.render_path:
         cut.status = "missing_source"
         cut.error = f"Source not found: {cut.source_path}"
+        return cut
+    # ⚠️ BEFORE THE no_audio GUARD, AND THAT ORDER IS THE FIX. The guard below reads an
+    # empty audio_codec as proof that the media is silent; it is only proof when the probe
+    # actually answered. When it did not, the honest failure is "I could not read this
+    # source", with ffprobe's own words attached — a clip failed for a stated reason sends
+    # the editor to the file, "silent source" sends them to the camera. MEASURED: with a
+    # truncated .m4a the run went from 3 rows reading "source has no audio stream" to 3
+    # honest failures naming `moov atom not found`; a genuinely silent source (a video-only
+    # stream) still reports `silent source`, so the two cases stay distinguishable.
+    if cut.probe_error and not cut.render_path:
+        cut.status = "failed"
+        cut.error = (f"could not read this source (ffprobe: {cut.probe_error}) — it may "
+                     f"not be fully downloaded")
         return cut
     if (cut.track_type == "audio" and not cut.audio_codec
             and not getattr(args, "no_probe", False)):
@@ -4214,20 +4867,72 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
     # the selection, so the plain existence check matched 1 of 8 on a real folder. The index
     # is keyed by cut_id, with the index-free filename as a fallback for older folders — and
     # an ambiguous fallback key deliberately skips nothing.
-    if getattr(args, "resume", False):
+    # ⚠️ recut_all is the settings-drift verdict from main(): the folder's pixels were
+    # made under different encode settings, so NOTHING in it may be skipped — including
+    # by the bare `out_path.exists()` fallback below, which would otherwise keep every
+    # one of the old files under the new settings' manifest.
+    if getattr(args, "resume", False) and not (
+            getattr(args, "resume_index", None) or {}).get("recut_all"):
         idx = getattr(args, "resume_index", None) or {}
         done = False
-        if cut.cut_id and cut.cut_id in (idx.get("ids") or set()):
+        # ⚠️ THE ID IS NOT ENOUGH ON ITS OWN. cut_id is a digest of the SOURCE cut — name,
+        # track, timeline in/out, source path and range, speed, reverse — and holds nothing
+        # about the deliverable. So it matches across a change of --container or a tick of
+        # whole frames, both of which rename the file: the id said "already there" about a
+        # file that had never existed and never would. Measured: `--container mov --resume`
+        # into a folder of .mp4 printed `23 already there`, wrote ZERO files, exited 0, and
+        # published a manifest naming 19 .mov that are not in the folder while orphaning the
+        # 19 .mp4 that are.
+        #
+        # ⚠️ AND IT IS THE RECORDED NAME THAT MUST MATCH, NOT `out_path.exists()`. The index
+        # exists because the numbering prefix moves with the selection (it matched 1 of 8 on
+        # a real folder), so comparing INDEX-FREE names keeps the renumbering case working
+        # while still catching a deliverable that moved. Requiring this run's numbered file
+        # to exist instead re-breaks renumbering — measured, it fails the suite's own
+        # "skips what run 1 already wrote, despite every index shifting" check.
+        _recorded = (idx.get("ids") or {}).get(cut.cut_id or "")
+        if _recorded and index_free(_recorded) == index_free(out_path.name):
             done = True
         elif out_path.exists() and out_path.stat().st_size > 0:
             done = True
-        else:
-            m = re.match(r"^\d+_(.*)$", out_path.name)
-            key = m.group(1) if m else out_path.name
-            if (idx.get("suffix") or {}).get(key) == 1:
+        elif not _recorded:
+            if (idx.get("suffix") or {}).get(index_free(out_path.name)) == 1:
                 done = True
+                # The filename fallback knows exactly which file it matched, because it
+                # only fires when there is exactly one. Adopt that too, or the manifest
+                # names an index this run invented for a file wearing another.
+                _recorded = (idx.get("suffix_name") or {}).get(index_free(out_path.name),
+                                                               "")
         if done:
             cut.status = "skipped_existing"
+            # ⚠️ THE SKIP MUST ADOPT THE NAME THAT SATISFIED IT. cut_id is a digest of the
+            # SOURCE cut and is DESIGNED to survive renumbering — that is the whole point of
+            # build_resume_index — but `cut.output_file` was set by assign_output_names from
+            # THIS run's enumerate() index, which moves whenever a tick moves. So the two
+            # halves of --resume disagreed: the SKIP was keyed on something renumber-proof
+            # and the NAME on something that renumbers, and write_manifest then published
+            # the new, unwritten name.
+            #
+            # MEASURED: a full export of 21 cuts into a folder, then 3 cuts ticked and
+            # exported into the same folder with "skip clips already there" on — a
+            # localStorage-persisted standing tick, so it is on for every export until
+            # unticked. `Done: 0 written, 0 failed, 3 already there`, exit 0, and a
+            # manifest naming 01_/02_/03_ none of which exist while the pixels sat on disk
+            # under 19_/20_/21_. A downstream job iterating manifest["clips"] gets three
+            # dead paths and counts.failed 0. No frames are lost by this — the loss is of
+            # the RECORD — but the record is the deliverable.
+            #
+            # Renaming the file on disk to this run's index would be the other way to make
+            # them agree, and it is the wrong one: it invalidates every earlier manifest
+            # that names it. Adopt the name; never move the file.
+            if _recorded:
+                cut.output_file = _recorded
+                try:
+                    cut.output_bytes = (outdir / _recorded).stat().st_size
+                except OSError:
+                    pass
+            elif out_path.exists():
+                cut.output_bytes = out_path.stat().st_size
             return cut
 
     cmd = build_command(cut, out_path, args, seq_fps)
@@ -4240,10 +4945,63 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
             cut.status = "failed"
             cut.error = "ffmpeg produced an empty file"
         else:
-            cut.status = "ok"
-            # The real number, so the report shows what was written rather than what was
-            # predicted. The estimate is for deciding; this is for checking.
-            cut.output_bytes = out_path.stat().st_size
+            # ⚠️ EXIT 0 IS NOT A DELIVERY. Until this, an encode was accepted on three
+            # facts — rc, the file existing, and size != 0 — and NOTHING counted the
+            # frames in the file it had just written. Two measured cases walked straight
+            # through all three and were reported `OK`, status ok, frame_exact true:
+            #
+            #   * a cut reaching one frame past the end of its media: `-frames:v 6` on a
+            #     480-frame source seeked to 19.791667 s exits 0 with stderr exactly
+            #     0 bytes and writes FIVE frames. Push the in-point fully past the end
+            #     and the delivery is a 261-byte mp4 with no video stream at all —
+            #     `size == 0` passes it, and the manifest certified 30 frames.
+            #   * a source whose bytes are not all readable (a partly-synced cloud file,
+            #     a network volume that hiccuped, an interrupted copy): ffmpeg prints
+            #     `partial file` / `Decoding error` on STDERR and still exits 0. Measured
+            #     end to end on a truncated source: one clip 0 frames of 36, another 46
+            #     of 48, `Done: 19 written, 0 failed`.
+            #
+            # So the count is authoritative wherever a count was pinned, and ffmpeg's own
+            # words are the fallback where none was (the audio branch, the still branch,
+            # and a render under a forced rate, all of which deliberately emit no
+            # -frames:v). Deliberately NOT the other way round: at -loglevel error a full
+            # --tracks all --audio export was measured at 0 bytes of stderr on 24 of 24
+            # invocations, but that is fixture media — a benign error-level line on real
+            # media must not be able to reject a clip the frame count says is complete.
+            #
+            # `failed`, not a status of its own: counts.ok and counts.failed are the only
+            # two tallies the report has, so a third status would land in neither and read
+            # as "0 failed" — the very shape of silence this check exists to end.
+            #
+            # The unpinned branches get a THIRD test as well, and it is not redundant with
+            # the other two: truncate a source .m4a and ffmpeg exits 0, writes 0 bytes of
+            # stderr at -loglevel error, and delivers a 257-byte container holding NO
+            # streams at all — `size == 0` passes it and there is no frame count to
+            # contradict it. `-loglevel warning` would have said "Output file is empty,
+            # nothing was encoded"; one ffprobe (~30 ms, and only on the branches with no
+            # pin) asks the file instead of asking the log level.
+            want = pinned_frame_count(cmd)
+            got = progress_frames(r.stdout)
+            err = (r.stderr or "").strip()
+            counted = want is not None and got is not None
+            if counted and got != want:
+                cut.status = "failed"
+                cut.error = (f"ffmpeg exited 0 but wrote {got} frame(s) where {want} "
+                             f"were asked for ({got - want:+d}) — the source is shorter "
+                             f"than the cut, or its bytes are not all readable")
+            elif not counted and err:
+                cut.status = "failed"
+                cut.error = ("ffmpeg exited 0 but reported: "
+                             + err.splitlines()[-1][:300])
+            elif not counted and output_stream_count(out_path) == 0:
+                cut.status = "failed"
+                cut.error = ("ffmpeg exited 0 but the file holds no media streams — "
+                             "nothing was encoded")
+            else:
+                cut.status = "ok"
+                # The real number, so the report shows what was written rather than what
+                # was predicted. The estimate is for deciding; this is for checking.
+                cut.output_bytes = out_path.stat().st_size
     except subprocess.TimeoutExpired:
         cut.status = "failed"
         cut.error = f"ffmpeg timed out after {args.timeout}s"
@@ -4598,6 +5356,12 @@ def export_summary(tl: Timeline, args) -> dict:
             "disabled": str(getattr(args, "disabled", "drop")),
             "disabled_found": int(getattr(args, "disabled_found", 0) or 0),
             "disabled_dropped": int(getattr(args, "disabled_dropped", 0) or 0),
+            # Split by cause: a clipitem switched off on its own vs a whole track parked
+            # with the eye or the mute. Two different gestures, and a machine reader that
+            # sees only the total cannot tell "the editor rejected three takes" from "the
+            # editor muted the alternate voice-over".
+            "disabled_off_clip": int(getattr(args, "disabled_off_clip", 0) or 0),
+            "disabled_off_track": int(getattr(args, "disabled_off_track", 0) or 0),
             "transitions": str(getattr(args, "transitions", "ignore")),
             "transitions_split": int(getattr(args, "transitions_split", 0) or 0),
             # How much of this folder is duplicated between neighbouring clips. Zero under
@@ -4688,6 +5452,17 @@ def export_summary(tl: Timeline, args) -> dict:
             "unsupported": sum(1 for c in tl.cuts if c.media_kind == "unsupported"),
             "ok": sum(1 for c in tl.cuts if c.status == "ok"),
             "failed": sum(1 for c in tl.cuts if c.status == "failed"),
+            # ⚠️ TWO STATUSES THAT WERE IN NO TALLY AT ALL. run_cut refuses a render-mode cut
+            # with "no_render" (Premiere never produced the range) or "render_mismatch" (the
+            # render is not the range it claims); counts.failed counts only status ==
+            # "failed", so a machine reader saw {cuts: 19, ok: 15, failed: 0} over a folder
+            # holding 15 files and had nothing to subtract. Named separately rather than
+            # folded into `failed` because the two want different actions from the reader.
+            "no_render": sum(1 for c in tl.cuts if c.status == "no_render"),
+            "render_mismatch": sum(1 for c in tl.cuts
+                                   if c.status == "render_mismatch"),
+            "skipped_existing": sum(1 for c in tl.cuts
+                                    if c.status == "skipped_existing"),
         },
     }
     # Carried IN the summary so every front end reads the same sentence. The panel's report
@@ -4705,15 +5480,25 @@ def completeness(s: dict) -> str:
     """
     n, st = s["counts"], s["settings"]
     total, kept = n["cuts_on_timeline"], n["cuts"]
-    if kept >= total:
-        return f"all {total} cuts on the timeline"
+    # ⚠️ AND WHETHER THE FOLDER ACTUALLY HOLDS THEM. Everything above this line is a property
+    # of the cut LIST — it says which clips were selected, not which ones arrived. MEASURED
+    # in render mode: 19 planned ranges, three never rendered and one built at the wrong
+    # length, 15 files on disk, and this sentence read "all 19 cuts on the timeline" beside
+    # `Done: 15 written, 0 failed`, exit 0. The existing wording is kept intact — other
+    # checks read it — and the delivery is appended to it.
+    made = (n.get("ok", 0) or 0) + (n.get("skipped_existing", 0) or 0)
+    short = ""
+    if made and made < kept:
+        short = f" — {made} of {kept} produced a file"
     why = []
     if st["types_kept"]:
         why.append("limited to source types " + ", ".join(st["types_kept"]))
     if st["picked_from"]:
         why.append("clips chosen by hand (" + Path(st["picked_from"]).name + ")")
+    if kept >= total:
+        return f"all {total} cuts on the timeline" + short
     return (f"{kept} of {total} cuts on the timeline"
-            + (" — " + "; ".join(why) if why else ""))
+            + (" — " + "; ".join(why) if why else "") + short)
 
 
 def sheet_header_rows(tl: Timeline, args) -> list:
@@ -5295,6 +6080,14 @@ def main():
     # wearing different clothes.
     _off = [c for c in tl.cuts if not c.enabled]
     args.disabled_found = len(_off)
+    # ⚠️ THE TWO CAUSES COUNTED SEPARATELY, because they are different editing gestures and
+    # only one of them is called "disabled" in the UI. A clip switched off on its own is
+    # <enabled>FALSE</enabled> on the clipitem; a whole layer parked with the eye or the
+    # mute is <enabled>FALSE</enabled> on the <track>. On the reviewer's real exports the
+    # first has never once occurred and the second occurs in 6 of them, so a message that
+    # only said "disabled clips" would describe the case that does not happen.
+    args.disabled_off_track = sum(1 for c in _off if not c.track_enabled)
+    args.disabled_off_clip = args.disabled_found - args.disabled_off_track
     args.disabled_dropped = 0
     if _off and getattr(args, "disabled", "drop") == "drop":
         tl.cuts = [c for c in tl.cuts if c.enabled]
@@ -5577,10 +6370,16 @@ def main():
     print(f"  cuts     : {len(tl.cuts)}  across {len({c.source_path for c in tl.cuts})} source files")
     if getattr(args, "disabled_found", 0):
         _n = args.disabled_found
-        print(f"  disabled : {_n} clip(s) switched off on the timeline "
-              + (f"were NOT cut (they are not part of the finished edit — "
+        _bits = []
+        if getattr(args, "disabled_off_clip", 0):
+            _bits.append(f"{args.disabled_off_clip} switched off individually")
+        if getattr(args, "disabled_off_track", 0):
+            _bits.append(f"{args.disabled_off_track} on tracks switched off")
+        print(f"  disabled : {_n} clip(s) switched off on the timeline"
+              + (f" ({', '.join(_bits)})" if len(_bits) > 1 else "")
+              + (f" were NOT cut (they are not part of the finished edit — "
                  f"--disabled keep to include them)" if args.disabled_dropped
-                 else f"were CUT ANYWAY, because --disabled keep was given"))
+                 else f" were CUT ANYWAY, because --disabled keep was given"))
     nested = sum(1 for c in tl.cuts if c.nested_from)
     if nested:
         names = sorted({c.nested_from for c in tl.cuts if c.nested_from})
@@ -5620,7 +6419,21 @@ def main():
     if not args.no_probe:
         cache: dict = {}
         for c in tl.cuts:
-            apply_probe(c, cache)
+            apply_probe(c, cache, getattr(args, "timeout", PROBE_READ_TIMEOUT))
+        # ⚠️ SAID ONCE, AT THE TOP, the way the --resume and ramp lines already are. A probe
+        # failure is not a property of one clip — it is a property of a SOURCE FILE, so it
+        # hits every cut that reads that file at once, and on a cloud-backed share it can hit
+        # every cut in the run. Without this line the only trace was a per-clip error the
+        # reader meets one at a time, after the export has already spent its time.
+        _unread = sorted({Path(c.source_path).name or c.source_path
+                          for c in tl.cuts if c.probe_error})
+        if _unread:
+            _why = next(c.probe_error for c in tl.cuts if c.probe_error)
+            tl.warnings.append(
+                f"{len(_unread)} source file(s) could not be read by ffprobe ({_why}) — "
+                f"their media columns and size estimates are blank and every cut from them "
+                f"is refused: " + ", ".join(_unread[:4])
+                + (", …" if len(_unread) > 4 else ""))
         # ⚠️ RE-DECIDED HERE, AND THIS IS THE PASS THAT COUNTS. apply_probe has just
         # replaced every declared rate with the measured one, and build_command runs later
         # still — so a flag decided before this point could disagree with the command built
@@ -5706,8 +6519,28 @@ def main():
     if getattr(args, "resume", False):
         args.resume_index = build_resume_index(args.out)
         _ri = args.resume_index
+        # ⚠️ SETTINGS DRIFT RE-CUTS EVERYTHING, and it is a separate defect from the one the
+        # recorded-name comparison closes. --scale and --vcodec do NOT change any filename,
+        # so a folder exported at 100% and then resumed at --scale 50 matched every id,
+        # matched every name, and kept a folder of full-size clips under a manifest that
+        # says scale_percent 50. Warned rather than refused: the panel lets someone
+        # re-export into the same folder at a different crf with the tick on, and a hard
+        # stop turns a working flow into a dead end. Re-cutting costs seconds; shipping the
+        # old pixels under the new settings' manifest is the outcome that cannot stand.
+        _drift = resume_settings_drift(_ri.get("settings") or {}, args)
+        if _drift:
+            _ri["ids"], _ri["suffix"] = {}, {}
+            _ri["drift"], _ri["recut_all"] = _drift, True
+            tl.warnings.append(
+                "--resume: this folder was written with different encode settings ("
+                + "; ".join(_drift[:4]) + (", …" if len(_drift) > 4 else "")
+                + "), so nothing was skipped — every clip is being re-cut at the "
+                  "settings this run was given")
+            say("  --resume: settings changed since this folder was written ("
+                + "; ".join(_drift[:4]) + (", …" if len(_drift) > 4 else "")
+                + ") — re-cutting everything")
         _amb = sum(1 for v in (_ri.get("suffix") or {}).values() if v > 1)
-        say(f"  --resume: {len(_ri.get('ids') or set())} clip(s) matched by id, "
+        say(f"  --resume: {len(_ri.get('ids') or {})} clip(s) matched by id, "
             f"{_ri.get('files', 0)} file(s) already in the folder"
             + (f", {_amb} filename(s) ambiguous and will be re-cut" if _amb else "")
             + f" (matched by {_ri.get('how')})")
@@ -5741,8 +6574,21 @@ def main():
         for fut in as_completed(futures):
             c = fut.result()
             done += 1
+            # ⚠️ no_render AND render_mismatch WERE IN NO MAP AND NO TOTAL. run_cut refuses
+            # a cut with "no_render" (Premiere never produced the range) or
+            # "render_mismatch" (the render is not the range it claims); neither had an entry
+            # here, so those lines printed a bare `?`, and neither was a term in the Done
+            # line below. MEASURED on 19 planned ranges with three omitted and one built at
+            # the wrong length: `Done: 15 written, 0 failed, 0 missing source, 0 unsupported`,
+            # exit 0, 15 files on disk, completeness "all 19 cuts on the timeline". This
+            # project has shipped that failure twice.
+            #
+            # The panel needs no change for these: main.js parses the flag with
+            # /\[(\d+)\/(\d+)\]\s+(\S+)\s*(.*)$/ and treats anything that is not OK or
+            # HAVE as bad, so NORE and "BAD " both slot in.
             flag = {"ok": "OK ", "dry_run": "DRY", "missing_source": "MISS",
                     "skipped_existing": "HAVE", "no_audio": "SLNT",
+                    "no_render": "NORE", "render_mismatch": "BAD ",
                     "failed": "FAIL", "unsupported": "SKIP"}.get(c.status, "?")
             print(f"  [{done}/{len(tl.cuts)}] {flag} {c.output_file}")
             if c.error:
@@ -5762,7 +6608,12 @@ def main():
     tally = collections.Counter(c.status for c in tl.cuts)
     extra = "".join(
         f", {tally[k]} {label}" for k, label in
-        (("skipped_existing", "already there"), ("no_audio", "silent source"))
+        (("skipped_existing", "already there"), ("no_audio", "silent source"),
+         # Both of these are a clip that was PROMISED and did not arrive. They ride on the
+         # same `extra` mechanism rather than being folded into `failed`, because the two
+         # causes want different actions: re-render the range, or re-render it at the right
+         # length. What they may not do is go unmentioned.
+         ("no_render", "no render"), ("render_mismatch", "render not the range"))
         if tally[k])
     print(f"\nDone: {tally['ok']} written, {tally['failed']} failed, "
           f"{tally['missing_source']} missing source, "

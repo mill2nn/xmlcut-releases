@@ -1,6 +1,6 @@
 {
-  "version": "3.58",
-  "notes": "Landing page: lead with what it does; bring it under the leak gate",
+  "version": "3.59",
+  "notes": "Release 3.58",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

@@ -29,7 +29,7 @@
                "outpath", "pickout", "export", "prog", "barfill", "progtext",
                "cancel", "reveal", "again", "adv", "scriptpath", "openout",
                "pickscript", "cmd", "log", "tip", "ver", "step3",
-               "report", "repsum", "tally", "onlyprob", "repcount", "copyrep",
+               "report", "repsum", "tally", "onlyprob", "repcount", "copyrep", "showdead",
                "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
                "mergebox", "resume", "updbar", "updtext", "updbtn",
@@ -192,6 +192,9 @@
          * STARTS, never when one ends — a flag cleared on the way out can be cleared by the
          * very handler that was supposed to read it. */
         cancelled: false,
+        // Rows that cannot be cut are filtered out of the list; this puts them back for
+        // one session. See the filter in renderClips().
+        showDead: false,
         /* resumeOnce is GONE, not merely unset. It existed to carry the Replace prompt's
          * "Skip" answer into one run, and Skip was removed because --resume matched 1 of
          * the 8 files it claimed to skip. A field left behind at `false` reads as a feature
@@ -653,11 +656,7 @@
             + "gộp hết về A1 nên chọn A2 ra file im lặng."
     ].concat(CL_356);
 
-    var CHANGELOG = {
-        "3.54": CL_354,
-        "3.55": CL_355,
-        "3.56": CL_356,
-        "3.58": [
+    var CL_358 = [
             "⚠️ QUAN TRỌNG — CHỌN FRAME RATE TRÙNG VỚI TIMELINE KHÔNG CÒN LÀM HỎNG CLIP. "
             + "Trước đây chọn 30 fps trên timeline vốn đã 30 fps vẫn ép ffmpeg resample: "
             + "frame đầu bị GHI HAI LẦN và frame cuối bị mất — đo được clip ra "
@@ -698,7 +697,46 @@
             "Ở chế độ render, phần ước tính dung lượng tính theo khung hình của SEQUENCE "
             + "chứ không theo file source nữa — vì cái Premiere render ra là kích thước "
             + "sequence, không phải kích thước file gốc."
-        ].concat(CL_357),
+    ].concat(CL_357);
+
+    var CHANGELOG = {
+        "3.59": [
+            "⚠️ CLIP BỊ CẮT NGẮN HOẶC RỖNG GIỜ BÁO LỖI, KHÔNG CÒN BÁO \"OK\". Nếu một cut "
+            + "chạm quá frame cuối của file gốc, hoặc file gốc có phần byte không đọc được "
+            + "(hay gặp với media trên Google Drive / ổ mạng / bản copy bị đứt), ffmpeg vẫn "
+            + "thoát mã 0 và tool vẫn ghi \"written\" — đo được: file 261 byte KHÔNG có "
+            + "stream nào, mà manifest ghi status ok, frame_exact true. Giờ tool đếm số "
+            + "frame thực sự ghi được và so với số frame đã yêu cầu.",
+            "⚠️ Clip bị TẮT nằm chồng lên clip đang bật không còn xoá mất clip đang bật. "
+            + "Bước gộp trùng lặp trước đây không phân biệt enabled, nên bản tắt (Premiere "
+            + "ghi trước) thắng, rồi bước bỏ clip disable xoá nốt bản còn lại — clip editor "
+            + "giữ biến mất khỏi cả danh sách, manifest lẫn ổ đĩa.",
+            "⚠️ NEST CÓ ĐỔI SPEED giờ cắt đủ phần đuôi. Cửa sổ thời gian của nest được tính "
+            + "từ in/out TRƯỚC khi remap nên phần cuối bị bỏ. Đo trên chính các export thật: "
+            + "57 nest bị ảnh hưởng trong 26/60 file, 1.539 frame nội dung đã dựng không "
+            + "được cắt ra. Tool cũng cảnh báo theo từng nest nếu có clip rơi ra ngoài cửa "
+            + "sổ, thay vì im lặng.",
+            "⚠️ \"Skip clips already there\" không còn báo \"đã có\" cho file chưa từng ghi. "
+            + "Đổi container hoặc tick \"whole frames only\" rồi export lại vào cùng folder: "
+            + "trước đây ra 0 file, thoát mã 0, và manifest kê tên 19 file không hề tồn tại. "
+            + "Nếu setting đổi so với lần trước, tool báo và cắt lại.",
+            "Track bị TẮT trên timeline không còn bị cắt ra như nội dung đã dựng.",
+            "Bản mix _timeline_audio.mp3 giờ tôn trọng gain/level Premiere ghi trong XML và "
+            + "có gain staging — trước đây bỏ hết nên có thể bị clip (vỡ tiếng).",
+            "File audio theo từng cut cắt theo mốc thời gian thật, không bị ép về lưới frame "
+            + "hình rồi lùi thêm nửa frame.",
+            "Render mode: clip không render được hoặc render sai độ dài giờ được tính vào "
+            + "tổng kết — trước đây giao 15/19 clip mà vẫn báo đã ghi 19.",
+            "Nếu panel không ghi được file lựa chọn (pick), export DỪNG và báo rõ, thay vì "
+            + "âm thầm bỏ lựa chọn và cắt TOÀN BỘ clip trên timeline.",
+            "Dòng cut ra từ transition tính theo rate của sequence, không theo rate riêng của "
+            + "transition nữa.",
+            "ffprobe lỗi không còn bị nuốt và hiểu nhầm thành \"file không có tiếng\"."
+        ].concat(CL_358),
+        "3.54": CL_354,
+        "3.55": CL_355,
+        "3.56": CL_356,
+        "3.58": CL_358,
         "3.57": CL_357,
     };
 
@@ -714,6 +752,15 @@
         var seen = null, hadPrior = false;
         try {
             seen = window.localStorage.getItem("xmlcut.seenver");
+            /* ⚠️ ORDER-DEPENDENT, AND IT HOLDS BY EXACTLY ONE STEP. xmlcut.script is a key
+             * the panel writes ITSELF once it locates the engine, so were it written before
+             * this ran, a first-ever install would prove its own prior use and be shown
+             * release notes for a version it never had. Measured write order at boot:
+             * seenver -> script -> export — so this reads script as empty and a fresh
+             * install stays silent. Moving noteVersion() after script discovery, or finding
+             * the engine earlier, breaks it in silence; the fresh-install check in
+             * tests/check_panel.js asserts on BOOT for exactly that reason, and goes red if
+             * hadPrior ever comes back true there. */
             hadPrior = !!(window.localStorage.getItem("xmlcut.out")
                           || window.localStorage.getItem("xmlcut.script"));
         } catch (e) { return; }
@@ -2516,15 +2563,36 @@
             if (np && pid) np.kill(-pid, "SIGTERM");
         } catch (e3) { log("cancel: group SIGTERM failed: " + e3); }
         try { proc.kill(); } catch (e4) {}
-        /* AND A SECOND SHOT. python3 can be inside a blocking wait and ffmpeg can be mid
-         * write; SIGTERM asks and SIGKILL insists. Only if the thing has not gone on its own
-         * — state.proc is nulled by the close handler, so this compares identity rather than
-         * killing whatever happens to be running by then. */
+        /* AND A SECOND SHOT — AT THE GROUP, WHICH IS THE THING THAT HAS TO BE GONE.
+         *
+         * ⚠️ THIS USED TO ASK `state.proc !== proc`, i.e. "is PYTHON still alive", and could
+         * therefore never fire. The engine installs no signal handler, so it dies on the
+         * default SIGTERM at once — measured across four group-SIGTERM runs on 4K media:
+         * rc=-15 after 0.002s, 0.005s, 0.009s and 0.013s, three orders of magnitude inside
+         * this timer — and the close handler nulls state.proc ~1495ms before the callback
+         * runs. Meanwhile 7-8 ffmpeg children were still encoding into the output folder,
+         * and took 1.1s, 2.9s and 3.3s to leave of their own accord. The one process
+         * guaranteed to be gone was the only one the guard asked about, so SIGKILL never
+         * reached the processes that were actually still writing.
+         *
+         * Signal 0 asks whether the group still has MEMBERS without touching them; a group
+         * outlives its leader, so it answers true exactly while an ffmpeg is still running.
+         * The pid came from a spawn of our own moments ago and the group cannot be recycled
+         * while it has members, so -pid still addresses that group and nothing else. */
         setTimeout(function () {
-            if (state.proc !== proc) return;
-            log("cancel: still alive after SIGTERM — SIGKILL");
-            try { if (np && pid) np.kill(-pid, "SIGKILL"); } catch (e5) {}
-            try { proc.kill("SIGKILL"); } catch (e6) {}
+            if (!np || !pid) {
+                // No group kill on this runtime: the parent handle is the only thing there is
+                // to ask about, so the original identity test stands for that case alone.
+                if (state.proc !== proc) return;
+                try { proc.kill("SIGKILL"); } catch (e5) {}
+                return;
+            }
+            try {
+                np.kill(-pid, 0);
+            } catch (e6) { return; }   // ESRCH — the group is empty, there is nothing left to insist to
+            log("cancel: the encode group is still alive after SIGTERM — SIGKILL");
+            try { np.kill(-pid, "SIGKILL"); } catch (e7) {}
+            try { proc.kill("SIGKILL"); } catch (e8) {}
         }, 1500);
     }
 
@@ -2806,6 +2874,24 @@
         var retry = state.retryKeys.slice();
         state.retryKeys = [];          // consumed here, so it cannot narrow the next run
         var pickPath = writePickFile(workDir(), retry);
+        /* FAIL CLOSED. An export that cannot honour the selection must not start.
+         *
+         * Dropping --pick does not degrade the promise the panel makes, it INVERTS it: the
+         * engine cuts every clip on the timeline, the three the editor deliberately unticked
+         * land in the folder, and every index prefix after them shifts (01..19 where the
+         * ticked set would have given 01..16). The same line governs Retry, so "retry the 3
+         * that failed" silently became "re-encode all 19". Nothing about the finished run
+         * says so — the rail reports success and only the Advanced log holds the reason. */
+        if (pickPath === null) {
+            show(el.prog, false);
+            setRunning(false);
+            setBusy(false);
+            fail("The selection could not be written to " + workDir()
+                + ", so this export would have cut every clip instead of the "
+                + (retry.length || pickedClips().length) + " you ticked."
+                + "\nNothing was started. The reason is in the log, under the gear.");
+            return;
+        }
         if (pickPath) {
             args.push("--pick", pickPath);
             log("selection: " + (retry.length || pickedClips().length)
@@ -2934,10 +3020,27 @@
              * names the way forward, because the folder now holds an incomplete set and the
              * next export has to be told what to do about it. */
             if (state.cancelled) {
-                // Skip is gone, so this no longer names it. Exporting again offers Replace,
-                // which rewrites the names it reproduces — including the ones already there.
-                say("renders", "warn", "Stopped. The clips already written are in the folder; "
-                    + "exporting again rewrites them along with the rest.");
+                /* ⚠️ WHICH SENTENCE DEPENDS ON THE TICK, because only one of them is true.
+                 *
+                 * "exporting again rewrites them" was said unconditionally, and it is false
+                 * whenever `skip clips already there` is on — that tick is a STANDING
+                 * preference restored from localStorage, so it is set-and-forget, and it puts
+                 * --resume on the next command line. Measured engine-side: after a cancelled
+                 * run, --resume reported "9 already there" and rewrote nothing. It also
+                 * suppresses the overwrite warning (see the `already` count in startExport),
+                 * so the panel's one sentence about the way forward described the opposite of
+                 * what the next export would do, with nothing else on screen to contradict it.
+                 *
+                 * A stopgap, and worth revisiting: once a half-written clip never wears its
+                 * delivery name, --resume cannot mistake wreckage for a finished file and the
+                 * original sentence is true again in both states. */
+                say("renders", "warn", state.resume
+                    ? "Stopped. Some clips in the folder may be half-written, and "
+                      + "“skip clips already there” is on — so exporting again "
+                      + "KEEPS them instead of re-cutting them. Untick it to cut everything "
+                      + "again."
+                    : "Stopped. The clips already written are in the folder; "
+                      + "exporting again rewrites them along with the rest.");
                 log("run stopped by Cancel (exit " + code + ")");
             }
             cancelLabel();
@@ -3405,8 +3508,16 @@
         try {
             fs.writeFileSync(p, lines.join("\n") + "\n", "utf8");
         } catch (e) {
+            /* ⚠️ null, NOT "". The two answers used to be the same string, and "" is the
+             * legitimate one for "everything is ticked, no --pick needed" — so a write
+             * failure was indistinguishable from no selection and the caller dropped the
+             * flag. Measured on the fixture with writeFileSync throwing EROFS for pick.txt:
+             * 16 of 19 clips ticked, argv tail `--ext mp4,png,mov` and no --pick at all,
+             * 19 mp4 delivered instead of 16, manifest 20 rows, picked_count null, and the
+             * run reported a clean success. The only trace was this log line. The caller
+             * now tells the two apart and refuses to start. */
             log("could not write the selection file: " + e);
-            return "";
+            return null;
         }
         return p;
     }
@@ -3467,6 +3578,26 @@
              * on screen while the argv, the count and the pick file had stopped caring. One
              * definition, one answer. */
             if (typeOn(r) && inRun(r)) visible.push(r);
+        }
+
+        /* ⚠️ A ROW THAT CANNOT BE CUT IS NOT A CUT, AND IT WAS BURYING THE ONES THAT ARE.
+         * On a real nest-heavy timeline the list read "21 of 53 cuttable · 32 cannot be
+         * cut" and those 32 graphics were interleaved with the 21 real clips — every
+         * second row was a dash. The reviewer could not find his own footage in it.
+         * They still have a home: the count on #listnote names them, and #showdead puts
+         * them back for the one question they answer, "where did my clip go?".
+         * ⚠️ COUNTED BEFORE THE FILTER. `counts` below walks `visible`, so filtering
+         * first would report "0 cannot be cut" and lose the only trace of them. */
+        var deadCount = 0;
+        for (var dq = 0; dq < visible.length; dq++) {
+            if (visible[dq].group !== 0) deadCount++;
+        }
+        if (deadCount && !state.showDead) {
+            var live = [];
+            for (var lq = 0; lq < visible.length; lq++) {
+                if (visible[lq].group === 0) live.push(visible[lq]);
+            }
+            visible = live;
         }
 
         // Numbered in TIMELINE order — the order the manifest is already in — because
@@ -3667,10 +3798,20 @@
             if (gk === "ready" || !counts[gk]) continue;
             tallyBits.push(counts[gk] + " " + GROUPS[gi].title);
         }
+        // Hidden rows are still counted here — see the filter above. Without this the
+        // line would say "21 of 21 cuttable" and 32 clips would have vanished in silence.
+        if (deadCount && !state.showDead) tallyBits.push(deadCount + " cannot be cut");
         el.listnote.textContent = ((chosen === cuttable)
-                ? (cuttable + " of " + visible.length + " cuttable")
+                ? (cuttable + " of " + (visible.length + (state.showDead ? 0 : deadCount))
+                   + " cuttable")
                 : (chosen + " of " + cuttable + " ticked"))
             + (tallyBits.length ? " · " + tallyBits.join(" · ") : "");
+        if (el.showdead) {
+            show(el.showdead, deadCount > 0);
+            el.showdead.textContent = state.showDead
+                ? "hide the " + deadCount + " that cannot be cut"
+                : "show the " + deadCount + " that cannot be cut";
+        }
         syncPickAll();
         // The frame-rate caveat counts TICKED clips against their own source rates, so it
         // has to be re-asked whenever the list or the selection changes — not only when a
@@ -5881,6 +6022,16 @@
         renderClips();
         refreshExportEnabled();
     });
+
+    /* Session-only on purpose: it answers one question ("where did my clip go?") and the
+     * answer stops being wanted the moment it is read. Remembering it would quietly
+     * reinstate the clutter on the next timeline, which is the thing being fixed. */
+    if (el.showdead) {
+        el.showdead.addEventListener("click", function () {
+            state.showDead = !state.showDead;
+            renderClips();
+        });
+    }
 
     el.typeall.addEventListener("click", function () {
         var present = presentCuttable();

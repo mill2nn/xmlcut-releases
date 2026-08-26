@@ -300,7 +300,7 @@
             <i class="tickwhy" id="wfwhy" hidden>· nothing to trim in timeline mode</i>
         </label>
         <label class="tick"><input type="checkbox" id="resume">skip clips already there
-            <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. Useful after fixing offline media on a long timeline.">?</span>
+            <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. Useful after fixing offline media on a long timeline — but it counts a file left half-written by a cancelled or crashed run as one that already exists, so those are kept too.">?</span>
         </label>
     </div>
 
@@ -327,6 +327,11 @@
 <section id="opts" class="step" hidden>
     <div class="stephead">Clips
         <span id="listnote" class="listnote"></span>
+        <!-- ⚠️ Rows that CANNOT be cut are not listed. On a nest-heavy timeline they
+             outnumbered the real cuts 32 to 21 and pushed every actual clip off screen.
+             The count stays on #listnote; this reveals them when someone is asking
+             "where did my clip go?", and is hidden when there are none. -->
+        <button id="showdead" class="linkbtn" hidden></button>
     </div>
 
     <!-- ⚠️ THE LABEL CARRIES AN ID so the whole File types block can go in one move. It is
