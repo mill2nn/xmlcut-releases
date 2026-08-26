@@ -582,215 +582,105 @@
         });
     }
 
-    /* WHAT CHANGED, shown once after an update.
-     *
-     * Asked for by the team lead, who updates often and could not tell what he was getting:
-     * "thêm phần changelog vào sau khi mọi người ấn update nhé". It cannot live in the update
-     * RESPONSE — that update is performed by the OLD engine and rendered by the OLD panel, so
-     * neither knows this text exists. It therefore appears on the first launch AFTER the
-     * version changes, which is the first moment the new code is the code running.
-     *
-     * Keyed by the version in xmlcut.py, which readVersion() already reads, so there is no
-     * second place to bump. Vietnamese because the people reading it are the video team. */
+    /* Each release carries the previous one's list forward, so somebody who skips a version
+     * still hears what it changed. ONE LINE PER CHANGE, stating WHAT changed and nothing
+     * else — the owner's instruction: "just the information of the update no need to
+     * explained it". Reasoning, measurements and before/after belong in the commit message,
+     * not on the panel. */
     var CL_354 = [
-            "Nested sequence — ở Timeline render, mỗi nest giờ ra 1 clip. Trước đây nest dùng "
-            + "lại lần thứ 2 bị bỏ qua hoàn toàn nên thiếu cut.",
-            "Track audio giờ đánh số đúng như Premiere. Trước đây panel hiện A1–A7 cho timeline "
-            + "chỉ có 4 track, nên chọn A2 có thể ra tiếng của A1. ⚠️ Lựa chọn audio cũ đã "
-            + "được xoá — chọn lại giúp mình nhé.",
-            "Sau mỗi lần chạy, panel báo rõ track nào thật sự được mix, và báo đỏ nếu khác với "
-            + "track mình đã chọn.",
-            "Clip xuất ra chia 2 folder: raw/ khi cắt từ source, edited/ khi render từ "
-            + "timeline. Không còn trộn 2 lần chạy vào chung 1 folder.",
-            "Folder _renders tự xoá sau khi chạy xong sạch; nếu có clip lỗi thì giữ lại để "
-            + "Retry không phải render lại từ đầu.",
-            "Thêm nút mở folder cạnh Export. Thông báo gom về một chỗ, thanh dưới gọn hơn, và "
-            + "lý do một clip lỗi giờ đọc được thay vì bị cắt mất."
+        "Timeline render: mỗi nested sequence ra 1 clip.",
+        "Track audio đánh số đúng như Premiere. ⚠️ Lựa chọn audio cũ đã xoá — chọn lại nhé.",
+        "Sau khi chạy, panel báo track nào thật sự được mix.",
+        "Clip ra 2 folder: raw/ khi cắt từ source, edited/ khi render từ timeline.",
+        "Folder _renders tự xoá khi chạy sạch, giữ lại nếu có clip lỗi để Retry.",
+        "Thêm nút mở folder cạnh Export."
     ];
-    /* 3.54's list is carried forward rather than retyped: 3.54 went out and was replaced
-     * within the hour, so anyone who lands straight on 3.55 must still be told what 3.54
-     * changed — otherwise the release they skipped is the one nobody hears about. */
-    var CL_355 = CL_354.concat([
-        "Thông báo này giờ có nút × để tắt đi khi đã đọc xong."
-    ]);
-    /* ⚠️ 3.56 leads with a data-loss fix, so it goes FIRST in the list and not last. An audit
-     * measured render mode silently deleting up to 72% of the cuts the scan had shown — 68
-     * rows offered, 19 delivered on one real timeline — because the flag that marks a row as
-     * render-backed was set AFTER the file-type filter that reads it. Anyone who exported in
-     * Timeline render mode on 3.53-3.55 got fewer clips than the panel promised. */
+
+    var CL_355 = ["Thông báo có nút × để tắt."].concat(CL_354);
+
     var CL_356 = [
-            "⚠️ SỬA LỖI MẤT CLIP — quan trọng nhất bản này. Ở Timeline render, panel hiện "
-            + "22 clip nhưng export ra ít hơn (có lần chỉ 6). Nguyên nhân: bộ lọc loại file "
-            + "chạy TRƯỚC khi đánh dấu clip sẽ được render, nên .mov / .png / graphic bị xoá "
-            + "âm thầm. Ai đã export bằng Timeline render ở bản 3.53–3.55 nên chạy lại.",
-            "Ở Timeline render giờ không cần tick loại file nữa — mọi clip trên master track "
-            + "đều được render, kể cả ảnh và graphic không có source.",
-            "Panel kiểm tra sequence đang mở có đúng là sequence đã Read hay không. Không "
-            + "khớp thì báo đỏ, và bấm Export sẽ hỏi lại trước khi chạy.",
-            "Transition: cắt theo đúng in/out của clip trên master track, không cắt ở giữa "
-            + "transition nữa.",
-            "Hai clip giống hệt nhau trong cùng một nested sequence giờ tính là một, nên bỏ "
-            + "tick một cái không còn làm mất cả hai.",
-            "Bấm Cancel là dừng thật; nếu export lại mà trùng tên file thì panel hỏi Replace.",
-            "Clip không có source (nest, title, graphic) giờ cũng có số dung lượng ước lượng."
-        ].concat(CL_355);
-    /* 3.57 leads with the export that did nothing, because that is what he reported and it
-     * is the one that stops work dead. */
+        "⚠️ Sửa lỗi MẤT CLIP ở Timeline render. Ai đã export bằng Timeline render ở bản "
+        + "3.53–3.55 nên chạy lại.",
+        "Timeline render: không cần tick loại file nữa.",
+        "Panel kiểm tra sequence đang mở có đúng sequence đã Read.",
+        "Transition: cắt theo in/out của clip, không cắt giữa transition.",
+        "Hai clip giống hệt nhau trong cùng nested sequence tính là một.",
+        "Cancel dừng thật. Trùng tên file thì hỏi Replace.",
+        "Clip không có source (nest, title, graphic) cũng có ước lượng dung lượng."
+    ].concat(CL_355);
+
     var CL_357 = [
-            "⚠️ SỬA LỖI BẤM EXPORT KHÔNG CHẠY GÌ. Phần kiểm tra sequence gọi vào Premiere; "
-            + "nếu Premiere không trả lời thì cả export đứng im, không báo gì. Giờ chờ 4 giây "
-            + "là chạy tiếp và ghi rõ lý do. Mỗi lần bấm Export đều được ghi vào Log, nên "
-            + "\"bấm mà không thấy gì\" giờ tra được trong Advanced → Log.",
-            "Export giờ TỰ GHI ĐÈ file trùng tên, không hỏi lại nữa. Log ghi lại đã ghi đè "
-            + "bao nhiêu file — lưu ý file nào export này không tạo ra thì vẫn nằm đó, nên "
-            + "một folder có thể lẫn 2 phiên bản của cùng timeline.",
-            "Tick \"skip clips already there\" giờ mới thật sự hoạt động. Trước đây nó so "
-            + "theo tên file có số thứ tự ở đầu, mà số đó đổi mỗi lần chọn khác — đo được: "
-            + "khớp 4/19, giờ khớp 14/19.",
-            "Nếu sửa timeline sau khi đã bấm Read thì panel báo đỏ và hỏi lại trước khi "
-            + "export — vì tên, số và timecode sẽ là của bản edit cũ.",
-            "Clip đã TẮT (disable) trên timeline không còn bị cắt ra nữa.",
-            "Cảnh báo của engine lúc Read giờ hiện lên panel (media offline, footage bị "
-            + "reinterpret, clip Dynamic Link) — trước đây bị bỏ hết.",
-            "Chọn track audio trên timeline không xuất được XML giờ đúng track, trước đây "
-            + "gộp hết về A1 nên chọn A2 ra file im lặng."
+        "⚠️ Sửa lỗi bấm Export không chạy gì. Mỗi lần bấm Export đều ghi vào "
+        + "Advanced → Log.",
+        "Export tự ghi đè file trùng tên.",
+        "Tick \"skip clips already there\" hoạt động đúng.",
+        "Sửa timeline sau khi Read thì panel báo và hỏi lại trước khi export.",
+        "Clip đã tắt (disable) không còn bị cắt ra.",
+        "Cảnh báo lúc Read hiện lên panel: media offline, footage reinterpret, Dynamic Link.",
+        "Chọn track audio ra đúng track."
     ].concat(CL_356);
 
     var CL_358 = [
-            "⚠️ QUAN TRỌNG — CHỌN FRAME RATE TRÙNG VỚI TIMELINE KHÔNG CÒN LÀM HỎNG CLIP. "
-            + "Trước đây chọn 30 fps trên timeline vốn đã 30 fps vẫn ép ffmpeg resample: "
-            + "frame đầu bị GHI HAI LẦN và frame cuối bị mất — đo được clip ra "
-            + "[57, 57, 58 … 84] trong khi timeline dùng 57–85. Với source 24 fps còn nặng "
-            + "hơn: clip bị cắt cụt còn 1.600s thay vì 2.000s, mất gần 20% đuôi mà không "
-            + "báo gì. Giờ rate nào đã trùng thì bỏ qua hẳn, rate nào thật sự khác thì đếm "
-            + "đúng số frame đầu ra.",
-            "Dòng chữ đỏ \"Forcing N fps RESAMPLES\" chỉ hiện khi THẬT SỰ có clip bị "
-            + "resample, và ghi rõ bao nhiêu trên tổng bao nhiêu clip. Trước đây nó hiện với "
-            + "mọi lựa chọn frame rate, kể cả lựa chọn an toàn nhất — và vì frame rate được "
-            + "nhớ trong máy nên mở lại Premiere là nó đỏ tiếp, trông y như panel lưu lịch "
-            + "sử lỗi. Nó cũng chỉ là cảnh báo (vàng), không phải lỗi.",
-            "frame_exact trong manifest giờ tính theo TỪNG clip. Trước đây chỉ cần có chọn "
-            + "frame rate là mọi clip bị đánh dấu sai — kể cả clip audio và ảnh tĩnh vốn "
-            + "không bao giờ đi qua bước resample.",
-            "Tick \"whole frames only\" giờ giữ đúng frame Premiere đang hiện tại điểm in. "
-            + "Trước đây nó nhảy LÊN frame kế tiếp, tức là bỏ mất frame mà editor nhìn thấy "
-            + "— đo trên bản render của chính Premiere: khớp 8/8 với cách mới.",
-            "⚠️ Bấm Export trong lúc panel đang đọc lại danh sách clip thì trước đây KHÔNG "
-            + "CÓ GÌ XẢY RA và cũng không ghi log — nút bị disable nên cú bấm không tới được "
-            + "code. Giờ panel nói rõ đang chờ đọc xong. Bấm Export hai lần liên tiếp cũng "
-            + "không còn chạy hai bản export song song vào cùng một folder nữa.",
-            "Danh sách clip giờ ĐÚNG THỨ TỰ TIMELINE như dòng chữ phía trên vẫn ghi. Trước "
-            + "đây clip đã export bị dồn xuống nhóm \"Written\" ở dưới cùng, nên clip 01 "
-            + "nằm dưới clip 18. Clip đã ghi vẫn có dấu ✓ ngay tại vị trí của nó.",
-            "Bấm vào ô Path là mở ra full đường dẫn, chọn/copy được — trước đây đường dẫn bị "
-            + "cắt cả hai đầu và không bôi đen được.",
-            "Chữ trong phần cài đặt không còn bị cắt ngang (\"FULL · SOUR\").",
-            "Hai chip \"written\" và \"retimed\" giờ có giải thích khi rê chuột vào.",
-            "Bỏ chip \".(none)\" trong phần File types. Nó không phải định dạng file — đó là "
-            + "các clip KHÔNG có file media (nest, title, graphic, adjustment layer). Tick hay "
-            + "bỏ tick nó đều không lọc được gì: ở chế độ render cả hàng chip bị ẩn, ở chế độ "
-            + "source thì engine luôn bỏ qua nó. Trên timeline nhiều nest nó lại là con số lớn "
-            + "nhất trong hàng nên gây hiểu nhầm.",
-            "Update giờ hiện đúng changelog. Trước đây panel đánh dấu \"đã xem\" TRƯỚC khi "
-            + "tìm nội dung, mà lúc update thì code đang chạy vẫn là bản cũ — chưa có changelog "
-            + "của bản mới — nên phần \"có gì mới\" bị mất luôn, khởi động lại cũng không thấy.",
-            "Ở chế độ render, phần ước tính dung lượng tính theo khung hình của SEQUENCE "
-            + "chứ không theo file source nữa — vì cái Premiere render ra là kích thước "
-            + "sequence, không phải kích thước file gốc."
+        "⚠️ Chọn frame rate trùng với timeline không còn làm hỏng clip (frame đầu bị lặp, "
+        + "frame cuối bị mất).",
+        "Dòng đỏ \"Forcing N fps RESAMPLES\" chỉ hiện khi thật sự có clip bị resample.",
+        "frame_exact trong manifest tính theo từng clip.",
+        "⚠️ Bấm Export lúc panel đang đọc lại danh sách: panel báo đang chờ. Bấm hai lần "
+        + "không còn chạy hai export song song.",
+        "Danh sách clip đúng thứ tự timeline.",
+        "Bấm ô Path để xem full đường dẫn, chọn và copy được.",
+        "Chữ trong phần cài đặt không còn bị cắt ngang.",
+        "Chip \"written\" và \"retimed\" có giải thích khi rê chuột.",
+        "Bỏ chip \".(none)\" trong File types.",
+        "Update hiện đúng changelog.",
+        "Render mode: ước lượng dung lượng theo khung hình của sequence."
     ].concat(CL_357);
 
     var CL_359 = [
-            "⚠️ CLIP BỊ CẮT NGẮN HOẶC RỖNG GIỜ BÁO LỖI, KHÔNG CÒN BÁO \"OK\". Nếu một cut "
-            + "chạm quá frame cuối của file gốc, hoặc file gốc có phần byte không đọc được "
-            + "(hay gặp với media trên Google Drive / ổ mạng / bản copy bị đứt), ffmpeg vẫn "
-            + "thoát mã 0 và tool vẫn ghi \"written\" — đo được: file 261 byte KHÔNG có "
-            + "stream nào, mà manifest ghi status ok, frame_exact true. Giờ tool đếm số "
-            + "frame thực sự ghi được và so với số frame đã yêu cầu.",
-            "⚠️ Clip bị TẮT nằm chồng lên clip đang bật không còn xoá mất clip đang bật. "
-            + "Bước gộp trùng lặp trước đây không phân biệt enabled, nên bản tắt (Premiere "
-            + "ghi trước) thắng, rồi bước bỏ clip disable xoá nốt bản còn lại — clip editor "
-            + "giữ biến mất khỏi cả danh sách, manifest lẫn ổ đĩa.",
-            "⚠️ NEST CÓ ĐỔI SPEED giờ cắt đủ phần đuôi. Cửa sổ thời gian của nest được tính "
-            + "từ in/out TRƯỚC khi remap nên phần cuối bị bỏ. Đo trên chính các export thật: "
-            + "57 nest bị ảnh hưởng trong 26/60 file, 1.539 frame nội dung đã dựng không "
-            + "được cắt ra. Tool cũng cảnh báo theo từng nest nếu có clip rơi ra ngoài cửa "
-            + "sổ, thay vì im lặng.",
-            "⚠️ \"Skip clips already there\" không còn báo \"đã có\" cho file chưa từng ghi. "
-            + "Đổi container hoặc tick \"whole frames only\" rồi export lại vào cùng folder: "
-            + "trước đây ra 0 file, thoát mã 0, và manifest kê tên 19 file không hề tồn tại. "
-            + "Nếu setting đổi so với lần trước, tool báo và cắt lại.",
-            "Track bị TẮT trên timeline không còn bị cắt ra như nội dung đã dựng.",
-            "Bản mix _timeline_audio.mp3 giờ tôn trọng gain/level Premiere ghi trong XML và "
-            + "có gain staging — trước đây bỏ hết nên có thể bị clip (vỡ tiếng).",
-            "File audio theo từng cut cắt theo mốc thời gian thật, không bị ép về lưới frame "
-            + "hình rồi lùi thêm nửa frame.",
-            "Render mode: clip không render được hoặc render sai độ dài giờ được tính vào "
-            + "tổng kết — trước đây giao 15/19 clip mà vẫn báo đã ghi 19.",
-            "Nếu panel không ghi được file lựa chọn (pick), export DỪNG và báo rõ, thay vì "
-            + "âm thầm bỏ lựa chọn và cắt TOÀN BỘ clip trên timeline.",
-            "Dòng cut ra từ transition tính theo rate của sequence, không theo rate riêng của "
-            + "transition nữa.",
-            "ffprobe lỗi không còn bị nuốt và hiểu nhầm thành \"file không có tiếng\"."
+        "⚠️ Clip bị cắt ngắn hoặc rỗng giờ báo lỗi, không còn báo OK.",
+        "⚠️ Clip tắt nằm chồng lên clip đang bật không còn xoá mất clip đang bật.",
+        "⚠️ Nest có đổi speed cắt đủ phần đuôi, và cảnh báo nếu có clip rơi ngoài cửa sổ.",
+        "⚠️ \"Skip clips already there\" không còn báo \"đã có\" cho file chưa từng ghi. "
+        + "Setting đổi so với lần trước thì cắt lại.",
+        "Track bị tắt trên timeline không còn bị cắt ra.",
+        "_timeline_audio.mp3 tôn trọng gain/level trong XML và có gain staging.",
+        "File audio theo từng cut cắt theo mốc thời gian thật.",
+        "Render mode: clip không render được hoặc sai độ dài được tính vào tổng kết.",
+        "Không ghi được file pick thì export dừng và báo, không cắt toàn bộ timeline.",
+        "Cut từ transition tính theo rate của sequence.",
+        "ffprobe lỗi không còn bị hiểu thành \"file không có tiếng\"."
     ].concat(CL_358);
 
     var CL_360 = [
-            "⚠️ SỬA LỖI CỦA CHÍNH BẢN 3.59: một số clip ra file chỉ có ĐÚNG 1 FRAME. "
-            + "Bản 3.59 tính lại cửa sổ thời gian của nest theo pproTicks (chính xác dưới "
-            + "mức frame) — nhờ vậy lấy lại được phần đuôi nest bị mất, nhưng chỗ hai lần "
-            + "xuất hiện của cùng một nest giáp nhau lại sinh ra một mẩu vụn dài chưa tới "
-            + "1 frame. Mẩu đó có timeline in = timeline out (dài 0 frame) mà vẫn bị ghi "
-            + "thành file 1 frame nằm cạnh cảnh nó bị gọt ra. Đo trên chính export thật: "
-            + "3.57 và 3.58 cho 52 cut không có mẩu nào, 3.59 cho 56 cut trong đó 2 mẩu "
-            + "0.009s và 0.003s. Giờ cut không chiếm frame nào trên timeline bị bỏ và "
-            + "được báo rõ — clip 1 frame THẬT (timeline dài đúng 1 frame) vẫn giữ nguyên."
+        "⚠️ Sửa lỗi bản 3.59: mẩu vụn dưới 1 frame ở chỗ hai nest giáp nhau bị ghi thành "
+        + "file 1 frame. Clip dài đúng 1 frame thật vẫn giữ nguyên."
     ].concat(CL_359);
 
     var CL_361 = [
-            "⚠️ PANEL GIỜ BÁO FILE CŨ CÒN SÓT TRONG FOLDER. Export ghi đè tự động, NHƯNG "
-            + "chỉ ghi đè khi TRÙNG ĐÚNG TÊN — mà tên file có chứa khoảng in/out của source, "
-            + "nên một bản sửa làm lệch khoảng đó vài phần trăm giây là cùng một cut ra tên "
-            + "MỚI và file cũ vẫn nằm nguyên bên cạnh. Đo trên một timeline thật qua hai "
-            + "bản: bản trước ghi 18 file, bản sau ghi 16, trong đó 14 tên cũ không bao giờ "
-            + "được ghi lại. Folder không xoá sẽ chứa lẫn hai lần export, và \"file số 9\" "
-            + "không còn là file số 9 trong manifest — đúng kiểu lỗi frame báo trên một bản "
-            + "đã sửa rồi. Giờ cuối mỗi lần export tool liệt kê những file KHÔNG phải do lần "
-            + "này ghi ra. Nó chỉ báo, không xoá gì — và file riêng của bạn (không có số thứ "
-            + "tự ở đầu tên) không bị tính vào.",
-            "Thêm nút Copy log trong phần Advanced — bấm một phát copy toàn bộ log kèm số "
-            + "phiên bản, để gửi kèm khi báo lỗi."
+        "⚠️ Cuối mỗi lần export, panel liệt kê file trong folder KHÔNG phải do lần này ghi "
+        + "ra. Chỉ báo, không xoá gì.",
+        "Thêm nút Copy log trong Advanced."
     ].concat(CL_360);
 
+    var CL_362 = [
+        "⚠️ Sửa gốc lỗi lệch 1 frame ở đầu clip: seek giờ đúng bằng PTS của frame. Kiểm lại "
+        + "27 clip trên timeline thật — 0 clip sai.",
+        "⚠️ Bỏ ô tick \"whole frames only\", giờ luôn bật. Frame đầu lẻ làm tròn LÊN, frame "
+        + "cuối lẻ làm tròn XUỐNG.",
+        "Engine vẫn nhận cờ --whole-frames và bỏ qua, để panel bản cũ không bị lỗi."
+    ].concat(CL_361);
+
     var CHANGELOG = {
-        "3.62": [
-            "⚠️ SỬA GỐC LỖI LỆCH 1 FRAME ĐẦU — lỗi này có từ lâu, không phải mới. Engine "
-            + "seek tới NỬA FRAME TRƯỚC frame cần lấy, vì tin rằng ffmpeg sẽ lấy frame đầu "
-            + "tiên có PTS >= mốc seek. ==Điều đó SAI==: với -ss đặt trước -i, ffmpeg trả "
-            + "về frame đang HIỂN THỊ tại mốc đó — mà nửa frame trước thì mốc đó nằm trong "
-            + "frame TRƯỚC. Đo trên source thật (30 fps, PTS chuẩn, frame 320 ở 10.666667 và "
-            + "frame 321 ở 10.700000), xin frame 321: nửa frame trước ra frame 320 (SAI), "
-            + "1/4 frame sau ra 321 (đúng file này nhưng sai file khác), đúng PTS của frame "
-            + "ra 321 (đúng mọi file). Giờ seek đúng bằng PTS của frame, không cộng trừ gì.",
-            "⚠️ Kiểm chứng lại trên chính timeline của anh Tùng: cắt cả 27 clip rồi so từng "
-            + "frame đầu với source. Trước: 3 clip lệch -1 (lấy frame của cảnh trước). Sau: "
-            + "==0/27 clip sai==.",
-            "⚠️ BỎ Ô TICK \"whole frames only\" — giờ LÚC NÀO CŨNG BẬT. Nó chỉ có đúng một "
-            + "lựa chọn đúng: mốc in nằm giữa frame thì frame đó cũng thuộc cảnh trước, nên "
-            + "không cắt gọn là hiện cảnh trước ở đầu clip. Một cái tick mà lựa chọn còn lại "
-            + "luôn sai thì là bẫy, không phải tuỳ chọn.",
-            "Quy tắc làm tròn theo yêu cầu: frame ĐẦU lẻ thì làm tròn LÊN, frame CUỐI lẻ thì "
-            + "làm tròn XUỐNG — cắt vào trong từ cả hai đầu, nên clip không bao giờ chứa "
-            + "frame của cảnh bên cạnh. Mất nhiều nhất 1 frame mỗi đầu.",
-            "Engine vẫn NHẬN cờ --whole-frames và bỏ qua, để panel bản cũ chưa update không "
-            + "bị lỗi khi export."
-        ].concat(CL_361),
+        "3.63": CL_362,
+        "3.62": CL_362,
         "3.61": CL_361,
         "3.60": CL_360,
         "3.59": CL_359,
-        "3.54": CL_354,
-        "3.55": CL_355,
-        "3.56": CL_356,
         "3.58": CL_358,
         "3.57": CL_357,
+        "3.56": CL_356,
+        "3.55": CL_355,
+        "3.54": CL_354
     };
 
     /* Shown when the running version differs from the one last seen here.

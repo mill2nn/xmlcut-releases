@@ -1,6 +1,6 @@
 {
-  "version": "3.62",
-  "notes": "Release 3.61 \u2014 name the files an earlier export left behind, and a Copy log button",
+  "version": "3.63",
+  "notes": "Release 3.62 \u2014 the one-frame-early head, root-caused: the seek offset WAS the bug",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
