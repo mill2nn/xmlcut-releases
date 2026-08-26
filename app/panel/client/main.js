@@ -699,8 +699,7 @@
             + "sequence, không phải kích thước file gốc."
     ].concat(CL_357);
 
-    var CHANGELOG = {
-        "3.59": [
+    var CL_359 = [
             "⚠️ CLIP BỊ CẮT NGẮN HOẶC RỖNG GIỜ BÁO LỖI, KHÔNG CÒN BÁO \"OK\". Nếu một cut "
             + "chạm quá frame cuối của file gốc, hoặc file gốc có phần byte không đọc được "
             + "(hay gặp với media trên Google Drive / ổ mạng / bản copy bị đứt), ffmpeg vẫn "
@@ -732,7 +731,21 @@
             "Dòng cut ra từ transition tính theo rate của sequence, không theo rate riêng của "
             + "transition nữa.",
             "ffprobe lỗi không còn bị nuốt và hiểu nhầm thành \"file không có tiếng\"."
-        ].concat(CL_358),
+    ].concat(CL_358);
+
+    var CHANGELOG = {
+        "3.60": [
+            "⚠️ SỬA LỖI CỦA CHÍNH BẢN 3.59: một số clip ra file chỉ có ĐÚNG 1 FRAME. "
+            + "Bản 3.59 tính lại cửa sổ thời gian của nest theo pproTicks (chính xác dưới "
+            + "mức frame) — nhờ vậy lấy lại được phần đuôi nest bị mất, nhưng chỗ hai lần "
+            + "xuất hiện của cùng một nest giáp nhau lại sinh ra một mẩu vụn dài chưa tới "
+            + "1 frame. Mẩu đó có timeline in = timeline out (dài 0 frame) mà vẫn bị ghi "
+            + "thành file 1 frame nằm cạnh cảnh nó bị gọt ra. Đo trên chính export thật: "
+            + "3.57 và 3.58 cho 52 cut không có mẩu nào, 3.59 cho 56 cut trong đó 2 mẩu "
+            + "0.009s và 0.003s. Giờ cut không chiếm frame nào trên timeline bị bỏ và "
+            + "được báo rõ — clip 1 frame THẬT (timeline dài đúng 1 frame) vẫn giữ nguyên."
+        ].concat(CL_359),
+        "3.59": CL_359,
         "3.54": CL_354,
         "3.55": CL_355,
         "3.56": CL_356,

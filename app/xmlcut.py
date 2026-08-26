@@ -42,7 +42,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.59"
+VERSION = "3.60"
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -1788,10 +1788,40 @@ class Timeline:
                 + " — pass --nest resolve to cut the clips inside them instead")
 
         self.cuts.sort(key=lambda c: (c.timeline_in_frames, c.track_type != "video", c.track_index))
+        self._drop_empty_cuts()
         self._drop_duplicate_cuts()
         self._assign_cut_ids()
         for i, c in enumerate(self.cuts, start=1):
             c.index = i
+
+    def _drop_empty_cuts(self) -> None:
+        """Drop cuts that occupy NO TIME on the timeline.
+
+        ⚠️ REGRESSION GUARD, and it earns its place: 3.59's retimed-nest window is derived
+        from pproTicksIn/pproTicksOut, which are sub-frame precise. A clipitem that grazes
+        the edge of an instance's window by a fraction of a frame then yields a cut whose
+        timeline span rounds to ZERO — and `max(1, ...)` on the frame pin turned each one
+        into a 1-frame file. Measured on a real export: 3.57 and 3.58 gave 52 video cuts
+        with none of these; 3.59 gave 56, of which two were 0.009s and 0.003s slivers
+        delivered as single frames beside the shots they were shaved off.
+
+        FCP7's <end> is EXCLUSIVE, so a genuine one-frame clip has a span of ONE, not zero.
+        The two are cleanly separable and this drops only the degenerate case. Counted and
+        warned rather than discarded quietly — a cut vanishing in silence is the failure
+        mode this whole file is organised against.
+        """
+        empty = [c for c in self.cuts
+                 if (c.timeline_out_frames - c.timeline_in_frames) <= 0]
+        if not empty:
+            return
+        self.cuts = [c for c in self.cuts
+                     if (c.timeline_out_frames - c.timeline_in_frames) > 0]
+        shown = ", ".join(f"{c.clip_name} at {c.timeline_in_frames}" for c in empty[:4])
+        self.warnings.append(
+            f"{len(empty)} cut(s) occupied no time on the timeline and were dropped "
+            f"(a sub-frame sliver where two nest instances meet, which would have been "
+            f"delivered as a 1-frame file): {shown}"
+            + (", …" if len(empty) > 4 else ""))
 
     def _drop_duplicate_cuts(self) -> None:
         """Emit a cut once, not twice, when a second one would be byte-for-byte identical.

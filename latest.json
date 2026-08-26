@@ -1,6 +1,6 @@
 {
-  "version": "3.59",
-  "notes": "Release 3.58",
+  "version": "3.60",
+  "notes": "Release 3.59",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
