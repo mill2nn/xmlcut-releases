@@ -34,7 +34,7 @@
 
      What deliberately did NOT come here is listed in main.js above say(). -->
 <div id="rail" class="rail">
-    <div id="nextline" class="msg next">Open the sequence you want in Premiere, then press Read timeline. Nothing is written until you press Export.</div>
+    <div id="nextline" class="msg next">Open your sequence in Premiere, then press Read timeline. Nothing is written until Export.</div>
     <div id="railmsgs" class="railmsgs"></div>
     <div id="updbar" class="msg act good" hidden>
         <div class="updtext" id="updtext"></div>
@@ -49,7 +49,7 @@
 <!-- Everything about the TOOL rather than about this timeline. -->
 <section id="gearmenu" class="gearmenu" hidden>
     <p class="lbl">Cut script
-        <span class="q" data-tip="xmlcut.py — the engine that does the cutting. It ships inside this panel, so normally there is nothing to do here. Re-check confirms it is present and runnable, and downloads it from the release channel if it has gone missing.">?</span>
+        <span class="q" data-tip="xmlcut.py — the engine that does the cutting. It ships inside this panel, so normally there is nothing to do here. Re-check confirms it is present and runnable, and re-downloads it if it has gone missing.">?</span>
     </p>
     <div id="enginestat" class="msg">checking…</div>
     <div class="pathrow">
@@ -71,7 +71,7 @@
          short ranges to answer whether per-segment rendering is fast enough to build
          on, and changes nothing about how the panel exports. -->
     <p class="lbl">Export with effects
-        <span class="q" data-tip="Proof of concept. Cutting reads the raw source media, so nothing you did on the timeline — colour, Motion, titles, speed ramps — reaches the clips. Only Premiere can bake those in. This renders two short ranges of the open sequence and times them, to find out whether rendering each cut separately is quick enough to be worth building. It renders nothing else, exports nothing, and puts your in/out points back where it found them.">?</span>
+        <span class="q" data-tip="Proof of concept. Cutting reads the raw source, so nothing from the timeline — colour, Motion, titles, speed ramps — reaches the clips. This renders and times two short ranges of the open sequence, to see whether rendering each cut separately is quick enough to build on. It exports nothing and puts your in/out points back.">?</span>
     </p>
     <div class="btnrow">
         <button id="pocrender" class="mini">Test render (POC)</button>
@@ -91,9 +91,9 @@
              The empty state used to hold the next-action line AND a <p> saying the same thing
              at greater length — the panel's first screen, telling a first-time reader the
              same thing twice in two components. The safety half ("nothing is written until
-             you press Export") is in the next-action line; the capability half is here, where
+             Export") is in the next-action line; the capability half is here, where
              it costs no pixels. -->
-        <button id="read" class="primary" title="Every cut on the timeline is listed, in timeline order, with nested sequences resolved and speed ramps read. This writes a JSON read and an XML of the sequence beside your project; it changes nothing on the timeline and cuts no media.">Read timeline</button>
+        <button id="read" class="primary" title="Lists every cut in timeline order, with nested sequences resolved and speed ramps read. Writes a JSON read and an XML beside your project; changes nothing on the timeline and cuts no media.">Read timeline</button>
     </div>
 
     <section id="readprog" hidden>
@@ -113,7 +113,7 @@
              card is the sequence's own facts and one path. -->
         <div id="savedbox" class="saved" hidden>
             <div class="pathrow">
-                <span class="q" data-tip="Where this read and its XML were saved: beside your Premiere project, in xmlcut/&lt;sequence name&gt;/. Every read adds a new timestamped pair and nothing is overwritten, so only the newest ten are kept — the panel says so on the rail when it prunes any. If the project has never been saved there is nowhere beside it to write, and the read goes to the Desktop instead.">?</span>
+                <span class="q" data-tip="Where this read and its XML were saved: beside your Premiere project, in xmlcut/&lt;sequence name&gt;/. Each read adds a timestamped pair, and only the newest ten are kept. An unsaved project has nowhere beside it, so the read goes to the Desktop.">?</span>
                 <span id="savedpath" class="path">—</span>
                 <button id="showsaved" class="mini">Show</button>
             </div>
@@ -151,7 +151,7 @@
              the sequence's in/out points before it starts and writes them back after. -->
         <div class="field f-mode">
             <div class="flbl">Cut from
-                <span class="q" data-tip="Source media cuts the raw camera files, which is fast and gives you the original pixels — but nothing you did on the timeline is in them. Timeline render asks Premiere to render each cut first, so colour, titles, Motion, transitions and speed ramps all come out with the clip. It is slower, it needs Media Encoder installed, and it leaves your timeline exactly as it found it.">?</span>
+                <span class="q" data-tip="Source media cuts the raw camera files: fast, original pixels, but nothing from the timeline is in them. Timeline render has Premiere render each cut first, so colour, titles, Motion, transitions and ramps come out with the clip — slower, needs Media Encoder, leaves your timeline as it found it.">?</span>
             </div>
             <select id="cutfrom" class="sel wide">
                 <option value="source">Source media</option>
@@ -165,7 +165,7 @@
              shot list; everything above it is IN the picture rather than in the list. -->
         <div class="field f-vtrack" id="vtrackfield" hidden>
             <div class="flbl">Master track
-                <span class="q" data-tip="The track the cuts come from. Every clip on it becomes one file, named and numbered in timeline order — so pick the track your main footage sits on, usually V1. It decides WHERE the cuts are; the ticks beside it decide what is in the picture. Built from the timeline that was read, so it only offers tracks that have clips on them.">?</span>
+                <span class="q" data-tip="The track the cuts come from. Every clip on it becomes one file, numbered in timeline order — so pick the track your main footage is on, usually V1. It decides WHERE the cuts are; the ticks below decide what is in the picture. Only tracks with clips are offered.">?</span>
             </div>
             <select id="vtrack" class="sel wide"></select>
             <!-- WHICH TRACKS ARE IN THE PICTURE, as opposed to which one supplies the cuts.
@@ -174,7 +174,7 @@
                  threw away grading meant for the shot. Naming the tracks to include lets V3's
                  grade stay while V2's caption goes. -->
             <div class="flbl vinclbl">In the picture
-                <span class="q" data-tip="Which video tracks Premiere leaves visible while it renders. The master track is always in and cannot be unticked. Untick a track carrying a logo or a caption you do not want burned into the clips; leave an adjustment layer ticked, because its grade is part of the shot. Your timeline is put back exactly as it was afterwards.">?</span>
+                <span class="q" data-tip="Which video tracks Premiere leaves visible while it renders. The master track is always in. Untick a track carrying a logo or caption you do not want burned into the clips; leave an adjustment layer ticked. Your timeline is put back afterwards.">?</span>
             </div>
             <div id="vinclude" class="vinclude"></div>
             <!-- A render is the composite, so a logo on V3 and a caption on V2 end up
@@ -188,7 +188,7 @@
         </div>
 
         <div class="field f-preset">
-            <div class="flbl">Render preset <span class="q" data-tip="A named set of the settings below, stored in a file the engine owns so the same preset can be used from a terminal. Choosing one fills in everything below it; changing anything by hand sets this back to Custom.">?</span></div>
+            <div class="flbl">Render preset <span class="q" data-tip="A named set of the settings below, kept in a file the engine owns so the same preset works from a terminal. Choosing one fills in everything below it; a change by hand sets this back to Custom.">?</span></div>
             <select id="preset" class="sel"></select>
             <div class="fsub">
                 <button id="savepreset" class="mini">Save</button>
@@ -207,7 +207,7 @@
              the select still carries the option, so bringing it back is deleting one
              attribute. Same treatment he asked for on the size flag, for the same reason. -->
         <div class="field f-enc" hidden>
-            <div class="flbl">Encoder <span class="q" data-tip="H.264 plays on everything and is what Premiere, phones and browsers expect. H.265 encodes slower, decodes slower, and older software may not open it. ⚠️ The two CRF scales are NOT the same number — H.265 crf 28 is about H.264 crf 23. &quot;Half the size&quot; is the equal-QUALITY claim and needs a HIGHER crf number; at the SAME number the saving is about 30% around crf 14-23, and NOTHING below about crf 8 — measured here on 19 real clips. The size estimate already accounts for this.">?</span></div>
+            <div class="flbl">Encoder <span class="q" data-tip="H.264 plays everywhere and is what Premiere, phones and browsers expect. H.265 encodes and decodes slower, and older software may not open it. ⚠️ The two CRF scales are NOT the same number — H.265 crf 28 is about H.264 crf 23. The size estimate accounts for this.">?</span></div>
             <select id="vcodec" class="sel wide">
         <option value="libx264">H.264 — plays everywhere</option>
         <option value="libx265">H.265 / HEVC — ~30% smaller, slower</option>
@@ -216,7 +216,7 @@
 
         <!-- Widest of the encode fields, because it is the only one holding a slider. -->
         <div class="field f-qual">
-            <div class="flbl">Quality <span class="q" data-tip="CRF — Constant Rate Factor. The encoder holds a QUALITY and spends whatever bits that takes, so a still hand costs less than moving fabric. Lower is bigger and better. 1 is the default — never 0, x264 then emits a profile no Mac can play.">?</span>
+            <div class="flbl">Quality <span class="q" data-tip="CRF — Constant Rate Factor. The encoder holds a QUALITY and spends whatever bits that takes. Lower is bigger and better. 1 is the default — never 0, which emits a profile no Mac can play.">?</span>
                 <span id="crfread" class="crfread">1</span>
             </div>
             <div class="qblock on" id="crfblock">
@@ -236,7 +236,7 @@
         </div>
 
         <div class="field f-res">
-            <div class="flbl">Resolution <span class="q" data-tip="Output size as a fraction of each source's own. This does NOT resample time — the cuts still hold exactly the frames the timeline used, just fewer pixels each, so they stay frame exact. It is the largest single lever on file size: Half keeps a quarter of the pixels.">?</span>
+            <div class="flbl">Resolution <span class="q" data-tip="Output size as a fraction of each source's own. Time is NOT resampled — the cuts still hold the frames the timeline used, just fewer pixels each, so they stay frame exact. The largest single lever on file size: Half keeps a quarter of the pixels.">?</span>
                 <span id="scaleread" class="crfread">Full · source</span>
             </div>
             <select id="scale" class="sel wide">
@@ -248,7 +248,7 @@
         </div>
 
         <div class="field f-fps">
-            <div class="flbl">Frame rate <span class="q" data-tip="Leave as Source unless you have a reason. Forcing a rate RESAMPLES — frames are dropped or duplicated — so the clips no longer hold the frames the timeline used, and the manifest records them as not frame-exact.">?</span></div>
+            <div class="flbl">Frame rate <span class="q" data-tip="Leave as Source unless you have a reason. Forcing a rate RESAMPLES: frames are dropped or duplicated, so the clips are not frame-exact and the manifest says so.">?</span></div>
             <!-- "fps source, 30 ,60" — the AI Product team's list, 18 Aug. 24, 25, 50 and
                  59.94 are gone from the panel; --fps still takes any number from a terminal. -->
             <select id="fps" class="sel wide">
@@ -272,7 +272,7 @@
              dataset of what was SAID wants one of those and not the other. -->
         <div class="field f-audio">
             <div class="flbl">Audio
-                <span class="q" data-tip="Writes ONE mp3 for the whole timeline — everything the chosen tracks were playing, at their timeline positions, with the gaps as silence, exactly as long as the sequence. It lands beside the clips as _timeline_audio.mp3. The clips themselves stay silent: an AAC track makes a container report a duration one frame longer than its own video stream, and the frame count is what this tool guarantees.">?</span>
+                <span class="q" data-tip="Writes ONE mp3 for the whole timeline — the chosen tracks at their timeline positions, gaps as silence, exactly as long as the sequence. It lands beside the clips as _timeline_audio.mp3. The clips themselves stay silent.">?</span>
             </div>
             <select id="audiosel" class="sel wide">
                 <option value="">No audio files</option>
@@ -281,7 +281,7 @@
 
         <!-- Takes the slack: a path is the one value here with no natural width. -->
         <div class="field f-dest">
-            <div class="flbl">Save to <span class="q" data-tip="Pick this once. Every export makes a folder named after the sequence inside it, then writes into raw/ for source media or edited/ for a timeline render — so cutting several sequences into one place keeps each set of clips separate, with its own 01..N numbering and its own clips.csv.">?</span></div>
+            <div class="flbl">Save to <span class="q" data-tip="Pick this once. Every export makes a folder named after the sequence inside it, then writes into raw/ for source media or edited/ for a timeline render — each set of clips separate, with its own 01..N numbering and clips.csv.">?</span></div>
             <div class="pathrow">
         <span id="outpath" class="path">—</span>
         <button id="copyout" class="mini" title="Copy this path">Copy</button>
@@ -299,8 +299,11 @@
              now. It had one correct setting — a fractional in-point sits in a frame the
              previous shot also occupies, and keeping it shows the neighbour at the head —
              so offering the other one was a trap nobody could evaluate. -->
+        <label class="tick"><input type="checkbox" id="chime" checked>sound when done
+            <span class="q" data-tip="Plays a short macOS system sound when an export finishes — one tone if every clip wrote, a different one if anything failed or you cancelled. An export takes minutes and you are usually somewhere else; nothing pops up and nothing steals focus.">?</span>
+        </label>
         <label class="tick"><input type="checkbox" id="resume">skip clips already there
-            <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. Useful after fixing offline media on a long timeline — but it counts a file left half-written by a cancelled or crashed run as one that already exists, so those are kept too.">?</span>
+            <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. ⚠️ A file left half-written by a cancelled or crashed run counts as one that already exists, so it is kept too.">?</span>
         </label>
     </div>
 
@@ -312,7 +315,7 @@
          thì ko cần phải code lại" — the team lead, 18 Aug. Every line of its logic still works; only
          these two elements are hidden, so bringing it back is deleting two attributes. -->
     <p class="lbl" hidden>Flag large clips
-        <span class="q" data-tip="Marks any clip expected to land above this size, in the list above and again in the report after the export — where the number is the file's ACTUAL size on disk rather than an estimate. Drag the number sideways to change it, or click it and type. Leave it empty for no flagging: it changes nothing about the encode, it only tells you which cuts are the heavy ones.">?</span>
+        <span class="q" data-tip="Marks any clip expected to land above this size, in the list above and in the report — where the number is the file's ACTUAL size on disk. Drag the number sideways, or click and type. Empty means no flagging, and it changes nothing about the encode.">?</span>
     </p>
     <div class="caprow" hidden>
         <span class="capfix">over</span>
@@ -338,14 +341,14 @@
          hidden outright in timeline-render mode, where the source file's extension decides
          nothing — see applyCutFrom() in main.js for why hidden rather than dimmed. -->
     <p class="lbl" id="typelbl">File types
-        <span class="q" data-tip="Only clips whose source file is one of these types get cut. The number is how many are on this timeline; a type showing 0 is listed so the set stays the same between projects, and ticking it is remembered for a timeline that has it.">?</span>
+        <span class="q" data-tip="Only clips whose source file is one of these types get cut. The number is how many are on this timeline; a type showing 0 is still listed, and ticking it is remembered for a timeline that has it.">?</span>
         <button id="typeall" class="linkbtn">select what's here</button>
     </p>
     <div id="types" class="types"></div>
     <!-- What is NOT ticked, and the "reading the cut list" note, are both on the rail. -->
 
     <p class="lbl" id="listlbl">Every cut, in timeline order
-        <span class="q" data-tip="Every cut this export will make, in timeline order. Untick any single clip to leave it out. Numbers renumber to match the filenames you'll actually get. Hover a row for its timeline position, where the timing came from, and any notes.">?</span>
+        <span class="q" data-tip="Every cut this export will make, in timeline order. Untick a clip to leave it out; the numbers renumber to match the filenames you get. Hover a row for its timeline position and notes.">?</span>
     </p>
 
     <!-- THE RUN'S RESULT, above the list it describes -------------------------------------
@@ -397,8 +400,8 @@
                     title="tick or untick every clip below"></th>
                 <th class="idx num">#</th>
                 <th>Clip</th>
-                <th class="siz num">Size<span class="q" data-tip="What this clip is expected to weigh at the current quality setting — the source's own bitrate scaled by a ratio measured per CRF, then by the resolution. An estimate; it moves as you drag the sliders.">?</span></th>
-                <th class="sts">Status<span class="q" data-tip="Before a run: ready = not cut yet · missing source = not at the recorded path · AE comp = Dynamic Link, render it out first. During one: how long the clip has been encoding. After: what it took, or why it did not write. Hover a row for its notes.">?</span></th>
+                <th class="siz num">Size<span class="q" data-tip="What this clip is expected to weigh at the current quality — its source's own bitrate scaled per CRF, then by the resolution. An estimate; it moves as you drag the sliders.">?</span></th>
+                <th class="sts">Status<span class="q" data-tip="Before a run: ready = not cut yet · missing source = not at the recorded path · AE comp = Dynamic Link, render it out first. During: how long it has been encoding. After: what it took, or why it did not write. Hover a row for notes.">?</span></th>
             </tr></thead>
             <tbody id="clipbody"></tbody>
         </table>
@@ -434,7 +437,7 @@
                  beside the button; how it was made is on the ? and, when the sizes are STALE
                  and there is something to do about it, on the rail. -->
             <div id="sizeest" class="abfact" hidden></div>
-            <span class="q" data-tip="What the ticked clips are expected to weigh in total. `estimated` means it came from each source's own bitrate scaled by a ratio measured per CRF — usually within about 1.5x. `measured` means Re-measure encoded a second of every clip at these exact settings, which is good to a few percent. When it says `measured at` some OTHER setting, the sizes on screen belong to that setting and not to the one now on the sliders.">?</span>
+            <span class="q" data-tip="What the ticked clips are expected to weigh in total. `estimated` — each source's bitrate scaled per CRF, within about 1.5x. `measured` — Re-measure encoded a second of every clip at these settings, good to a few percent. `measured at` another setting: the sizes are that setting's, not the sliders'.">?</span>
         </div>
         <div class="abacts">
             <!-- Encodes a second of each clip for a figure good to a few percent. Opt-in,
@@ -463,7 +466,7 @@
             <div class="abfacts">
                 <span id="progtext" class="hint">Starting…</span>
                 <span id="jobtally" class="hint"></span>
-                <span class="q" data-tip="Clips are encoded several at a time, and the rows above light up as each one starts and lands. A clip that has been running a while is normal on large or network-stored media — what matters is that its elapsed time keeps moving. If nothing changes for a long time the panel says so.">?</span>
+                <span class="q" data-tip="Clips are encoded several at a time, and the rows above light up as each one starts and lands. A long-running clip is normal on large or network media as long as its elapsed time keeps moving. If nothing changes for a long time the panel says so.">?</span>
             </div>
             <div class="abacts">
                 <button id="cancel" class="mini">Cancel</button>
@@ -492,7 +495,7 @@
 
 <details id="adv">
     <summary>Advanced</summary>
-    <p class="lbl">Compare this sequence against its XML export</p>
+    <p class="lbl">Compare against the XML export</p>
     <code id="cmd"></code>
     <!-- ⚠️ THE LOG IS THE ONE THING PEOPLE ARE ASKED TO SEND BACK, and it could not be
          copied: body sets user-select:none and .log opts back in, but selecting hundreds of

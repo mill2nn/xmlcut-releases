@@ -6,10 +6,8 @@ Reads a Final Cut Pro 7 XML export (Premiere: File > Export > Final Cut Pro XML)
 resolves each clipitem back to its source media, and uses ffmpeg to cut the exact
 frame range the editor used. Emits a CSV + JSON manifest describing every clip.
 
-Every cut is re-encoded, deliberately: it is the only path that is frame exact. Stream
-copy can start only on a keyframe, so on long-GOP H.264 it overran measured cut lengths
-by 22-147%, contaminating clips with the neighbouring shot. There is no flag to turn
-that back on.
+Every cut is re-encoded, deliberately: it is the only path that is frame exact. There is
+no flag to turn stream copy back on.
 
 Usage:
     python3 xmlcut.py timeline.xml -o ./clips
@@ -42,7 +40,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.63"
+VERSION = "3.64"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -811,7 +809,7 @@ def apply_update(info: dict, progress=None, out: Optional[dict] = None) -> tuple
     here = install_dir()
     if (here / ".git").exists():
         return False, ("this is the source checkout, not an installed copy — "
-                       "use `git pull` instead so nothing overwrites your work")
+                       "use `git pull` instead")
 
     # latest.json lists plain filenames; the remote copy of each lives under UPDATE_DIR
     # and lands back beside xmlcut.py under its own name.
@@ -957,7 +955,7 @@ def apply_update(info: dict, progress=None, out: Optional[dict] = None) -> tuple
         out["changed"] = sorted(changed)
         out["restart_needed"] = any(r.startswith(loaded) for r in changed)
     return True, (f"updated {VERSION} → {info['version']}. The previous version is in "
-                  f".backup if you need it." + tail)
+                  f".backup." + tail)
 
 
 # --------------------------------------------------------------------------
@@ -1788,9 +1786,9 @@ class Timeline:
             shown = sorted(set(self.nests_one_cut))
             self.warnings.append(
                 f"{len(self.nests_one_cut)} nested sequence instance(s) cut as ONE clip "
-                f"each, because a render has every inner layer baked into it: "
+                f"each: "
                 + ", ".join(shown[:4]) + (", …" if len(shown) > 4 else "")
-                + " — pass --nest resolve to cut the clips inside them instead")
+                + ". --nest resolve cuts the clips inside them instead")
 
         self.cuts.sort(key=lambda c: (c.timeline_in_frames, c.track_type != "video", c.track_index))
         self._drop_empty_cuts()
@@ -1823,10 +1821,8 @@ class Timeline:
                      if (c.timeline_out_frames - c.timeline_in_frames) > 0]
         shown = ", ".join(f"{c.clip_name} at {c.timeline_in_frames}" for c in empty[:4])
         self.warnings.append(
-            f"{len(empty)} cut(s) occupied no time on the timeline and were dropped "
-            f"(a sub-frame sliver where two nest instances meet, which would have been "
-            f"delivered as a 1-frame file): {shown}"
-            + (", …" if len(empty) > 4 else ""))
+            f"{len(empty)} cut(s) occupied no time on the timeline and were dropped: "
+            f"{shown}" + (", …" if len(empty) > 4 else ""))
 
     def _drop_duplicate_cuts(self) -> None:
         """Emit a cut once, not twice, when a second one would be byte-for-byte identical.
@@ -1918,12 +1914,10 @@ class Timeline:
                     for d in self.merged_duplicates]
             self.warnings.append(
                 f"{len(self.merged_duplicates)} cut(s) merged into an identical earlier "
-                f"cut — same clip name, same source in/out and duration, same timeline "
-                f"position, so the second file would have been the first one again: "
+                f"cut (same name, source range, timeline position — stacked inner video "
+                f"tracks in a nest): "
                 + "; ".join(rows[:6]) + (f"; … and {len(rows) - 6} more"
-                                         if len(rows) > 6 else "")
-                + ". A nested sequence with stacked inner video tracks puts the same shot "
-                  "on two layers, and both flatten onto the parent's track")
+                                         if len(rows) > 6 else ""))
 
     def _assign_cut_ids(self) -> None:
         """A stable per-cut identity, for selectors that cannot be told apart otherwise.
@@ -2025,9 +2019,9 @@ class Timeline:
                     # A continuation with nothing to continue — a hand-edited or truncated
                     # file. Starting a group is the only answer that never yields track 0.
                     self.warnings.append(
-                        f"{track_type} lane {lane} says it continues a Premiere track "
-                        f"(currentExplodedTrackIndex={raw}) but no track has started "
-                        f"before it — treated as the start of one")
+                        f"{track_type} lane {lane} continues a Premiere track "
+                        f"(currentExplodedTrackIndex={raw}) with none started before it "
+                        f"— treated as the start of one")
                     counter += 1
             out.append(counter)
 
@@ -2046,8 +2040,8 @@ class Timeline:
             if num in want and want[num] != n_lanes:
                 self.warnings.append(
                     f"{track_type} track {num} is written as {n_lanes} lane(s) but "
-                    f"declares totalExplodedTrackCount={want[num]} — the grouping was "
-                    f"taken from currentExplodedTrackIndex, which is the reliable one")
+                    f"declares totalExplodedTrackCount={want[num]} — grouped by "
+                    f"currentExplodedTrackIndex")
         return out
 
     @staticmethod
@@ -2270,14 +2264,14 @@ class Timeline:
             # definition that genuinely has no section for this track type.
             if media is None:
                 self.warnings.append(
-                    f"{name}: this is a reference to sequence "
-                    f"id={seq_ref_id or '(none)'} and no definition for it was found in "
-                    f"this XML — it contributed no cuts")
+                    f"{name}: reference to sequence "
+                    f"id={seq_ref_id or '(none)'} with no definition in this XML "
+                    f"— it contributed no cuts")
                 self._skip("a nested sequence reference whose definition is not in "
                            "this XML", name)
             else:
                 self.warnings.append(
-                    f"{name}: the nested sequence has no <{track_type}> section anywhere "
+                    f"{name}: the nested sequence has no <{track_type}> section "
                     f"— it contributed no cuts")
                 self._skip(f"a nested sequence with no <{track_type}> section", name)
             return []
@@ -2423,7 +2417,7 @@ class Timeline:
             self.warnings.append(
                 f"{name}: {outside_window} of {inner_clipitems} clipitem(s) inside the "
                 f"nest fall outside the window this instance shows "
-                f"({win_lo:.3f}-{win_hi:.3f}s in the nest's own time) and were not cut")
+                f"({win_lo:.3f}-{win_hi:.3f}s in nest time) — not cut")
 
         if not out:
             # ⚠️ IN THE NEW TERMS. This used to be able to mean "its shots are on a track
@@ -2432,14 +2426,13 @@ class Timeline:
             # ways to end up here and they want different actions from the reader.
             if inner_clipitems == 0:
                 self.warnings.append(
-                    f"{name}: the nest holds no clipitems on any {track_type} track, so "
-                    f"there is nothing inside it to cut")
+                    f"{name}: the nest holds no clipitems on any {track_type} track "
+                    f"— nothing to cut")
             else:
                 self.warnings.append(
                     f"{name}: all {inner_clipitems} clipitem(s) inside the nest fall "
-                    f"outside the window this instance shows (its in/out is "
-                    f"{nest_in:g}-{nest_out:g} in the nest's own frames) — no cuts came "
-                    f"out of it")
+                    f"outside the window this instance shows (in/out "
+                    f"{nest_in:g}-{nest_out:g} in nest frames) — no cuts")
         return out
 
     def _skip(self, why: str, name: str = "") -> None:
@@ -2532,8 +2525,8 @@ class Timeline:
             # the failure that had clips missing from an export with nothing to explain it.
             self.warnings.append(
                 f"{txt(clip, 'name') or 'a clip'} on {track_type} track {t_idx} has no "
-                f"timeline position in the XML (start and end are both -1) and no "
-                f"transition beside it to take one from — it was NOT cut")
+                f"timeline position (start and end are both -1) and no transition "
+                f"beside it — NOT cut")
             return None
 
         # CRITICAL: <in>/<out> are expressed in the CLIPITEM's rate — which Premiere
@@ -2548,7 +2541,7 @@ class Timeline:
         if dur_frames <= 0:
             dur_frames = int(round(c_out - c_in))
         if dur_frames <= 0:
-            self._skip("no usable length — neither start/end nor in/out give one",
+            self._skip("no usable length (neither start/end nor in/out)",
                        txt(clip, "name"))
             return None
 
@@ -2649,7 +2642,7 @@ class Timeline:
         if varies:
             self.warnings.append(
                 f"{cut.clip_name}: keyframed speed ramp ({span_txt}) treated as a "
-                f"constant {speed:g}% — the extracted range is right, the retime is not")
+                f"constant {speed:g}% — the range is right, the retime is not")
 
         # A still's <in>/<out> are an arbitrary offset into a virtual 24h clip;
         # only the timeline duration is meaningful.
@@ -2798,8 +2791,8 @@ class DumpTimeline:
                                       c.track_index))
         if nests:
             self.warnings.append(
-                f"{nests} nested sequence(s) skipped — Premiere hands a nest over as "
-                f"one clip. Export this timeline as XML to cut inside nests.")
+                f"{nests} nested sequence(s) skipped. Export this timeline as XML to "
+                f"cut inside nests.")
         if not self.cuts:
             self.warnings.append("no cuttable clips found in the dump")
 
@@ -2922,8 +2915,8 @@ class DumpTimeline:
 
         if ramp:
             self.warnings.append(
-                f"{name}: keyframed speed ramp ({span_txt or 'varies'}) — the extracted "
-                f"range is right, a uniform retime is not")
+                f"{name}: keyframed speed ramp ({span_txt or 'varies'}) — the range is "
+                f"right, a uniform retime is not")
 
         # The invariant that catches a wrong reading of the API before it becomes a
         # wrong file: source length / speed should equal the length on the timeline.
@@ -2935,8 +2928,7 @@ class DumpTimeline:
             if abs(got - want) > max(0.05, want * 0.02):
                 self.warnings.append(
                     f"{name}: source range {src_dur_sec:.3f}s at {speed:g}% implies "
-                    f"{got:.3f}s on the timeline but it occupies {want:.3f}s "
-                    f"— treat this clip's length as unverified")
+                    f"{got:.3f}s but it occupies {want:.3f}s — length unverified")
         return cut
 
 
@@ -3146,8 +3138,8 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
         # matters — the mechanism on its own reads like a fault when it is expected.
         nested_amb = sum(1 for c in tl.cuts
                          if c.track_type == "video" and c.nested_from)
-        why = ("expected — these are inside nested sequences, which the panel sees as a "
-               "single clip" if nested_amb else
+        why = ("expected — inside nested sequences, which the panel sees as one clip"
+               if nested_amb else
                "several clips share that instant and none carries this cut's filename")
         lead.append(f"{ambiguous} cut(s) kept the XML's values rather than guessing: {why}")
     if repaired:
@@ -3158,8 +3150,8 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
     if range_flags:
         # The shared explanation, said ONCE. Everything after this in `notes` is one short
         # line per clip.
-        lead.append(f"{range_flags} clip(s) disagree on the source range — the XML's value "
-                    f"was used, which is the verified path"
+        lead.append(f"{range_flags} clip(s) disagree on the source range — the XML's "
+                    f"value was used"
                     + (f"; a whole-hour timecode base was removed from {tc_bases} of them"
                        if tc_bases else ""))
     return lead + notes
@@ -3786,13 +3778,12 @@ def write_timeline_audio(tl, args) -> dict:
     _kf = sum(1 for d in parts if d.get("gain_varies"))
     if _kf:
         note = ((note + "; ") if note else "") + (
-            f"{_kf} part(s) have a KEYFRAMED Audio Level — the first keyframe's value was "
-            f"used for the whole part, so a fade inside those items is not in the mix")
+            f"{_kf} part(s) have a KEYFRAMED Audio Level — the first keyframe was used "
+            f"for the whole part, so those fades are not in the mix")
     if gain_db:
         note = ((note + "; ") if note else "") + (
             f"the mix summed to {peak_db:+.2f} dBFS, so {gain_db:+.2f} dB was applied to "
-            f"the whole file to keep it under full scale — levels between items are "
-            f"unchanged, the file is quieter than the edit's master by that amount")
+            f"the whole file to keep it under full scale — relative levels are unchanged")
     # ⚠️ WHAT ACTUALLY WENT IN, BY NAME. Before this, `grep -c <a music file's name> manifest.json`
     # returned 0: no artefact anywhere named the material in the mix, which is exactly why
     # "A2 only" shipped a full copy of the background music for a whole release with every
@@ -3990,9 +3981,8 @@ def vo_contributions(cut: Cut, items: list[Cut], seq_fps: float) -> tuple[list[d
     out = deduped
     note = ""
     if collapsed:
-        note = (f"{collapsed} duplicate audio part(s) collapsed — Premiere writes one "
-                f"stereo track as two identical lanes, and mixing both would double the "
-                f"level")
+        note = (f"{collapsed} duplicate audio part(s) collapsed — one stereo track "
+                f"written as two identical lanes")
     if skipped:
         note = ((note + "; ") if note else "") + (
             f"{skipped} audio item(s) left out of the mix "
@@ -4860,13 +4850,13 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
         if abs(off) > RENDER_FRAME_SLACK:
             cut.status = "render_mismatch"
             cut.error = (f"the render holds {cut.render_frames} frames but this cut is "
-                         f"{cut.duration_frames} ({off:+d}) — it is not the range it "
-                         f"should be, so it was not encoded")
+                         f"{cut.duration_frames} ({off:+d}) — not the range it should "
+                         f"be, so it was not encoded")
             return cut
     if cut.media_kind == "unsupported" and not cut.render_path:
         cut.status = "unsupported"
         cut.error = (f"{Path(cut.source_path).suffix} is a project/comp file "
-                     f"(Dynamic Link), not decodable media — render it out first")
+                     f"(Dynamic Link), not decodable media — render it first")
         return cut
     if not cut.source_exists and not cut.render_path:
         cut.status = "missing_source"
@@ -4891,7 +4881,7 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
         # a muted camera file, an AI-generated shot. ffmpeg's own error for that is
         # "Output file does not contain any stream", which explains nothing.
         cut.status = "no_audio"
-        cut.error = "source has no audio stream — nothing to extract on an audio track"
+        cut.error = "source has no audio stream — nothing to extract"
         return cut
 
     cut.pix_fmt_out = pix_fmt_for(cut)
@@ -5065,7 +5055,7 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
                 cut.status = "failed"
                 cut.error = (f"ffmpeg exited 0 but wrote {got} frame(s) where {want} "
                              f"were asked for ({got - want:+d}) — the source is shorter "
-                             f"than the cut, or its bytes are not all readable")
+                             f"than the cut, or unreadable")
             elif not counted and err:
                 cut.status = "failed"
                 cut.error = ("ffmpeg exited 0 but reported: "
@@ -5780,27 +5770,22 @@ def main():
     )
     ap.add_argument("xml", type=Path, nargs="?", metavar="XML_OR_DUMP",
                     help="Final Cut Pro 7 XML exported from Premiere, or a .json "
-                         "written by the auto bits panel "
-                         "(omit it to be walked through step by step)")
+                         "written by the panel (omit it to be walked through step by step)")
     ap.add_argument("--pick", type=Path, metavar="FILE",
                     help="cut only the clips listed in FILE, one per line as "
                          "'TRACKTYPE TRACKINDEX TIMELINEIN TIMELINEOUT' (e.g. "
-                         "'video 1 448 536'). Written by the Premiere panel when "
-                         "individual clips are unticked; a long timeline is too many "
-                         "clips for the command line. Three fields still work and mean "
-                         "any cut starting there.")
+                         "'video 1 448 536'). Three fields also work and mean any cut "
+                         "starting there.")
     ap.add_argument("--panel", type=Path, metavar="DUMP.json",
                     help="overlay a panel dump on the XML: adds real speed-ramp "
-                         "keyframes and repairs stale media paths, and cross-checks "
-                         "every value both sources carry")
+                         "keyframes, repairs stale media paths, cross-checks both sources")
     ap.add_argument("-o", "--out", type=Path, default=Path("./clips"), help="output directory")
     ap.add_argument("--tracks", choices=["video", "audio", "all"], default="video",
                     help="which tracks to extract (default: video)")
     ap.add_argument("--remap", action="append", default=[], metavar="OLD=NEW",
                     help="rewrite source paths, e.g. /Volumes/Old=/Volumes/New (repeatable)")
     ap.add_argument("--sequence", metavar="NAME|N",
-                    help="which sequence to cut, by name or 1-based index (Premiere exports "
-                         "every sequence in the project into one XML)")
+                    help="which sequence to cut, by name or 1-based index")
     ap.add_argument("--list-sequences", action="store_true",
                     help="list the sequences in the XML and exit")
     # NO default here, deliberately. vcodec_of() supplies libx264 for every reader, and
@@ -5811,87 +5796,64 @@ def main():
     # still special-cased for, one line further down.
     ap.add_argument("--vcodec", default=None, choices=["libx264", "libx265"],
                     help="video encoder. libx264 (H.264, default) plays everywhere; "
-                         "libx265 (H.265/HEVC) makes roughly half the file at the same "
-                         "crf and is slower to encode and to decode. The two crf scales "
-                         "are NOT the same number — x265 crf 28 is about x264 crf 23.")
+                         "libx265 (H.265/HEVC) is about half the size at the same crf "
+                         "and slower. The crf scales differ: x265 28 ≈ x264 23.")
     ap.add_argument("--container", default="mp4",
-                    help="output container: mp4 (default) or mov. The video is identical "
-                         "in both — H.264 High, 4:2:0, no audio; only the wrapper "
-                         "changes. Avoid mkv: its muxer declares one frame more than "
-                         "the file holds, and an NLE reads the container's duration.")
+                    help="output container: mp4 (default) or mov. Same video in both, "
+                         "only the wrapper changes. Avoid mkv: it declares one frame "
+                         "more than the file holds.")
     # --- export settings ------------------------------------------------------------
     ap.add_argument("--crf", type=float, metavar="N",
                     help="quality, 0-51, lower is bigger and better (default 1). "
-                         "Fractional works — x264 takes a float, so 18.5 is a real "
-                         "setting between 18 and 19. Do NOT use 0: x264 then emits "
-                         "High 4:4:4 Predictive, which will not play on a Mac.")
+                         "Fractional works (18.5). Do NOT use 0: it emits High 4:4:4 "
+                         "Predictive, which will not play on a Mac.")
     ap.add_argument("--bitrate", metavar="RATE",
                     help="target an average bitrate instead of a quality (e.g. 8M, "
-                         "5000k). Makes file size predictable; ignores --crf.")
+                         "5000k). Ignores --crf.")
     # Kept ONLY so an installed panel older than this release does not fail at argparse.
     # Whole-frame trimming is unconditional now; passing this changes nothing.
     ap.add_argument("--whole-frames", dest="whole_frames", action="store_true",
-                    help="keep only the frames that lie WHOLLY inside each cut's source range: "
-                         "a fractional start moves up to the next frame, a fractional end down "
-                         "to the previous one. A tick-derived in-point rarely lands on a frame "
-                         "boundary, and without this a cut can hold one frame at each end that "
-                         "the editor never saw there. Costs at most one frame per end.")
+                    help="accepted and ignored — whole-frame trimming is always on")
     ap.add_argument("--render-dir", dest="render_dir", type=Path, metavar="DIR",
-                    help="cut from PRE-RENDERED TIMELINE RANGES in DIR instead of from the "
-                         "raw source media, so everything done on the timeline comes out "
-                         "with the clip: colour, titles, Motion, transitions, speed ramps. "
-                         "Each file must be named for the cut it covers, "
-                         "'TRACKTYPE-TRACKINDEX-TIMELINEIN-TIMELINEOUT.mp4' — the same "
-                         "geometry --pick matches on. The Premiere panel writes them; a "
-                         "cut with no render "
-                         "fails rather than falling back to its source, because a folder "
-                         "half with effects and half without is worse than a clear failure.")
+                    help="cut from PRE-RENDERED TIMELINE RANGES in DIR instead of the raw "
+                         "source, so colour, titles, Motion, transitions and speed ramps "
+                         "come out with the clip. Each file must be named "
+                         "'TRACKTYPE-TRACKINDEX-TIMELINEIN-TIMELINEOUT.mp4'. A cut with "
+                         "no render fails rather than falling back to its source.")
     ap.add_argument("--render-planned", dest="render_planned", action="store_true",
-                    help="a SCAN flag, meaningless on an export: report the cut list as it "
-                         "will be once Premiere has rendered it. Without this a scan marks "
-                         "an After Effects comp and an offline clip as uncuttable — true of "
-                         "the source, false of a render — and a front end that trusts it "
-                         "never asks for the render that would have worked.")
+                    help="a SCAN flag, meaningless on an export: report the cut list as "
+                         "it will be once Premiere has rendered it, so comps and offline "
+                         "clips are not marked uncuttable")
     ap.add_argument("--video-track", dest="video_track", type=int, default=0,
                     metavar="N",
-                    help="with --render-dir, which video track defines the shots. A render "
-                         "is the whole picture at that instant, so a title on V2 over a "
-                         "clip on V1 would otherwise produce two files of identical pixels: "
-                         "one track supplies the cut list and everything above it is IN the "
-                         "picture rather than in the list. 0 keeps every video track.")
+                    help="with --render-dir, which video track defines the shots — one "
+                         "track supplies the cut list and everything above it is already "
+                         "in the picture. 0 keeps every video track.")
     ap.add_argument("--audio", action="store_true",
-                    help="write ONE mp3 for the whole timeline: everything the chosen audio "
-                         "tracks were playing, at their timeline positions, with the gaps as "
-                         "silence, exactly as long as the sequence. Lands as "
-                         "_timeline_audio.mp3 in the output folder. Narrow it with "
+                    help="write ONE mp3 for the whole timeline: the chosen audio tracks "
+                         "at their timeline positions, gaps as silence, as long as the "
+                         "sequence. Lands as _timeline_audio.mp3. Narrow it with "
                          "--audio-tracks.")
     ap.add_argument("--audio-tracks", dest="audio_tracks", metavar="LIST",
-                    help="which audio tracks the voice-over mix reads, as timeline track "
-                         "numbers: \"2\" for A2 alone, \"1,2\" for both, omitted for all of "
-                         "them. Only meaningful with --audio. A timeline usually has the "
-                         "clips' own linked audio on A1 and the voice-over above it, and a "
-                         "dataset of what was SAID wants one of those and not the other.")
+                    help="which audio tracks the mix reads, as timeline track numbers: "
+                         "\"2\" for A2 alone, \"1,2\" for both, omitted for all. Only "
+                         "meaningful with --audio.")
     ap.add_argument("--size-probe", dest="size_probe", action="store_true",
                     help="MEASURE the size estimate instead of modelling it, by encoding "
-                         "about a second of each clip at the chosen settings. Accurate to "
-                         "a few percent and much slower — it encodes. Without it the "
-                         "estimate comes from metadata alone: median 1.0x and usually "
-                         "within 1.5x, at no cost.")
+                         "about a second of each clip. Accurate to a few percent and much "
+                         "slower. Without it the estimate comes from metadata alone.")
     ap.add_argument("--scale", type=float, metavar="PCT",
                     help="output resolution as a percentage of each source's own "
                          "(default 100). 50 turns 1080x1920 into 540x960. Frame count "
-                         "is untouched, so the cuts stay frame exact; only the pixels "
-                         "are fewer. Both dimensions round down to even — H.264 4:2:0 "
-                         "cannot encode an odd one.")
+                         "is untouched. Both dimensions round down to even.")
     ap.add_argument("--x264-preset", dest="x264_preset", metavar="NAME",
-                    help="libx264 speed/compression preset (default veryfast). Only "
-                         "changes how hard it works to compress; never moves a frame.")
+                    help="libx264 speed/compression preset (default veryfast). Never "
+                         "moves a frame.")
     ap.add_argument("--fps", type=float, metavar="N",
-                    help="force an output frame rate. ⚠️ This RESAMPLES — frames are "
-                         "dropped or duplicated — so the clips no longer hold the frames "
-                         "the timeline used. Every affected cut is recorded with "
-                         "frame_exact=false. A cut whose input is ALREADY at this rate is "
-                         "not touched, and neither are stills, audio cuts or retimed cuts.")
+                    help="force an output frame rate. ⚠️ RESAMPLES: frames are dropped "
+                         "or duplicated, and every affected cut is recorded "
+                         "frame_exact=false. A cut already at this rate is untouched, and "
+                         "so are stills, audio cuts and retimed cuts.")
     ap.add_argument("--export-preset", metavar="NAME",
                     help="load saved export settings by name (see --list-presets)")
     ap.add_argument("--save-preset", metavar="NAME",
@@ -5908,8 +5870,7 @@ def main():
                     help="manage presets and exit, without needing an XML")
     ap.add_argument("--speed", choices=["native", "timeline"], default="native",
                     help="for speed-ramped clips: 'native' keeps the real source frames "
-                         "(default, best for training data); 'timeline' retimes the clip so "
-                         "it matches what played on screen")
+                         "(default); 'timeline' retimes to what played on screen")
     # DEFAULT IS None ON PURPOSE, because it is MODE-DEPENDENT and the engine only learns
     # the mode from its own arguments. Resolved in main(): "one-cut" when render mode is
     # active (--render-dir or --render-planned), "resolve" otherwise. An explicit --nest
@@ -5936,23 +5897,18 @@ def main():
     # `keep` restores the old behaviour for anyone who wants the takes that were cut, and
     # says so in the warnings rather than leaving it to be discovered.
     ap.add_argument("--disabled", choices=["drop", "keep"], default="drop",
-                    help="what to do with clips the editor DISABLED on the timeline "
-                         "(<enabled>FALSE</enabled>): 'drop' (default) leaves them out, "
-                         "because they are not part of the finished edit; 'keep' cuts them "
-                         "like any other clip")
+                    help="clips the editor DISABLED on the timeline: 'drop' (default) "
+                         "leaves them out; 'keep' cuts them like any other clip")
     ap.add_argument("--transitions", choices=["split", "ignore"], default="ignore",
-                    help="what to do where a cross-dissolve makes two clips overlap: "
-                         "'ignore' (default) cuts each clip at its own in/out exactly as "
-                         "Premiere wrote it, so the two clips across a dissolve both "
-                         "contain the blended frames; 'split' moves the boundary to the "
-                         "middle of the overlap so no frame appears in two files")
+                    help="where a cross-dissolve makes two clips overlap: 'ignore' "
+                         "(default) cuts each clip at its own in/out, so both hold the "
+                         "blended frames; 'split' moves the boundary to the middle of the "
+                         "overlap so no frame appears twice")
     ap.add_argument("--nest", choices=["one-cut", "resolve"], default=None,
                     help="what a nested sequence becomes in timeline-render mode: "
-                         "'one-cut' treats the whole nest as a single clip, since the "
-                         "render already has every inner layer baked in (default in "
-                         "render mode); 'resolve' cuts the clips inside it instead, from "
-                         "every one of its inner video tracks, exactly as source-media "
-                         "mode does. Source-media mode always resolves and ignores this")
+                         "'one-cut' treats the nest as a single clip (default in render "
+                         "mode); 'resolve' cuts the clips inside it, from every inner "
+                         "video track. Source-media mode always resolves and ignores this")
     ap.add_argument("--min-frames", type=int, default=1, help="skip cuts shorter than N frames")
     ap.add_argument("--ext", metavar="LIST",
                     help="only cut clips whose SOURCE file has one of these extensions, "
@@ -6111,8 +6067,8 @@ def main():
             return
         tl = DumpTimeline(args.xml)
         if args.panel:
-            sys.exit("error: --panel overlays a dump onto an XML. The input here is "
-                     "already a dump, so there is nothing to overlay it onto.")
+            sys.exit("error: --panel overlays a dump onto an XML. This input is "
+                     "already a dump.")
     else:
         if args.list_sequences:
             show_sequences(Timeline.list_sequences(args.xml))
@@ -6135,7 +6091,7 @@ def main():
         except SequenceChoice as e:
             show_sequences(e.options)
             sys.exit("\nerror: this XML holds more than one sequence — pick one with "
-                     "--sequence NAME or --sequence N (refusing to guess).")
+                     "--sequence NAME or --sequence N.")
         # Merged before filtering and naming, so a repaired path counts as present when
         # the missing-media report is built. The notes are held back and printed with
         # the rest of the summary rather than ahead of the header.
@@ -6179,11 +6135,10 @@ def main():
         # warnings, which reach the manifest and the top of clips.csv, not just stdout.
         _names = sorted({c.clip_name or "(unnamed)" for c in _off})
         tl.warnings.append(
-            f"--disabled keep: {len(_off)} clip(s) that are switched OFF on the timeline "
-            f"were cut anyway: " + ", ".join(_names[:4])
+            f"--disabled keep: {len(_off)} clip(s) switched OFF on the timeline were cut "
+            f"anyway: " + ", ".join(_names[:4])
             + (", …" if len(_names) > 4 else "")
-            + ". They are not part of the finished edit; the `enabled` column in "
-              "clips.csv marks them")
+            + ". The `enabled` column in clips.csv marks them")
 
     # ⚠️ THE AUDIO ITEMS ARE KEPT even when --tracks drops them as outputs. They are the SOURCE
     # of the voice-over mix, and "should audio clipitems become files of their own" is a different
@@ -6270,7 +6225,7 @@ def main():
         n_split = split_transition_overlaps(tl.cuts, tl.sequence_fps)
         args.transitions_split = n_split
         if n_split:
-            print(f"\n  split {n_split} cross-dissolve overlap(s) at the midpoint, so no "
+            print(f"\n  split {n_split} cross-dissolve overlap(s) at the midpoint — no "
                   f"two cuts hold the same frame")
 
     # ⚠️ MARKED BEFORE --ext, NOT AFTER. This block used to sit ~65 lines below the --ext
@@ -6307,8 +6262,8 @@ def main():
         _vids = [c for c in tl.cuts if c.track_type == "video"]
         if _rmode and _vids and not any(c.render_planned for c in _vids):
             sys.exit("internal error: the --ext filter ran before render_planned was "
-                     "marked, so it would delete render-mode cuts whose source extension "
-                     "is not in --ext. Move the marking loop back above the filter.")
+                     "marked and would delete render-mode cuts. Move the marking loop "
+                     "back above the filter.")
         # Filtered BEFORE the indices are assigned, so a run limited to one type gets a
         # clean 01..N rather than gaps where the other types used to be.
         want = {e.strip().lower().lstrip(".") for e in args.ext.split(",") if e.strip()}
@@ -6433,18 +6388,15 @@ def main():
                          if _pk.get(pick_key(c), 0) > 1})
         tl.warnings.append(
             f"{args.duplicate_pick_keys} cut(s) share a (track, in, out) identity with "
-            f"another cut that is NOT identical to them: "
+            f"a different cut: "
             + ", ".join(_names[:4]) + (", …" if len(_names) > 4 else "")
-            + ". They are all kept, but they share a render filename and the panel shows "
-              "them as one row — stacked layers covering exactly the same frames")
+            + ". All kept, but they share a render filename and one row in the panel")
     args.overlap_pairs, args.overlap_frames = overlapping_cut_frames(tl.cuts)
     if args.overlap_pairs:
         tl.warnings.append(
             f"{args.overlap_pairs} pair(s) of cuts share {args.overlap_frames} frame(s) "
-            f"in total — a cross-dissolve puts the blend in BOTH clips, and "
-            f"--transitions ignore cuts each clip at its own in/out. Pass "
-            f"--transitions split to move each boundary to the middle of the overlap "
-            f"instead")
+            f"in total (cross-dissolves). --transitions split moves each boundary to the "
+            f"middle of the overlap")
 
     print(f"{NAME} {VERSION}")
     print(f"  sequence : {tl.sequence_name}  @ {tl.sequence_fps:g} fps")
@@ -6459,9 +6411,8 @@ def main():
             _bits.append(f"{args.disabled_off_track} on tracks switched off")
         print(f"  disabled : {_n} clip(s) switched off on the timeline"
               + (f" ({', '.join(_bits)})" if len(_bits) > 1 else "")
-              + (f" were NOT cut (they are not part of the finished edit — "
-                 f"--disabled keep to include them)" if args.disabled_dropped
-                 else f" were CUT ANYWAY, because --disabled keep was given"))
+              + (" were NOT cut — --disabled keep to include them"
+                 if args.disabled_dropped else " were CUT ANYWAY (--disabled keep)"))
     nested = sum(1 for c in tl.cuts if c.nested_from)
     if nested:
         names = sorted({c.nested_from for c in tl.cuts if c.nested_from})
@@ -6484,14 +6435,12 @@ def main():
         # export that changes nothing.
         _resampled = [c for c in tl.cuts if not c.frame_exact]
         if _resampled:
-            print(f"\n  !! OUTPUT RESAMPLED to {float(args.fps):g} fps. Frames are dropped "
-                  f"or duplicated to hit that rate, so {len(_resampled)} of {len(tl.cuts)} "
-                  f"cut(s) no longer hold the frames the timeline used. Those cuts are "
-                  f"recorded with frame_exact=false.")
+            print(f"\n  !! OUTPUT RESAMPLED to {float(args.fps):g} fps: {len(_resampled)} "
+                  f"of {len(tl.cuts)} cut(s) drop or duplicate frames and are recorded "
+                  f"frame_exact=false.")
         else:
-            print(f"\n  ++ --fps {float(args.fps):g} matches what every cut already reads, "
-                  f"so nothing is resampled and no -r is emitted. The cuts stay frame "
-                  f"exact.")
+            print(f"\n  ++ --fps {float(args.fps):g} matches every cut, so nothing is "
+                  f"resampled and the cuts stay frame exact.")
     for n in merge_notes:
         print(f"  ++ {n}")
 
@@ -6513,9 +6462,8 @@ def main():
             _why = next(c.probe_error for c in tl.cuts if c.probe_error)
             tl.warnings.append(
                 f"{len(_unread)} source file(s) could not be read by ffprobe ({_why}) — "
-                f"their media columns and size estimates are blank and every cut from them "
-                f"is refused: " + ", ".join(_unread[:4])
-                + (", …" if len(_unread) > 4 else ""))
+                f"their media columns are blank and every cut from them is refused: "
+                + ", ".join(_unread[:4]) + (", …" if len(_unread) > 4 else ""))
         # ⚠️ RE-DECIDED HERE, AND THIS IS THE PASS THAT COUNTS. apply_probe has just
         # replaced every declared rate with the measured one, and build_command runs later
         # still — so a flag decided before this point could disagree with the command built
@@ -6534,8 +6482,8 @@ def main():
                     or getattr(args, "render_dir", None)):
                 # Said out loud rather than silently skipped: a tick that stopped costing
                 # a minute should not look like a tick that stopped working.
-                print("\n  --size-probe has nothing to probe in render mode: the pixels "
-                      "come from Premiere, so sizes are priced from the sequence")
+                print("\n  --size-probe does nothing in render mode: sizes are priced "
+                      "from the sequence")
             probe_sizes(tl.cuts, args, tl.sequence_fps)
         # After probing, because the crf estimate scales the SOURCE's own bitrate. The
         # print lives here rather than in the header block above for the same reason —
@@ -6548,10 +6496,8 @@ def main():
         if est:
             capped = parse_bitrate(getattr(args, "bitrate", None) or "")
             print(f"  size     : "
-                  + (f"at most ~{human_bytes(est)} total (a ceiling — short clips "
-                     f"usually use less)" if capped
-                     else f"~{human_bytes(est)} total (estimate — depends on the "
-                          f"footage)"))
+                  + (f"at most ~{human_bytes(est)} total (a ceiling)" if capped
+                     else f"~{human_bytes(est)} total (estimate)"))
 
     # Only a panel dump carries Premiere's interpreted rate, and only after probing can
     # it be compared with the file's own. A disagreement means the edit was built on a
@@ -6562,12 +6508,11 @@ def main():
                      and abs(c.interpreted_fps - c.source_fps) / c.interpreted_fps > 0.002]
     if reinterpreted:
         print(f"\n  !! {len(reinterpreted)} cut(s) use footage Premiere has "
-              f"REINTERPRETED — the edit was built at a different rate to the file's:")
+              f"REINTERPRETED — the edit's rate is not the file's:")
         for c in reinterpreted[:8]:
             print(f"     {c.clip_name}: Premiere {c.interpreted_fps:g} fps, "
                   f"file {c.source_fps:g} fps")
-        print("     Their ranges come from Premiere and are right; their lengths are "
-              "unverified.")
+        print("     Ranges are right; lengths are unverified.")
 
     # An .aep isn't "missing" — it's a Dynamic Link comp that was never a file ffmpeg
     # could read, and the fix is to render it, not to remap a path. Keep them apart.
@@ -6580,18 +6525,18 @@ def main():
                          if c.media_kind == "video" and c.pix_fmt in RICHER})
     for fmt in downgraded:
         print(f"  !! source is {fmt}; output is 8-bit yuv420p — chroma and/or bit depth "
-              f"are reduced. Required for the files to play outside ffmpeg.")
+              f"are reduced (needed for playback).")
 
     missing = [c for c in tl.cuts if not c.source_exists and c.media_kind != "unsupported"]
     if missing:
         print(f"\n  !! {len(missing)} cut(s) reference media that isn't at the recorded path:")
         for p in sorted({c.source_path for c in missing})[:8]:
             print(f"     {p}")
-        print("     Use --remap OLD=NEW to point at the current location.")
+        print("     Fix with --remap OLD=NEW.")
     unsupported = [c for c in tl.cuts if c.media_kind == "unsupported"]
     if unsupported:
         print(f"\n  !! {len(unsupported)} cut(s) are project/comp files (Dynamic Link), "
-              f"not decodable media — render them out first:")
+              f"not decodable media — render them first:")
         for p in sorted({c.source_path for c in unsupported})[:8]:
             print(f"     {p}")
     if missing or unsupported:
@@ -6616,15 +6561,14 @@ def main():
             tl.warnings.append(
                 "--resume: this folder was written with different encode settings ("
                 + "; ".join(_drift[:4]) + (", …" if len(_drift) > 4 else "")
-                + "), so nothing was skipped — every clip is being re-cut at the "
-                  "settings this run was given")
+                + ") — nothing skipped, every clip re-cut at this run's settings")
             say("  --resume: settings changed since this folder was written ("
                 + "; ".join(_drift[:4]) + (", …" if len(_drift) > 4 else "")
                 + ") — re-cutting everything")
         _amb = sum(1 for v in (_ri.get("suffix") or {}).values() if v > 1)
         say(f"  --resume: {len(_ri.get('ids') or {})} clip(s) matched by id, "
             f"{_ri.get('files', 0)} file(s) already in the folder"
-            + (f", {_amb} filename(s) ambiguous and will be re-cut" if _amb else "")
+            + (f", {_amb} filename(s) ambiguous, re-cut" if _amb else "")
             + f" (matched by {_ri.get('how')})")
 
     if args.manifest_only:
@@ -6639,7 +6583,7 @@ def main():
             print("Nothing to cut — fix the missing media first.")
             return
         if input("\nCut them now? [Y/n]: ").strip().lower().startswith("n"):
-            print("Stopped. The cut list above is still yours to use.")
+            print("Stopped. The cut list above still stands.")
             return
         args.manifest_only = False
         print()
@@ -6680,7 +6624,7 @@ def main():
     if getattr(args, "audio", False):
         args.timeline_audio = write_timeline_audio(tl, args)
         if args.timeline_audio.get("file"):
-            print(f"\n  one file for the whole timeline: {args.timeline_audio['file']} "
+            print(f"\n  whole-timeline audio: {args.timeline_audio['file']} "
                   f"({args.timeline_audio['seconds']:.2f}s, "
                   f"{args.timeline_audio['parts']} item(s))")
         elif args.timeline_audio.get("note"):
@@ -6733,10 +6677,9 @@ def main():
         print(f"  (could not check the folder for earlier files: {_e})")
     if _strays:
         _shown = ", ".join(_strays[:4]) + (", …" if len(_strays) > 4 else "")
-        _msg = (f"{len(_strays)} file(s) in this folder were NOT written by this run and are "
-                f"not named by this manifest — most likely an earlier export whose clip "
-                f"ranges, and therefore filenames, were different. They were left alone: "
-                f"{_shown}")
+        _msg = (f"{len(_strays)} file(s) in this folder were NOT written by this run and "
+                f"are not named by this manifest — probably an earlier export. Left "
+                f"alone: {_shown}")
         print(f"\n  !! {_msg}")
 
     print(f"Manifest: {csv_p}\nSheet   : {sheet_p}")

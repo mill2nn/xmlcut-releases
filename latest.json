@@ -1,6 +1,6 @@
 {
-  "version": "3.63",
-  "notes": "Release 3.62 \u2014 the one-frame-early head, root-caused: the seek offset WAS the bug",
+  "version": "3.64",
+  "notes": "Release 3.63 \u2014 release notes cut to one line per change",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

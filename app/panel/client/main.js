@@ -30,6 +30,7 @@
                "cancel", "reveal", "again", "adv", "scriptpath", "openout",
                "pickscript", "cmd", "log", "tip", "ver", "step3",
                "report", "repsum", "tally", "onlyprob", "repcount", "copyrep", "showdead",
+               "chime",
                "copylog",
                "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
@@ -231,9 +232,9 @@
             setBusy(false);
             readStage(-1);
             fail("Premiere has not answered in " + Math.round(READ_TIMEOUT / 1000)
-                 + " seconds. If the read is still running it will finish on its own and "
-                 + "carry on from there. Otherwise switch to Premiere, check a sequence "
-                 + "is open and nothing is waiting on a dialog, then read again.");
+                 + " seconds. A read still running will finish on its own. Otherwise check "
+                 + "in Premiere that a sequence is open and no dialog is waiting, then "
+                 + "read again.");
         }, READ_TIMEOUT);
     }
 
@@ -671,6 +672,11 @@
     ].concat(CL_361);
 
     var CHANGELOG = {
+        "3.64": [
+            "Có tiếng báo khi export xong — một tiếng nếu mọi clip đều ghi được, tiếng khác "
+            + "nếu có clip lỗi hoặc bị Cancel. Tắt được bằng ô \"sound when done\".",
+            "Rút gọn toàn bộ thông báo, cảnh báo, lỗi và chú thích trong panel."
+        ].concat(CL_362),
         "3.63": CL_362,
         "3.62": CL_362,
         "3.61": CL_361,
@@ -1099,11 +1105,9 @@
             // name the likely cause and every path that was checked.
             var tried = state.searchTried || [];
             el.scripthelp.textContent =
-                "xmlcut.py should be bundled inside this panel, at lib/xmlcut.py, and it "
-                + "is not — so this panel was installed by an older installer. Re-run "
-                + "panel/Install xmlcut reader (Mac).command from your xmlcut folder, or "
-                + "press Find and point at xmlcut.py. (" + tried.length
-                + " place(s) checked; the log lists them.)";
+                "lib/xmlcut.py is missing from this panel. Re-run "
+                + "panel/Install xmlcut reader (Mac).command, or press Find and point at "
+                + "xmlcut.py. (" + tried.length + " place(s) checked — see the log.)";
             show(el.scripthelp, true);
             for (var t = 0; t < tried.length; t++) log("looked for xmlcut.py: " + tried[t]);
         }
@@ -1249,8 +1253,7 @@
                     + " pruned — the newest " + keep + " are kept");
             }
             if (r.beside_project === false) {
-                note.push("This project is unsaved, so the read went to the Desktop "
-                    + "instead of beside the project.");
+                note.push("Project unsaved — the read went to the Desktop.");
                 log("project not saved — falling back to the Desktop");
             }
             say("saved", "info", note.join(" "));
@@ -1458,8 +1461,7 @@
         say("ramps", "warn", r.keyframed_ramps > 0
             ? (r.keyframed_ramps + " clip"
                + (r.keyframed_ramps === 1 ? " has" : "s have")
-               + " a keyframed speed ramp. The range extracted is exact; the speed "
-               + "is treated as constant.")
+               + " a keyframed speed ramp — range exact, speed treated as constant.")
             : "");
 
         // The destination folder is named after this sequence, so it is only knowable now.
@@ -1598,14 +1600,14 @@
         if (state.busy || !state.clips.length) return "";
         /* ⚠️ SILENT IN RENDER MODE, because every sentence below it is about the type filter
          * and the type filter does not apply there. "Not selected: .aegraphic (36), .png (15)
-         * — clips of those types are on this timeline and will NOT be cut" is simply FALSE
+         * — those clips will NOT be cut" is simply FALSE
          * when Premiere is rendering them, and "This timeline has no media that can be cut"
          * is false of a timeline made entirely of graphics. A warning that is wrong is worse
          * than no warning: it sends him to fix something that is already right. */
         if (state.cutFrom === "render") return "";
         if (state.typesReset) {
-            return "Nothing was selected, so " + state.typesReset
-                 + " — the types on this timeline — were switched back on.";
+            return "Nothing was selected, so this timeline's types were switched back on: "
+                 + state.typesReset + ".";
         }
         var n = selectedCount();
         var present = presentCuttable();
@@ -1625,8 +1627,7 @@
                 }
             }
             return off.length
-                ? ("Not selected: " + off.join(", ")
-                   + " — clips of those types are on this timeline and will NOT be cut.")
+                ? ("Not selected: " + off.join(", ") + " — those clips will NOT be cut.")
                 : "";
         }
         if (!present.length) {
@@ -1636,8 +1637,7 @@
         for (var i = 0; i < present.length; i++) {
             names.push("." + present[i] + " (" + state.types[present[i]].count + ")");
         }
-        return "Nothing selected. This timeline has " + names.join(", ")
-             + " — tick one of those. A type showing 0 has none on this timeline.";
+        return "Nothing selected. Tick one of " + names.join(", ") + ".";
     }
 
     /* WHICH MODE THE BOTTOM BAR IS IN, derived from what is already true rather than
@@ -1693,7 +1693,7 @@
          * ⚠️ GATED ON THE SCAN, NOT ON state.busy, and a verifier measured why. setBusy(true,
          * "Exporting…") and setBusy(true, "Rendering…") hold state.busy for the whole EXPORT,
          * where dump, script, out and n are all satisfied too — so `state.busy && …` puts
-         * "Export is waiting for the cut list" on the rail during every single export, while
+         * "Waiting for the cut list" on the rail during every single export, while
          * the export is running. !state.running is belt to state.scanning's braces: a scan
          * and a run cannot overlap today, and this row must not be one refactor away from
          * appearing mid-run.
@@ -1703,8 +1703,8 @@
         say("exportwait", "info",
             (state.scanning && !state.running
              && !!(state.dump && state.script && state.out && n > 0))
-                ? ("Export is waiting for the cut list to finish reading. The button comes "
-                   + "back on its own when the read lands — nothing has been lost.")
+                ? ("Waiting for the cut list to finish reading. The button comes back on "
+                   + "its own.")
                 : "");
         if (!state.script && state.dump) {
             el["export"].textContent = "Find xmlcut.py first";
@@ -1735,7 +1735,7 @@
             msg = "Reading the timeline…";
             cls += " busy";
         } else if (!state.script) {
-            msg = "The cut script is missing. Open ⚙ and press Re-check to fetch it.";
+            msg = "Cut script missing — open ⚙ and press Re-check.";
             cls += " error";
         } else if (el.report && el.report.hidden === false && failedRows().length) {
             /* THE FAILURE HEADLINE, in the line that is already at the top of the panel. The
@@ -1751,7 +1751,7 @@
             }
             msg = bad.length + " clip" + (bad.length === 1 ? "" : "s") + " did not write"
                 + (same && why ? " — " + why : "")
-                + ". Retry them below, or open Advanced for the log.";
+                + ". Retry below, or see the log in Advanced.";
             cls += " error";
             /* ⚠️ AND WHEN THEY DO NOT SHARE A REASON, THE REASONS THEMSELVES.
              *
@@ -1773,8 +1773,8 @@
              * that answers "is this safe": nothing is written until Export. What it also
              * claimed — nests resolved, speed ramps read — is on the button's own tooltip,
              * where a capability boast costs no pixels. */
-            msg = "Open the sequence you want in Premiere, then press Read timeline. "
-                + "Nothing is written until you press Export.";
+            msg = "Open your sequence in Premiere, then press Read timeline. "
+                + "Nothing is written until Export.";
         } else if (!state.out) {
             msg = "Choose a folder to save into.";
         } else if (!n) {
@@ -1972,9 +1972,7 @@
                 if (jj.status === "run") longest = Math.max(longest, now - jj.t0);
             }
             say("stall", "warn", "No clip has finished for " + secs(quiet)
-                + ". Still working — the longest running clip has been going "
-                + secs(longest) + ". Large or Drive-backed media takes this long; "
-                + "the times on the rows keep moving while it is alive.");
+                + ". Still working — longest clip " + secs(longest) + ".");
         } else {
             say("stall", "warn", "");
         }
@@ -2078,9 +2076,8 @@
          * so a folder from a DIFFERENT version of this timeline ends up holding a mix of both.
          * Tick "skip clips already there" to add only what is missing, or empty it first. */
         say("dest", "warn", n > 0
-            ? (seqFolder() + "/" + outKind() + "/ exists already, with " + n
-               + " file(s) in it. A re-export overwrites the names it reproduces and leaves "
-               + "the rest, so the folder can end up holding two versions of this timeline.")
+            ? (seqFolder() + "/" + outKind() + "/ already holds " + n
+               + " file(s). Names this export reproduces are overwritten; the rest are left.")
             : "", d);
     }
 
@@ -2143,12 +2140,11 @@
     function sayMismatch(open, weak) {
         var read = readSeqName();
         var what = state.cutFrom === "render"
-            ? "A render would put " + qn(open) + "’s picture into " + qn(read)
-              + "’s clips."
+            ? qn(open) + "’s picture would go into " + qn(read) + "’s clips."
             : "Export would cut " + qn(read) + ", not " + qn(open) + ".";
         say("seq", "error", "Read " + qn(read) + " · " + qn(open) + " is open now. "
             + what + " Press Read again, or switch back."
-            + (weak ? " (Name check only — no sequence id from Premiere.)" : ""));
+            + (weak ? " (Name check only.)" : ""));
     }
 
     /* @param when  "focus" | "idle" | "export". Logged, so a row that appeared can be traced
@@ -2185,8 +2181,8 @@
             log("sequence check (" + when + "): NO REPLY in " + SEQ_ANSWER_MS
                 + "ms — proceeding without it");
             if (when === "export") {
-                say("seq", "warn", "Could not check which sequence is open — Premiere did not "
-                    + "answer. Exporting anyway; make sure the right timeline is in front.");
+                say("seq", "warn", "Premiere did not answer the sequence check. Exporting "
+                    + "anyway — make sure the right timeline is in front.");
             }
             if (cb) cb(true);
         }, SEQ_ANSWER_MS);
@@ -2206,8 +2202,8 @@
                  * It does NOT block the export. Refusing to cut at all because a panel is
                  * newer than the script beside it would strand him mid-job over a check,
                  * and the row plus the log say exactly what is missing. */
-                say("seq", "warn", "Cannot tell which sequence is open. "
-                    + "Reinstall the panel to restore this check.");
+                say("seq", "warn", "Cannot tell which sequence is open — reinstall the "
+                    + "panel to restore this check.");
                 log("sequence check (" + when + "): unreadable reply: " + raw);
                 if (cb) cb(true);
                 return;
@@ -2227,8 +2223,8 @@
                 return;
             }
             if (!r.ok) {
-                say("seq", "warn", "Cannot tell which sequence is open. "
-                    + "Reinstall the panel to restore this check.");
+                say("seq", "warn", "Cannot tell which sequence is open — reinstall the "
+                    + "panel to restore this check.");
                 log("sequence check (" + when + "): " + (r.error || "unknown"));
                 if (cb) cb(true);
                 return;
@@ -2258,9 +2254,8 @@
                 state.seqDrift = !!(state.readFp && openFp && openFp !== state.readFp);
                 say("seq", "error", "");
                 if (state.seqDrift) {
-                    say("seq", "error", readSeqName() + " has been edited since you pressed "
-                        + "Read. The clip list, the ranges and the names are the old edit's. "
-                        + "Press Read again.");
+                    say("seq", "error", readSeqName() + " has been edited since Read. The "
+                        + "list, ranges and names are the old edit's. Press Read again.");
                     log("sequence check (" + when + "): DRIFT — read fp " + state.readFp
                         + ", open fp " + openFp);
                     if (cb) cb(false);
@@ -2304,9 +2299,8 @@
             answered = true;
             state.exportPending = false;
             log(what + ": NO REPLY in " + state.confirmWaitMs + "ms — nothing was exported");
-            say("export", "warn", "Premiere never answered the confirmation, so nothing has "
-                + "been exported. Look for a dialog behind the Premiere window, then press "
-                + "Export again.");
+            say("export", "warn", "Premiere never answered — nothing was exported. Check for "
+                + "a dialog behind Premiere, then press Export again.");
         }, state.confirmWaitMs);
         cs.evalScript("askConfirm(" + jsStr(msg) + ")", function (raw) {
             if (answered) {
@@ -2428,8 +2422,7 @@
             } catch (e) {
                 state.exportPending = false;
                 log("export failed to start: " + e);
-                say("export", "error", "The export could not start: " + e
-                    + " — the log has the detail.");
+                say("export", "error", "Export could not start: " + e + " — see the log.");
             }
         });
     }
@@ -2602,9 +2595,8 @@
         if (already) {
             log("overwriting: " + already + " existing clip(s) in " + outDir()
                 + " will be replaced where the names match; anything else is left in place");
-            say("clash", "warn", already + " clip(s) already in that folder are being "
-                + "overwritten. Files this export does not reproduce are left as they are, so "
-                + "the folder can end up holding two versions of this timeline.");
+            say("clash", "warn", already + " clip(s) in that folder are being overwritten. "
+                + "Files this export does not reproduce are left as they are.");
         } else {
             say("clash", "warn", "");
         }
@@ -2703,7 +2695,7 @@
                     setRunning(false);
                     setBusy(false);
                     fail("Premiere did not return a readable reply from the render."
-                        + "\nThe raw text is in the log, under the gear.");
+                        + "\nSee the log.");
                     return;
                 }
                 for (i = 0; i < (r.tried || []).length; i++) log("render: " + r.tried[i]);
@@ -2746,8 +2738,8 @@
                      * re-uses _renders/, and a stop before the encode leaves no report to
                      * retry from. Say what the state is; promise nothing. */
                     say("renders", "warn", "Stopped after " + r.written + " of "
-                        + spec.length + " clip(s). Nothing was cut. The finished ranges are "
-                        + "still in _renders/, but exporting again renders from the start.");
+                        + spec.length + " clip(s). Nothing was cut. The finished ranges stay "
+                        + "in _renders/; exporting again renders from the start.");
                     log("render: STOPPED at range " + (r.stopped_at === undefined
                         ? "?" : r.stopped_at) + " — the encode was not started");
                     return;
@@ -2780,9 +2772,9 @@
                         + (r.one_pass_used ? "one pass" : "two passes"));
                 }
                 if (r.failed) {
-                    notes.push("⚠ Premiere did not render " + r.failed + " cut(s) — those "
-                        + "are marked 'no render' below and were NOT cut from their source "
-                        + "instead");
+                    notes.push("⚠ Premiere did not render " + r.failed
+                        + " cut(s) — marked 'no render' below, and NOT cut from their "
+                        + "source either");
                 }
                 if (!r.restored) {
                     notes.push("⚠ your sequence's in/out points could not be put back — "
@@ -2832,7 +2824,7 @@
             fail("The selection could not be written to " + workDir()
                 + ", so this export would have cut every clip instead of the "
                 + (retry.length || pickedClips().length) + " you ticked."
-                + "\nNothing was started. The reason is in the log, under the gear.");
+                + "\nNothing was started — see the log.");
             return;
         }
         if (pickPath) {
@@ -2978,12 +2970,10 @@
                  * delivery name, --resume cannot mistake wreckage for a finished file and the
                  * original sentence is true again in both states. */
                 say("renders", "warn", state.resume
-                    ? "Stopped. Some clips in the folder may be half-written, and "
-                      + "“skip clips already there” is on — so exporting again "
-                      + "KEEPS them instead of re-cutting them. Untick it to cut everything "
-                      + "again."
+                    ? "Stopped. “skip clips already there” is on, so exporting again "
+                      + "KEEPS any half-written clip. Untick it to re-cut everything."
                     : "Stopped. The clips already written are in the folder; "
-                      + "exporting again rewrites them along with the rest.");
+                      + "exporting again rewrites them.");
                 log("run stopped by Cancel (exit " + code + ")");
             }
             cancelLabel();
@@ -3007,6 +2997,11 @@
             /* AFTER the report, because whether to keep the renders depends on what the
              * report says failed — and never before, because the encode reads them. */
             if (renderDirPath) cleanRenders(renderDirPath, built, code);
+
+            /* Same place, same reason: the report is what knows whether this went cleanly.
+             * A cancel is NOT clean — the whole point of the two tones is that you can tell
+             * from across the room whether to come back. */
+            chime(code === 0 && built && !state.cancelled && !failedRows().length);
 
             if (code === 0) {
                 if (!built) fail("The run finished but wrote no manifest to report on.");
@@ -4049,13 +4044,13 @@
         if (state.fetching) return;
         var dir = extensionDir();
         if (!dir) {
-            setEngineStat("error", "xmlcut.py is missing and this panel cannot work out "
-                          + "where it is installed, so it cannot repair itself. Press Find.");
+            setEngineStat("error", "xmlcut.py is missing and this panel cannot find "
+                          + "where it is installed. Press Find.");
             return;
         }
         if (!https) {
-            setEngineStat("error", "xmlcut.py is missing and this panel has no network "
-                          + "module to fetch it. Re-run the installer, or press Find.");
+            setEngineStat("error", "xmlcut.py is missing and cannot be fetched. Re-run "
+                          + "the installer, or press Find.");
             return;
         }
 
@@ -4425,10 +4420,9 @@
      * strength of that manifest would be false. */
     function sayAudioRenumbered() {
         if (!state.audioDropped || state.audioNumbering !== "premiere") return;
-        say("audionum", "warn", "Audio track numbers now match Premiere's own, which the "
-            + "earlier numbering did not. Your saved choice of A" + state.audioDropped
-            + " could have meant a different track under the new numbers, so it was cleared "
-            + "and every audio track is selected. Pick the track you want again.");
+        say("audionum", "warn", "Audio track numbers now match Premiere's. Your saved A"
+            + state.audioDropped
+            + " was cleared and every audio track is selected — pick again.");
         // Once. It is news about a migration, not a standing state.
         state.audioDropped = "";
     }
@@ -4741,15 +4735,15 @@
         // was carrying a number that is already the only number in the sentence.
         out.push("Premiere renders each cut at ~"
                  + (mb < 10 ? mb.toFixed(1) : Math.round(mb))
-                 + " Mbps, then ffmpeg encodes it at your quality.");
+                 + " Mbps, then ffmpeg encodes at your quality.");
         // Said because it is not obvious and it is wrong for a retimed clip: the scan runs
         // before any render exists, so the estimate can only come from the source.
         /* Both bases, in one sentence. It said only "from the source clips", which became
          * half true the moment rows with no source started being priced from the sequence's
          * frame size instead — and a blank was what sent the reviewer looking in the first
          * place, so which basis a number has is worth the eight extra words. */
-        out.push("Sizes are estimated from the source clips, or from the sequence's frame "
-                 + "size where a clip has no source — a nest, a title, an adjustment layer.");
+        out.push("Sizes are estimated from each source, or from the sequence's frame size "
+                 + "where a clip has none.");
         say("rendermode", "info", out.join(" "));
     }
 
@@ -4833,17 +4827,15 @@
         if (why) {
             /* Said out loud, because a folder that is sometimes there and sometimes not is a
              * thing you go looking for an explanation of. */
-            say("renders", "info", "The rendered ranges are still in _renders/ because " + why
-                + " — Retry re-encodes those without asking Premiere to render them again. "
-                + "Delete the folder by hand once you are done with it.");
+            say("renders", "info", "_renders/ kept for Retry: " + why
+                + ". Delete it by hand when you are done.");
             return;
         }
         if (rmTree(dir)) {
             log("removed the render scratch: " + dir);
             say("renders", "info", "");
         } else {
-            say("renders", "info", "The rendered ranges in _renders/ could not be removed. "
-                + "They are Premiere intermediates and safe to delete by hand.");
+            say("renders", "info", "_renders/ could not be removed — safe to delete by hand.");
         }
     }
 
@@ -5055,10 +5047,10 @@
         // Never a scaled number. The sizes shown are the ones that were measured, and this
         // says which settings they belong to and what would refresh them.
         say("sizes", "warn", stale
-            ? ("The sizes on screen were measured at " + codecName(state.probeVcodec)
-               + " CRF " + state.probeCrf + " · " + state.probeScale + "% size, not at "
+            ? ("Sizes were measured at " + codecName(state.probeVcodec)
+               + " CRF " + state.probeCrf + " · " + state.probeScale + "%, not "
                + codecName(settings().vcodec) + " CRF " + state.crfVal + " · " + state.scale
-               + "%. Re-measure to update them.")
+               + "%. Re-measure to update.")
             : "");
     }
 
@@ -5093,9 +5085,8 @@
         // Rates are rationals: 29.97 is 30000/1001 and is not 30. A thousandth is the same
         // tolerance renderSequence() prints the sequence rate at.
         var TOL = 0.001;
-        var tail = " Frames are dropped or duplicated to hit that rate, so those clips will "
-                 + "NOT hold the frames the timeline used, and the manifest records them as "
-                 + "frame_exact = false.";
+        var tail = " Frames are dropped or duplicated — not frame exact, and the manifest "
+                 + "records frame_exact = false.";
         if (state.cutFrom === "render") {
             var seq = state.info ? Number(state.info.fps || 0) : 0;
             if (seq > 0 && Math.abs(seq - want) < TOL) return "";
@@ -5114,9 +5105,9 @@
         if (!n) return "";
         return "Forcing " + el.fps.value + " fps RESAMPLES " + n + " of " + picked.length
             + " ticked clip" + (picked.length === 1 ? "" : "s")
-            + " — their sources are not already at that rate"
+            + " — their sources are not at that rate"
             + (unknown
-                ? " (" + unknown + " of them because the source rate could not be read)."
+                ? " (" + unknown + " because the source rate could not be read)."
                 : ".")
             + tail;
     }
@@ -5203,10 +5194,9 @@
         // and said together rather than one of them overwriting the other.
         var refused = [];
         if (s.bitrate) {
-            refused.push("\u201c" + name + "\u201d targets a bitrate of "
-                + s.bitrate + ". This panel exports by CRF only, so its quality setting "
-                + "was NOT applied — CRF " + state.crfVal + " still stands. Run "
-                + "xmlcut.py --bitrate " + s.bitrate + " from a terminal if you need it.");
+            refused.push("\u201c" + name + "\u201d targets bitrate " + s.bitrate
+                + ", which this panel cannot do — CRF " + state.crfVal + " still stands. "
+                + "Use xmlcut.py --bitrate " + s.bitrate + " from a terminal.");
         } else {
             // parseFloat, not parseInt: a preset saved at crf 18.5 must not come back
             // as 18 while still calling itself by the same name.
@@ -5232,9 +5222,8 @@
              * Falling back to H.264 silently would export something the preset's name says
              * it is not, and setting the value anyway would leave the dropdown blank. */
             refused.push("\u201c" + name + "\u201d was saved with encoder " + vc
-                + ", which this panel cannot show. Its encoder was NOT applied — "
-                + codecName(el.vcodec.value) + " still stands. Run xmlcut.py --vcodec "
-                + vc + " from a terminal if you need it.");
+                + ", which this panel cannot show — " + codecName(el.vcodec.value)
+                + " still stands. Use xmlcut.py --vcodec " + vc + " from a terminal.");
         } else {
             el.vcodec.value = vc;
         }
@@ -5344,8 +5333,7 @@
                 + (r.update ? ", " + r.update.version + " available" : ", up to date"));
             if (!r.update) {
                 if (manual) {
-                    setUpd("done", "Up to date — running " + r.current
-                           + ", nothing newer published.", "");
+                    setUpd("done", "Up to date — running " + r.current + ".", "");
                 } else {
                     show(el.updbar, false);
                 }
@@ -5366,7 +5354,7 @@
 
     function applyUpdate() {
         el.updbtn.hidden = true;
-        setUpd("busy", "Downloading and checking every file first…", "");
+        setUpd("busy", "Downloading and checking every file…", "");
         runJson(["--self-update-json"], function (r, e) {
             if (!r) {
                 setUpd("error", "Update failed: " + e, "");
@@ -5383,10 +5371,9 @@
                 var restart = (r.restart_needed !== false);
                 setUpd("done", restart
                     ? ("Updated to " + r.version
-                       + ". Quit Premiere (Cmd-Q) and reopen it to load the new panel.")
+                       + ". Quit Premiere (Cmd-Q) and reopen it.")
                     : ("Updated to " + r.version
-                       + " — cut engine only, so it is already live. No restart needed; "
-                       + "your next export uses it."), "");
+                       + " — cut engine only, already live. No restart needed."), "");
                 log("update changed: " + ((r.changed || []).join(", ") || "nothing"));
                 readVersion();
             } else {
@@ -5451,7 +5438,7 @@
             n = Number(have[h].items || 0);
             offer.push("A" + have[h].index + " (" + n + (n === 1 ? " item" : " items") + ")");
         }
-        var had = offer.length ? " This timeline has " + offer.join(", ") + "." : "";
+        var had = offer.length ? " Timeline has " + offer.join(", ") + "." : "";
         /* ⚠️ THE FILES THAT WENT IN, BY NAME. This is the one fact a wrong number cannot fake,
          * and its absence is why "A2 only" shipped a full copy of the background music for a
          * whole release with every numeric field reading green: nothing anywhere named the
@@ -5467,17 +5454,15 @@
         var mix = ta.file
             ? (" Written: " + ta.file
                + (ta.seconds ? ", " + Number(ta.seconds).toFixed(2) + "s" : "")
-               + (ta.parts ? ", from " + ta.parts + " item(s)" : "") + "."
-               + (src.length ? " It holds: " + src.join(", ") + "." : ""))
-            : (ta.note ? " " + String(ta.note) : " No audio file was written.");
+               + (ta.parts ? ", " + ta.parts + " item(s)" : "") + "."
+               + (src.length ? " Holds: " + src.join(", ") + "." : ""))
+            : (ta.note ? " " + String(ta.note) : " No audio file written.");
 
         // THE BUG. Said first, said loudly, and said in the words of what it costs.
         if (want.length && want.join(",") !== used.join(",")) {
-            say("audio", "error", "AUDIO TRACK MISMATCH — " + trackNames(want)
-                + " was asked for, but the mix read "
-                + (used.length ? trackNames(used) : "no track")
-                + ". The audio file beside these clips is NOT the track you chose." + had
-                + mix);
+            say("audio", "error", "AUDIO TRACK MISMATCH — asked for " + trackNames(want)
+                + ", mix read " + (used.length ? trackNames(used) : "no track")
+                + ". The audio file is NOT the track you chose." + had + mix);
             return;
         }
         // Asked for and got: still reported, because "it worked" is only checkable if the
@@ -5485,12 +5470,46 @@
         var sev = ta.file ? "info" : "warn";
         if (!want.length) {
             say("audio", sev, "Audio: read "
-                + (used.length ? "every audio track — " + trackNames(used)
-                               : "no audio track")
+                + (used.length ? "all tracks — " + trackNames(used) : "no track")
                 + "." + mix);
             return;
         }
         say("audio", sev, "Audio: read " + trackNames(used) + ", as asked." + had + mix);
+    }
+
+    /* A SOUND WHEN THE RUN ENDS, and deliberately not a dialog.
+     *
+     * An export runs for minutes and the person who started it is in Premiere doing
+     * something else, or away from the desk. A modal would take keyboard focus in the
+     * middle of an edit, and ExtendScript's own alert() blocks Premiere's UI thread until
+     * somebody dismisses it — on a long run that lands while they are working. A sound
+     * carries across a room and costs nothing.
+     *
+     * TWO sounds, because the outcome matters more than the fact it finished: you should be
+     * able to tell from the next room whether you need to come and look.
+     *
+     * afplay and both files ship with macOS and the installer is Mac-only, so there is no
+     * asset to bundle and nothing to keep in sync at publish time. An <audio> element was
+     * the other option and a worse one: Chromium 88 can refuse to play one without a user
+     * gesture, and the gesture that started this run was minutes ago.
+     *
+     * ⚠️ IT CAN NEVER BREAK A FINISHED EXPORT. Every clip is already on disk and the report
+     * is already on screen when this runs, so a missing binary or a muted machine must cost
+     * a log line and nothing more. An advisory that throws is how a completed run got a
+     * traceback and a non-zero exit earlier in this file's history. */
+    var CHIME_OK = "/System/Library/Sounds/Glass.aiff";
+    var CHIME_BAD = "/System/Library/Sounds/Basso.aiff";
+
+    function chime(clean) {
+        try {
+            if (!el.chime || !el.chime.checked) return;
+            var cp = window.cep_node.require("child_process");
+            var p = cp.spawn("/usr/bin/afplay", [clean ? CHIME_OK : CHIME_BAD],
+                             { detached: true, stdio: "ignore" });
+            if (p && p.unref) p.unref();
+        } catch (e) {
+            log("chime: " + e);
+        }
     }
 
     function buildReport() {
@@ -5636,21 +5655,20 @@
          * which is what matters on a 320px dock where eight of these can be on screen at
          * once. Each has to be wired as it is built — see wireTip(). */
         var PILL_TIP = {
-            written: "The cut's file has been written into the output folder. It is on disk "
-                   + "now; nothing else has to happen to it.",
+            written: "The cut's file is on disk in the output folder. Nothing else has to "
+                   + "happen to it.",
             kept: "The file was already in the folder and “skip clips already there” "
-                + "is ticked, so it was left exactly as it was rather than written again.",
-            failed: "The engine could not write this cut. Its row says why, and Retry below "
+                + "is ticked, so it was left as it was.",
+            failed: "The engine could not write this cut. Its row says why; Retry below "
                   + "runs just these again.",
-            missing: "Premiere has no file behind this clip — the media is offline or the "
-                   + "link is broken — so there was nothing to cut from.",
-            unsupported: "Not something that can be cut from a source file: a title, a "
-                       + "graphic or an effect layer. Cutting from a timeline render "
-                       + "includes these.",
-            ramps: "The clip's speed CHANGES across the cut rather than sitting at one "
-                 + "value, so its source range is the engine's best reading of the ramp.",
+            missing: "Premiere has no file behind this clip — offline media or a broken "
+                   + "link — so there was nothing to cut from.",
+            unsupported: "Nothing to cut from a source file: a title, a graphic or an "
+                       + "effect layer. A timeline render includes these.",
+            ramps: "The clip's speed CHANGES across the cut, so its source range is the "
+                 + "engine's best reading of the ramp.",
             retimed: "The clip's speed was changed in the timeline, so the cut is longer or "
-                   + "shorter than the piece of source it comes from.",
+                   + "shorter than the source it comes from.",
             reversed: "The clip runs backwards in the timeline."
         };
         var pills = [];
@@ -6223,8 +6241,8 @@
         var base = (repeat && repeat.ok) ? repeat : first;
         if (!(base && base.ok && longer && longer.ok
               && longer.frames !== base.frames)) {
-            L.push("Only one length rendered, so fixed overhead cannot be separated"
-                + " from encoding time. The numbers above are still real timings.");
+            L.push("Only one length rendered — overhead cannot be separated from encoding"
+                + " time. The timings above are real.");
             pocFinish(L, r);
             return;
         }
@@ -6258,8 +6276,7 @@
         L.push("   the whole sequence rendered once ≈ " + pocMins(oneGo)
             + " (then sliced by ffmpeg)");
         L.push("");
-        L.push("Two timings is a line, not a model — enough to tell a second a cut"
-            + " from fifteen, which is all this has to decide.");
+        L.push("Two timings, not a model — enough to tell a second a cut from fifteen.");
         pocFinish(L, r);
     }
 
@@ -6277,8 +6294,7 @@
 
     function runRenderPoc() {
         if (!state.clips.length) {
-            pocSay("Read the timeline first — the probe renders two of its own clips,"
-                + " so it needs the cut list.", "warn");
+            pocSay("Read the timeline first — the probe needs the cut list.", "warn");
             return;
         }
         if (state.running) {
@@ -6292,15 +6308,14 @@
         }
         var dir = String(state.out || "").replace(/\/+$/, "");
         if (!dir) {
-            pocSay("Set a destination folder first — the renders have to land"
-                + " somewhere.", "warn");
+            pocSay("Set a destination folder first.", "warn");
             return;
         }
         dir = dir + "/_render_poc";
 
         el.pocrender.disabled = true;
-        pocSay("Rendering " + (ranges.length + 1) + " range(s) through Premiere."
-            + "\nPremiere is busy until it finishes. This panel stays live.", "");
+        pocSay("Rendering " + (ranges.length + 1) + " range(s)."
+            + "\nPremiere is busy until it finishes; this panel stays live.", "");
         log("poc: probing " + dir);
 
         cs.evalScript("probeRender(" + jsStr(dir) + ", " + jsStr(pocSpec(ranges))
@@ -6310,8 +6325,8 @@
                 var r = hostReply(raw);
                 if (!r) {
                     log("poc: unreadable reply: " + raw);
-                    pocSay("Premiere did not return a readable reply. The raw text is"
-                        + " in the log, under the gear.", "error");
+                    pocSay("Premiere did not return a readable reply — see the log.",
+                        "error");
                     return;
                 }
                 pocReport(r);
@@ -6528,8 +6543,8 @@
     /* --------------------------------------------------------------- boot */
 
     if (!node) {
-        fail("This panel needs Node access, which the manifest enables with "
-             + "--enable-nodejs. Reinstall the panel and restart Premiere.");
+        fail("This panel needs Node access (--enable-nodejs in the manifest). Reinstall "
+             + "the panel and restart Premiere.");
         el.read.disabled = true;
     } else {
         state.python = findPython();
