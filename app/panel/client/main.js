@@ -30,6 +30,7 @@
                "cancel", "reveal", "again", "adv", "scriptpath", "openout",
                "pickscript", "cmd", "log", "tip", "ver", "step3",
                "report", "repsum", "tally", "onlyprob", "repcount", "copyrep", "showdead",
+               "copylog",
                "tablewrap", "cliptable", "clipbody",
                "listnote", "listlbl", "savedbox", "savedpath", "showsaved",
                "mergebox", "resume", "updbar", "updtext", "updbtn",
@@ -733,8 +734,7 @@
             "ffprobe lỗi không còn bị nuốt và hiểu nhầm thành \"file không có tiếng\"."
     ].concat(CL_358);
 
-    var CHANGELOG = {
-        "3.60": [
+    var CL_360 = [
             "⚠️ SỬA LỖI CỦA CHÍNH BẢN 3.59: một số clip ra file chỉ có ĐÚNG 1 FRAME. "
             + "Bản 3.59 tính lại cửa sổ thời gian của nest theo pproTicks (chính xác dưới "
             + "mức frame) — nhờ vậy lấy lại được phần đuôi nest bị mất, nhưng chỗ hai lần "
@@ -744,7 +744,24 @@
             + "3.57 và 3.58 cho 52 cut không có mẩu nào, 3.59 cho 56 cut trong đó 2 mẩu "
             + "0.009s và 0.003s. Giờ cut không chiếm frame nào trên timeline bị bỏ và "
             + "được báo rõ — clip 1 frame THẬT (timeline dài đúng 1 frame) vẫn giữ nguyên."
-        ].concat(CL_359),
+    ].concat(CL_359);
+
+    var CHANGELOG = {
+        "3.61": [
+            "⚠️ PANEL GIỜ BÁO FILE CŨ CÒN SÓT TRONG FOLDER. Export ghi đè tự động, NHƯNG "
+            + "chỉ ghi đè khi TRÙNG ĐÚNG TÊN — mà tên file có chứa khoảng in/out của source, "
+            + "nên một bản sửa làm lệch khoảng đó vài phần trăm giây là cùng một cut ra tên "
+            + "MỚI và file cũ vẫn nằm nguyên bên cạnh. Đo trên một timeline thật qua hai "
+            + "bản: bản trước ghi 18 file, bản sau ghi 16, trong đó 14 tên cũ không bao giờ "
+            + "được ghi lại. Folder không xoá sẽ chứa lẫn hai lần export, và \"file số 9\" "
+            + "không còn là file số 9 trong manifest — đúng kiểu lỗi frame báo trên một bản "
+            + "đã sửa rồi. Giờ cuối mỗi lần export tool liệt kê những file KHÔNG phải do lần "
+            + "này ghi ra. Nó chỉ báo, không xoá gì — và file riêng của bạn (không có số thứ "
+            + "tự ở đầu tên) không bị tính vào.",
+            "Thêm nút Copy log trong phần Advanced — bấm một phát copy toàn bộ log kèm số "
+            + "phiên bản, để gửi kèm khi báo lỗi."
+        ].concat(CL_360),
+        "3.60": CL_360,
         "3.59": CL_359,
         "3.54": CL_354,
         "3.55": CL_355,
@@ -6093,6 +6110,16 @@
     });
 
     // The FULL path, not the shortened label on screen — what you paste to a teammate.
+    /* The whole log, header included, so a pasted report says which build produced it —
+     * a log without a version is a log nobody can act on. */
+    if (el.copylog) {
+        el.copylog.addEventListener("click", function () {
+            var body = el.log.textContent === "—" ? "" : el.log.textContent;
+            var ver = (el.ver && el.ver.textContent) || "?";
+            copyText("Raw-cutter " + ver + " log\n" + body, el.copylog, "Copy log");
+        });
+    }
+
     el.copyout.addEventListener("click", function () {
         copyText(state.out, el.copyout, "Copy");
     });

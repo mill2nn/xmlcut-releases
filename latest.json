@@ -1,6 +1,6 @@
 {
-  "version": "3.60",
-  "notes": "Release 3.59",
+  "version": "3.61",
+  "notes": "Release 3.60 \u2014 fix a 3.59 regression: sub-frame nest slivers delivered as 1-frame files",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

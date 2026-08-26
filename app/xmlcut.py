@@ -42,7 +42,12 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.60"
+VERSION = "3.61"
+
+# Files this tool writes into an output folder: an index prefix, then anything, then a
+# media extension. Used to tell an earlier run's leftovers from a user's own files, which
+# must never be reported as strays.
+CUT_FILE_RE = re.compile(r"^\d+_.*\.(?:mp4|mov|mkv|m4v|m4a|wav|mp3|aac)$", re.I)
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -6648,6 +6653,45 @@ def main():
     print(f"\nDone: {tally['ok']} written, {tally['failed']} failed, "
           f"{tally['missing_source']} missing source, "
           f"{tally['unsupported']} unsupported{extra}.")
+
+    # ⚠️ WHAT ELSE IS IN THE FOLDER, because "export again" does NOT refresh it.
+    #
+    # Overwrite is automatic, but it only replaces an EXACT filename match — and the
+    # filename carries the source range, so a fix that moves a range by a hundredth of a
+    # second gives the same cut a NEW name and leaves the old file sitting beside it.
+    # Measured across two real releases on one real timeline: 18 files written, then 16
+    # written by the next version, of which 14 of the originals are never written again.
+    # A folder nobody clears therefore ends up holding two runs at once, and the numbers a
+    # human counts by ("file 9") no longer mean what the manifest means. The reviewer hit
+    # exactly this: he re-exported without clearing, then reported head-frame faults that
+    # could not be reproduced from the same XML — they were files an older build had left.
+    #
+    # This does not delete anything. Deciding what to keep is the editor's call; being told
+    # is not.
+    # ⚠️ CATCHES Exception, NOT OSError, AND THAT BREADTH IS DELIBERATE. This runs after
+    # every clip is on disk, so anything it raises destroys a COMPLETED export's exit code
+    # and prints a traceback over a run that actually succeeded. The first draft of this
+    # block referred to a name that does not exist in this scope and did exactly that —
+    # 19 files written, then `NameError` and a non-zero exit. An advisory may not be able
+    # to fail the thing it is advising about.
+    try:
+        _mine = {c.output_file for c in tl.cuts if getattr(c, "output_file", "")}
+        _mine.add(Path(csv_p).name)
+        _mine.add(Path(sheet_p).name)
+        _strays = sorted(
+            f.name for f in args.out.iterdir()
+            if f.is_file() and CUT_FILE_RE.match(f.name) and f.name not in _mine)
+    except Exception as _e:                                    # noqa: BLE001
+        _strays = []
+        print(f"  (could not check the folder for earlier files: {_e})")
+    if _strays:
+        _shown = ", ".join(_strays[:4]) + (", …" if len(_strays) > 4 else "")
+        _msg = (f"{len(_strays)} file(s) in this folder were NOT written by this run and are "
+                f"not named by this manifest — most likely an earlier export whose clip "
+                f"ranges, and therefore filenames, were different. They were left alone: "
+                f"{_shown}")
+        print(f"\n  !! {_msg}")
+
     print(f"Manifest: {csv_p}\nSheet   : {sheet_p}")
 
 

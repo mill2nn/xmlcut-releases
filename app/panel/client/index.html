@@ -494,7 +494,14 @@
     <summary>Advanced</summary>
     <p class="lbl">Compare this sequence against its XML export</p>
     <code id="cmd"></code>
-    <p class="lbl">Log</p>
+    <!-- ⚠️ THE LOG IS THE ONE THING PEOPLE ARE ASKED TO SEND BACK, and it could not be
+         copied: body sets user-select:none and .log opts back in, but selecting hundreds of
+         lines by dragging inside a scrolling <pre> is not something anyone does twice. The
+         reviewer asked for this by name — "cho thêm nút Copy để bấm 1 phát copy hết đc log"
+         — so that a whole run's log reaches a bug report in one click. -->
+    <p class="lbl">Log
+        <button id="copylog" class="linkbtn">Copy log</button>
+    </p>
     <pre id="log" class="log">—</pre>
 </details>
 
