@@ -295,10 +295,10 @@
          different shapes instead of one. The inert one stays visible and disabled where
          it is rather than pretending to work. -->
     <div class="opts">
-        <label class="tick" id="wfwrap"><input type="checkbox" id="wholeframes">whole frames only
-            <span class="q" data-tip="Pulls each cut onto whole frames. A start that falls mid-frame keeps the frame it lands IN — the one Premiere was showing at that instant — and an end that falls mid-frame moves down to the previous one. A tick-derived in-point rarely lands on a frame boundary, so without this the tail can hold a frame that was never on screen at that position. Costs at most one frame at the end, and never empties a cut.">?</span>
-            <i class="tickwhy" id="wfwhy" hidden>· nothing to trim in timeline mode</i>
-        </label>
+        <!-- The "whole frames only" tick is gone: whole-frame trimming is unconditional
+             now. It had one correct setting — a fractional in-point sits in a frame the
+             previous shot also occupies, and keeping it shows the neighbour at the head —
+             so offering the other one was a trap nobody could evaluate. -->
         <label class="tick"><input type="checkbox" id="resume">skip clips already there
             <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. Useful after fixing offline media on a long timeline — but it counts a file left half-written by a cancelled or crashed run as one that already exists, so those are kept too.">?</span>
         </label>

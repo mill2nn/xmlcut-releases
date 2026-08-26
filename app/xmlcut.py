@@ -42,7 +42,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.61"
+VERSION = "3.62"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -3501,11 +3501,48 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         # file did not match its own label. One definition, one call.
         n_frames = max(1, cut.source_consumed_frames
                        or consumed_frames(ss, t, fps))
-        # ffmpeg's -ss takes the first frame whose PTS is >= the seek time, so aim
-        # HALF A FRAME EARLY to land squarely on the wanted frame. Without this, a
-        # source at a different rate to the timeline (24 fps media in a 30 fps
-        # sequence) computes a time a hair past the boundary and starts one late.
-        ss = max(0.0, (start_f - 0.5) / fps)
+        # ⚠️ AIM A QUARTER FRAME *INTO* THE WANTED FRAME, NOT HALF A FRAME BEFORE IT.
+        #
+        # The rule this line used to state — "-ss takes the first frame whose PTS is >=
+        # the seek time, so aim half a frame early" — is FALSE, and it cost a year of
+        # one-frame-early heads. With -ss before -i and an accurate seek, ffmpeg hands
+        # back the frame that is DISPLAYING at that instant. Half a frame early is inside
+        # the PREVIOUS frame's display interval, so that is the frame you get.
+        #
+        # MEASURED on real media (30 fps, exact PTS, frame 320 at 10.666667 and frame 321
+        # at 10.700000), asking for frame 321:
+        #     (f - 0.5)/fps  -> -ss 10.683333 -> frame 320   WRONG, one early
+        #     f/fps          -> -ss 10.700000 -> frame 321   right, but sits ON the
+        #                                                    boundary, so float noise can
+        #                                                    tip it either way
+        #     (f + 0.25)/fps -> -ss 10.708333 -> frame 321   right, with margin
+        #     (f + 0.5)/fps  -> -ss 10.716667 -> frame 322   WRONG, one late
+        #
+        # A quarter frame in is 0.25 from the boundary behind and 0.75 from the one ahead,
+        # which is the widest margin available on both sides. It also keeps the original
+        # intent — a rate-mismatched source (24 fps media in a 30 fps sequence) computing a
+        # time a hair past the boundary must not start one LATE — because a hair past the
+        # boundary plus a quarter frame is still inside the same frame.
+        #
+        # This is what the reviewer reported three times as "lech 1 frame dau tien sang
+        # canh dang truoc": the first frame belonged to the shot before. Reproduced on his
+        # own timeline — 3 of 13 measurable clips came out one frame early, every one of
+        # them a cut whose in-point landed exactly on a frame boundary.
+        # ⚠️ THE FRAME'S OWN PTS. NO OFFSET. Any offset at all is a guess about how
+        # ffmpeg resolves a seek that lands between two frames, and that guess is not
+        # stable across files. MEASURED on two real sources, both with exact 1/30
+        # timestamps starting at 0, asking for a known frame:
+        #     seek                     2.1 enhanced.mp4      S17.mp4
+        #     (f - 0.5)/fps            (was correct here)    ONE EARLY
+        #     (f + 0.25)/fps           ONE LATE              correct
+        #     f/fps                    correct               correct
+        # The half-frame-early form shipped for months and is what the reviewer reported
+        # three times as "lech 1 frame dau tien sang canh dang truoc" — the first frame
+        # belonged to the previous shot. A quarter-frame-late form fixed those and broke
+        # four other cuts the other way. Seeking to the frame's exact PTS is the only
+        # expression that was right on every case, which is what you would expect: it is
+        # the only one that does not ask ffmpeg to break a tie.
+        ss = max(0.0, start_f / fps)
         t = (n_frames + 1) / fps     # generous bound; the exact count is pinned below
 
     if cut.track_type == "audio":
@@ -4559,7 +4596,12 @@ def trim_to_whole_frames(cuts: list[Cut]) -> int:
             continue
         in_f = c.source_in_seconds * fps
         out_f = (c.source_in_seconds + c.source_duration_seconds) * fps
-        first = math.floor(in_f + e)            # the frame Premiere SHOWS at the in-point
+        # ⚠️ START UP, END DOWN — the product decision, and it is the conservative one.
+        # A fractional in-point sits inside a frame that the shot BEFORE also occupies, so
+        # rounding the start DOWN hands that shared frame to this cut and the head shows
+        # the previous scene. Rounding up gives up at most one frame and can never show
+        # material from the neighbour. Same argument at the tail, mirrored.
+        first = math.ceil(in_f - e)
         last = math.floor(out_f + e)            # a fractional end moves DOWN
         n = last - first
         if n < 1:
@@ -5364,7 +5406,9 @@ def export_summary(tl: Timeline, args) -> dict:
             # Whether this run was ASKED for sidecar audio. Without it, "no sidecars in the
             # manifest" is indistinguishable from "none were wanted" — and a verifier cannot
             # fail a run for producing nothing it was told to produce.
-            "whole_frames": bool(getattr(args, "whole_frames", False)),
+            # Always true now, and recorded so a dataset built from older exports can be
+            # told apart from one built after the rule stopped being optional.
+            "whole_frames": True,
             # What the pixels came from. A dataset reader cannot tell a clip cut from
             # source from one cut from a render by looking at it, and they are different
             # things: one is the camera original, the other is the edit as it played.
@@ -5784,6 +5828,8 @@ def main():
     ap.add_argument("--bitrate", metavar="RATE",
                     help="target an average bitrate instead of a quality (e.g. 8M, "
                          "5000k). Makes file size predictable; ignores --crf.")
+    # Kept ONLY so an installed panel older than this release does not fail at argparse.
+    # Whole-frame trimming is unconditional now; passing this changes nothing.
     ap.add_argument("--whole-frames", dest="whole_frames", action="store_true",
                     help="keep only the frames that lie WHOLLY inside each cut's source range: "
                          "a fractional start moves up to the next frame, a fractional end down "
@@ -6348,16 +6394,17 @@ def main():
     # Named now, while the list is final — so --manifest-only and the sheet can show the
     # filenames without a single frame being encoded.
     # BEFORE the names and the manifest: both are built from the ranges this may change.
-    if getattr(args, "whole_frames", False) and getattr(args, "render_dir", None):
-        # A timeline range starts and ends on whole frames by construction — there is no
-        # fractional source position left to pull in from. Said out loud rather than
-        # ignored, so a tick that stopped doing anything does not look like it still is.
-        print("\n  --whole-frames has nothing to do in render mode: a timeline range "
-              "already starts and ends on frame boundaries")
-    elif getattr(args, "whole_frames", False):
+    # ⚠️ ALWAYS, NOT A CHOICE. This was a tick nobody could evaluate: "whole frames only"
+    # asks the editor to reason about sub-frame source positions in order to decide whether
+    # they want a frame of the neighbouring shot at the head. Nobody wants that, so the
+    # tick had exactly one correct setting and shipping the other one was a trap. It is now
+    # the behaviour. --whole-frames is still ACCEPTED and ignored, because an installed
+    # panel older than this release still sends it and argparse would refuse the run.
+    # In render mode a timeline range is already frame-aligned, so this finds nothing to do.
+    if not getattr(args, "render_dir", None):
         n_trim = trim_to_whole_frames(tl.cuts)
         if n_trim:
-            print(f"\n  --whole-frames: pulled {n_trim} cut(s) in to frame boundaries "
+            print(f"\n  pulled {n_trim} cut(s) in to whole source frames "
                   f"({sum(c.frames_trimmed for c in tl.cuts)} frame(s) dropped in total)")
     assign_output_names(tl.cuts, args.container, tl.sequence_fps)
 

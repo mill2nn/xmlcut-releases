@@ -46,10 +46,10 @@
                "remeasure", "vcodec",
                "scale", "scaleread",
                "onlyproblab",
-               "actionbar", "barready", "retry", "audiosel", "wholeframes",
+               "actionbar", "barready", "retry", "audiosel",
                "pocrender", "pocnote",
                "cutfrom", "vtrack", "vtrackfield",
-               "wfwrap", "wfwhy", "vinclude"];
+               "vinclude"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -553,7 +553,6 @@
      *   #listnote #repcount #capnote      counters over a list, in that list's own heading.
      *     They change on every tick, and one that jumped to the top of the panel each time a
      *     checkbox moved would be worse than the scatter this replaces.
-     *   #wfwhy                            why THIS control is disabled, inside its label.
      *   #repdestlbl                       the caption on a path row, with its Copy button.
      *   td.sts and the group headings      per row, in the row.
      *
@@ -746,8 +745,7 @@
             + "được báo rõ — clip 1 frame THẬT (timeline dài đúng 1 frame) vẫn giữ nguyên."
     ].concat(CL_359);
 
-    var CHANGELOG = {
-        "3.61": [
+    var CL_361 = [
             "⚠️ PANEL GIỜ BÁO FILE CŨ CÒN SÓT TRONG FOLDER. Export ghi đè tự động, NHƯNG "
             + "chỉ ghi đè khi TRÙNG ĐÚNG TÊN — mà tên file có chứa khoảng in/out của source, "
             + "nên một bản sửa làm lệch khoảng đó vài phần trăm giây là cùng một cut ra tên "
@@ -760,7 +758,32 @@
             + "tự ở đầu tên) không bị tính vào.",
             "Thêm nút Copy log trong phần Advanced — bấm một phát copy toàn bộ log kèm số "
             + "phiên bản, để gửi kèm khi báo lỗi."
-        ].concat(CL_360),
+    ].concat(CL_360);
+
+    var CHANGELOG = {
+        "3.62": [
+            "⚠️ SỬA GỐC LỖI LỆCH 1 FRAME ĐẦU — lỗi này có từ lâu, không phải mới. Engine "
+            + "seek tới NỬA FRAME TRƯỚC frame cần lấy, vì tin rằng ffmpeg sẽ lấy frame đầu "
+            + "tiên có PTS >= mốc seek. ==Điều đó SAI==: với -ss đặt trước -i, ffmpeg trả "
+            + "về frame đang HIỂN THỊ tại mốc đó — mà nửa frame trước thì mốc đó nằm trong "
+            + "frame TRƯỚC. Đo trên source thật (30 fps, PTS chuẩn, frame 320 ở 10.666667 và "
+            + "frame 321 ở 10.700000), xin frame 321: nửa frame trước ra frame 320 (SAI), "
+            + "1/4 frame sau ra 321 (đúng file này nhưng sai file khác), đúng PTS của frame "
+            + "ra 321 (đúng mọi file). Giờ seek đúng bằng PTS của frame, không cộng trừ gì.",
+            "⚠️ Kiểm chứng lại trên chính timeline của anh Tùng: cắt cả 27 clip rồi so từng "
+            + "frame đầu với source. Trước: 3 clip lệch -1 (lấy frame của cảnh trước). Sau: "
+            + "==0/27 clip sai==.",
+            "⚠️ BỎ Ô TICK \"whole frames only\" — giờ LÚC NÀO CŨNG BẬT. Nó chỉ có đúng một "
+            + "lựa chọn đúng: mốc in nằm giữa frame thì frame đó cũng thuộc cảnh trước, nên "
+            + "không cắt gọn là hiện cảnh trước ở đầu clip. Một cái tick mà lựa chọn còn lại "
+            + "luôn sai thì là bẫy, không phải tuỳ chọn.",
+            "Quy tắc làm tròn theo yêu cầu: frame ĐẦU lẻ thì làm tròn LÊN, frame CUỐI lẻ thì "
+            + "làm tròn XUỐNG — cắt vào trong từ cả hai đầu, nên clip không bao giờ chứa "
+            + "frame của cảnh bên cạnh. Mất nhiều nhất 1 frame mỗi đầu.",
+            "Engine vẫn NHẬN cờ --whole-frames và bỏ qua, để panel bản cũ chưa update không "
+            + "bị lỗi khi export."
+        ].concat(CL_361),
+        "3.61": CL_361,
         "3.60": CL_360,
         "3.59": CL_359,
         "3.54": CL_354,
@@ -4228,7 +4251,6 @@
             vcodec: el.vcodec.value || "libx264",
             // "" = no audio files · "all" = every audio track · "2" = that track alone
             audio: String(el.audiosel.value || ""),
-            wholeFrames: !!el.wholeframes.checked,
             // Not in settingArgs(): --render-dir is added by the EXPORT only. The scan
             // runs before any render exists, and handing it a folder of nothing would
             // report every clip as having no render.
@@ -4249,9 +4271,6 @@
         /* The voice-over, and which tracks it reads. One control, two flags: --audio is the
          * switch and --audio-tracks narrows it, so "every track" needs no second argument and
          * the ordinary case stays a short command line. */
-        // Pulls each cut onto whole frames: the head keeps the frame the in-point falls
-        // IN (the one the timeline displayed), the tail moves down to the previous frame.
-        if (s.wholeFrames) a.push("--whole-frames");
         if (s.audio) {
             a.push("--audio");
             if (s.audio !== "all") a.push("--audio-tracks", s.audio);
@@ -4786,9 +4805,6 @@
         /* whole-frames only means anything OUT of render mode. It stays on screen either
          * way — dimmed and disabled rather than removed, because a control that vanishes
          * is a control you go looking for. */
-        if (el.wholeframes) el.wholeframes.disabled = render;
-        if (el.wfwrap) el.wfwrap.className = "tick" + (render ? " inert" : "");
-        show(el.wfwhy, render);
         /* THE FILE-TYPE CHIPS GO ENTIRELY IN RENDER MODE — hidden, not dimmed, and the
          * departure from the `whole frames only` convention two lines up is deliberate.
          *
@@ -6075,14 +6091,6 @@
 
     el.onlyprob.addEventListener("change", renderReport);
 
-    el.wholeframes.addEventListener("change", function () {
-        try { window.localStorage.setItem("xmlcut.wholeframes",
-                                          el.wholeframes.checked ? "1" : ""); } catch (e) {}
-        // It changes which frames land in the file, so it is not the named preset any more.
-        el.preset.value = "";
-        el.delpreset.disabled = true;
-        if (state.clips.length) renderClips();
-    });
 
     el.audiosel.addEventListener("change", function () {
         /* ⚠️ state.audioWant TOO, not only localStorage. renderAudioTracks() rebuilds the menu on
@@ -6690,9 +6698,6 @@
         // rather than of this timeline. The TRACK part of it is re-checked against each
         // timeline in renderAudioTracks(), because A2 on one project is not A2 on the next.
         loadAudioWant();
-        try {
-            el.wholeframes.checked = !!window.localStorage.getItem("xmlcut.wholeframes");
-        } catch (e) { el.wholeframes.checked = false; }
         /* Remembered across sessions, like the audio choice and for the same reason: it is
          * a property of how he works, not of this one timeline. The track number is kept
          * too but re-validated against whatever gets read — V3 on the last project may not
