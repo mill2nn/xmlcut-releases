@@ -671,12 +671,21 @@
         "Engine vẫn nhận cờ --whole-frames và bỏ qua, để panel bản cũ không bị lỗi."
     ].concat(CL_361);
 
-    var CHANGELOG = {
-        "3.64": [
+    var CL_364 = [
             "Có tiếng báo khi export xong — một tiếng nếu mọi clip đều ghi được, tiếng khác "
             + "nếu có clip lỗi hoặc bị Cancel. Tắt được bằng ô \"sound when done\".",
             "Rút gọn toàn bộ thông báo, cảnh báo, lỗi và chú thích trong panel."
-        ].concat(CL_362),
+    ].concat(CL_362);
+
+    var CHANGELOG = {
+        "3.65": [
+            "Mỗi lần export giờ tự lưu file XML, file JSON của lần Read đó và log của panel "
+            + "vào thư mục con report/ ngay trong folder export. Gặp lỗi thì zip nguyên "
+            + "folder report/ gửi đi là đủ để debug, không cần đi tìm từng file.",
+            "File XML và JSON được chép vào lúc BẮT ĐẦU export, nên lần chạy bị lỗi hay bị "
+            + "tắt giữa chừng vẫn còn dữ liệu đầu vào. Log ghi lúc chạy xong."
+        ].concat(CL_364),
+        "3.64": CL_364,
         "3.63": CL_362,
         "3.62": CL_362,
         "3.61": CL_361,
@@ -2856,6 +2865,8 @@
         setBusy(true, "Exporting…");
 
         log("$ " + state.python + " " + args.join(" "));
+        // Before the spawn, so a run that dies still leaves what it was given.
+        saveReadInputs();
 
         var proc;
         try {
@@ -3001,6 +3012,7 @@
             /* Same place, same reason: the report is what knows whether this went cleanly.
              * A cancel is NOT clean — the whole point of the two tones is that you can tell
              * from across the room whether to come back. */
+            saveRunLog();
             chime(code === 0 && built && !state.cancelled && !failedRows().length);
 
             if (code === 0) {
@@ -5509,6 +5521,73 @@
             if (p && p.unref) p.unref();
         } catch (e) {
             log("chime: " + e);
+        }
+    }
+
+    /* THE FILES SOMEBODY NEEDS TO DEBUG A RUN THEY DID NOT WATCH, written beside the clips.
+     *
+     * A teammate hits something on their own timeline and there is nothing to send: the XML
+     * and the read's JSON live beside their Premiere project, and the log lives in a panel
+     * that closes. Asking for all three by name, over chat, in order, is how a bug report
+     * dies. This drops them into <export folder>/report/ so the folder IS the bug report —
+     * zip it, send it.
+     *
+     * ⚠️ WRITTEN TWICE, AND THAT IS THE POINT. The inputs go in when the export STARTS, so
+     * a run that crashes or is killed still leaves what it was given. The log is written
+     * when the run ENDS, when it is complete. A bundle only written at the end is missing
+     * for exactly the runs worth debugging.
+     *
+     * ⚠️ IT CAN NEVER FAIL THE EXPORT. Every failure here is a log line and nothing else.
+     * An advisory that throws is how a completed run got a traceback and a non-zero exit
+     * earlier in this file's history, and this one runs while clips are still being written.
+     */
+    function reportDir() {
+        if (!fs || !path || !state.out) return "";
+        try {
+            var d = path.join(outDir(), "report");
+            if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+            return d;
+        } catch (e) {
+            log("report folder: " + e);
+            return "";
+        }
+    }
+
+    function saveReadInputs() {
+        var d = reportDir();
+        if (!d) return;
+        var copied = [];
+        try {
+            if (state.dump && fs.existsSync(state.dump)) {
+                fs.writeFileSync(path.join(d, path.basename(state.dump)),
+                                 fs.readFileSync(state.dump));
+                copied.push(path.basename(state.dump));
+            }
+            if (state.xml && fs.existsSync(state.xml)) {
+                fs.writeFileSync(path.join(d, path.basename(state.xml)),
+                                 fs.readFileSync(state.xml));
+                copied.push(path.basename(state.xml));
+            }
+        } catch (e) {
+            log("report inputs: " + e);
+            return;
+        }
+        if (copied.length) log("report/: " + copied.join(", "));
+    }
+
+    function saveRunLog() {
+        var d = reportDir();
+        if (!d) return;
+        try {
+            var body = el.log.textContent === "\u2014" ? "" : el.log.textContent;
+            var head = "Raw-cutter " + ((el.ver && el.ver.textContent) || "?")
+                + "\nsequence: " + ((state.info && state.info.sequence) || "?")
+                + "\ncut from: " + state.cutFrom
+                + "\nfolder:   " + outDir() + "\n\n";
+            fs.writeFileSync(path.join(d, "panel-log.txt"), head + body, "utf8");
+            log("report/panel-log.txt written");
+        } catch (e) {
+            log("report log: " + e);
         }
     }
 

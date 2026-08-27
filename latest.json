@@ -1,6 +1,6 @@
 {
-  "version": "3.64",
-  "notes": "Release 3.63 \u2014 release notes cut to one line per change",
+  "version": "3.65",
+  "notes": "Release 3.64 \u2014 panel text cut to the information; a sound when the export ends",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
