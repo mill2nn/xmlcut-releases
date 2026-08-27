@@ -1,6 +1,6 @@
 {
-  "version": "3.65",
-  "notes": "Release 3.64 \u2014 panel text cut to the information; a sound when the export ends",
+  "version": "3.66",
+  "notes": "Release 3.65 \u2014 every export leaves a report/ folder you can zip and send",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

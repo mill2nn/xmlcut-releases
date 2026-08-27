@@ -40,7 +40,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.65"
+VERSION = "3.66"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -6594,6 +6594,8 @@ def main():
 
     print(f"\nCutting with {JOBS} parallel job(s) ...")
     done = 0
+    # Reason text -> how many clips gave it. See the print inside the loop.
+    _said_errors: dict[str, int] = {}
     with ThreadPoolExecutor(max_workers=JOBS) as ex:
         futures = {ex.submit(run_cut, c, args.out, args, tl.sequence_fps): c
                    for c in tl.cuts}
@@ -6617,8 +6619,25 @@ def main():
                     "no_render": "NORE", "render_mismatch": "BAD ",
                     "failed": "FAIL", "unsupported": "SKIP"}.get(c.status, "?")
             print(f"  [{done}/{len(tl.cuts)}] {flag} {c.output_file}")
+            # ⚠️ THE SAME REASON, ONCE. Measured on a real 87-cut timeline: nineteen clips
+            # were skipped for the identical reason and the run printed that one sentence
+            # nineteen times, ~95 characters each. The clip is already named on the line
+            # above and the manifest carries every error in full, so the repeat bought
+            # nothing and buried the lines that differ.
             if c.error:
-                print(f"        {c.error.splitlines()[0][:160]}")
+                _first = c.error.splitlines()[0][:160]
+                if _first in _said_errors:
+                    _said_errors[_first] += 1
+                else:
+                    _said_errors[_first] = 1
+                    print(f"        {_first}")
+
+    # Said once each above; here is what that spared, so a collapsed count is never a
+    # silent one. The manifest holds every clip's error in full either way.
+    _repeats = sum(n - 1 for n in _said_errors.values() if n > 1)
+    if _repeats:
+        print(f"  ({_repeats} repeat(s) of a reason already given above — see the manifest "
+              f"for every clip's own line)")
 
     # The single whole-timeline mp3, after the cuts and before the manifest that records it.
     if getattr(args, "audio", False):

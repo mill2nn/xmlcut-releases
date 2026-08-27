@@ -677,14 +677,25 @@
             "Rút gọn toàn bộ thông báo, cảnh báo, lỗi và chú thích trong panel."
     ].concat(CL_362);
 
-    var CHANGELOG = {
-        "3.65": [
+    var CL_365 = [
             "Mỗi lần export giờ tự lưu file XML, file JSON của lần Read đó và log của panel "
             + "vào thư mục con report/ ngay trong folder export. Gặp lỗi thì zip nguyên "
             + "folder report/ gửi đi là đủ để debug, không cần đi tìm từng file.",
             "File XML và JSON được chép vào lúc BẮT ĐẦU export, nên lần chạy bị lỗi hay bị "
             + "tắt giữa chừng vẫn còn dữ liệu đầu vào. Log ghi lúc chạy xong."
-        ].concat(CL_364),
+    ].concat(CL_364);
+
+    var CHANGELOG = {
+        "3.66": [
+            "Log ngắn hơn nhiều. Trên một timeline 87 cut: 214 dòng còn 69. Bỏ các dòng "
+            + "\">>\" (panel đã đọc rồi để cập nhật trạng thái từng dòng clip) và bỏ dòng "
+            + "\"OK\" của từng clip chạy được — clip nào xong đã có dấu ✓ trên danh sách và "
+            + "trong manifest. Log giữ lại cái SAI: SKIP, FAIL, cảnh báo.",
+            "Lý do giống nhau lặp lại giờ chỉ in một lần kèm số lần lặp — trước đây một câu "
+            + "95 ký tự bị in 19 lần trong cùng một lần chạy. Manifest vẫn ghi đủ lỗi của "
+            + "từng clip."
+        ].concat(CL_365),
+        "3.65": CL_365,
         "3.64": CL_364,
         "3.63": CL_362,
         "3.62": CL_362,
@@ -2887,7 +2898,21 @@
 
         function onLine(line) {
             if (!line) return;
-            log(line);
+            /* ⚠️ THE `>>` MARKERS ARE A PROTOCOL, NOT OUTPUT. The engine emits one per cut
+             * for the panel to turn into a row state, and the very next line names the same
+             * clip with its result — so echoing both put the whole cut list in the log
+             * twice. Measured on a real 87-cut run: 60 of 214 lines were markers the panel
+             * had already consumed. The row is on screen and the result line stays. */
+            /* ⚠️ AND A CLIP THAT WORKED NEEDS NO LINE EITHER. One `[n/N] OK name` per cut
+             * is 87 lines on a real timeline, all of them saying the expected thing. The
+             * row is ticked on screen, the manifest names every clip and the report lists
+             * them — the log's job is what went WRONG, and 87 successes buried it. Every
+             * other flag (SKIP, FAIL, MISS, HAVE, SLNT, NORE, BAD) is still logged, and the
+             * final tally line still says how many wrote. Parsing is untouched: this only
+             * decides what is echoed, and the progress bar reads the same line below. */
+            if (!/^\s*>>\s/.test(line) && !/^\s*\[\d+\/\d+\]\s+OK\s/.test(line)) {
+                log(line);
+            }
             // xmlcut prefixes anything the merge decided with '++'. Those lines explain
             // why a clip kept the XML's values, or which paths were repaired, and they
             // were previously only visible by opening the Advanced log.
