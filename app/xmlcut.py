@@ -40,12 +40,24 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.66"
+VERSION = "3.70"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
 # must never be reported as strays.
 CUT_FILE_RE = re.compile(r"^\d+_.*\.(?:mp4|mov|mkv|m4v|m4a|wav|mp3|aac)$", re.I)
+
+# ⚠️ HOW FAR BEFORE AN AUDIO IN-POINT TO SEEK, in seconds, before trimming the lead back off
+# inside the filter graph. Input-side `-ss` on an AUDIO-ONLY AAC file drops the encoder's
+# priming from the head — MEASURED with a click train: 1024 − (S·48000 mod 1024) samples gone,
+# so the next click arrived 21.3 ms early at S=0, 6.0 at 0.25, 12.0 at 0.5, 2.7 at 1.0; an
+# Apple-encoded m4a (2112 priming) lost 33.3 ms, a whole 30 fps frame. WAV and MP4-with-video
+# sources lose nothing, which is why the comment that said "-ss on audio is honoured to the
+# sample" was true on the fixture it was measured with and false on the file type an editor's
+# voice-over actually arrives as. Seeking a tenth of a second early and `atrim`ming exactly
+# that much back off was measured exact on both encoder families; -advanced_editlist 0 was
+# not (it fails on Apple files) and -ignore_editlist lands 21 ms late.
+AUDIO_SEEK_LEAD = 0.1
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -1187,11 +1199,38 @@ def fmt_secs(total: float) -> str:
     in a filename as a path separator and displays it as '/', which would turn a tidy
     "(00.00-00.02)" into "(00/00-00/02)". A dot also keeps the hyphen free to mean one
     thing only — the gap between the two ends of the range.
+
+    ⚠️ CLAMPED AT 00.00, AND THE CLAMP IS THE POINT. A clipitem whose in-point sits before
+    its media begins has a NEGATIVE source in-point, and the old arithmetic put the sign on
+    the hundredths instead of in front of the number:
+
+        -0.40 -> "00.-40"      -0.01 -> "00.-1"      -1.50 -> "-1.-50"
+
+    All three are malformed, and the middle one is not even the right width. Worse, they
+    break the RANGE: the hyphen is what separates the two ends, so a shipped file called
+    14_(00.-40-01.87)_131.mp4 has three plausible readings of where the clip starts.
+
+    A filename is a LABEL and the manifest is the RECORD. Nothing downstream parses these
+    digits back into a number — index_free() compares the stem as text, verify.py reads the
+    manifest — so the label may safely say 00.00 for "starts at or before the first frame",
+    while source_in_seconds in manifest.json/.csv keeps the true signed value (readable()
+    rounds it to 6dp and changes nothing else). The information is not dropped, it is kept
+    where something can act on it.
+
+    Non-finite input is clamped the same way rather than raising: int(nan) is a ValueError,
+    and a filename helper may not be able to kill a run that has already been costed.
     """
+    if not (total > 0.0):                 # also catches nan, which fails every comparison
+        total = 0.0
+    elif total == float("inf"):
+        total = 0.0
     whole = int(total)
     cs = int(round((total - whole) * 100))
     if cs >= 100:
         whole, cs = whole + 1, 0
+    # Width 2 is a MINIMUM, not a cap: a source in-point 137 seconds into a file is
+    # legitimately "137.42", and truncating it to two digits would make two different
+    # ranges of the same file share a name.
     return f"{whole:02d}.{cs:02d}"
 
 
@@ -1202,17 +1241,40 @@ def secs_cs(frames: float, fps: float) -> str:
     return fmt_secs(frames / fps if fps > 0 else 0.0)
 
 
-def tc_range(cut: "Cut", fps: float) -> str:
-    """The clip's span **inside its source file**, for the filename: "(03.93-05.06)".
+def tc_range(cut: "Cut", fps: float, cut_from: str = "source") -> str:
+    """The clip's span, for the filename: "(03.93-05.06)".
 
-    The source range, not the timeline position — the filename already names the source
-    file, so the numbers beside it should locate the range in that file. Timeline position
-    is still in clips.csv and the manifest, where it belongs.
+    Inside its SOURCE FILE when the delivered pixels came out of that file — the filename
+    already names the source, so the numbers beside it should locate the range in it.
+    Timeline position is still in clips.csv and the manifest, where it belongs.
 
-    Falls back to the timeline position for a still, which has no meaningful source range:
-    its in/out are an arbitrary offset into a virtual 24-hour clip.
+    TIMELINE position in the three cases where a source range is not a thing worth
+    printing, because there is no source those numbers describe:
+
+      A STILL. Its in/out are an arbitrary offset into a virtual 24-hour clip; only the
+      time it spends on screen is real. (This case predates the other two.)
+
+      RENDER MODE. `cut_from == "render"` means the pixels ARE the timeline — Premiere
+      rendered the sequence and the engine cut ranges out of that. Naming those files after
+      a position in a source file the frames never passed through is the reported bug:
+      the timecode in edited filenames "không khớp hoàn toàn" with the timeline. It is not
+      a rounding error — the two clocks are unrelated, and on a clip whose media starts at
+      Premiere's 1-hour zero they differ by 3600 seconds.
+
+      ANYTHING NOT DECODABLE AS A SOURCE — media_kind "unsupported": graphics (.mogrt,
+      .aegraphic), Essential Graphics titles and adjustment layers (a <file> with no
+      pathurl), synthetics (Black Video, a colour matte) and Dynamic Link comps. These
+      inherit Premiere's virtual 24-hour clock, which is why one real export carried
+      02_(3600.03-3600.63)_Graphic.mp4: 3600 s is 01:00:00:00, the start of that clock,
+      not a position in anything.
+
+    `cut_from` is passed down from assign_output_names rather than read off a module-level
+    flag, so a single-cut rename inside run_cut names the file the same way the batch pass
+    did — the two disagreeing is exactly the shape of bug that leaves a manifest naming
+    files that are not in the folder.
     """
-    if cut.media_kind == "still" or cut.source_duration_seconds <= 0:
+    if (cut.media_kind != "video" or cut_from == "render"
+            or cut.source_duration_seconds <= 0):
         return (f"({secs_cs(cut.timeline_in_frames, fps)}"
                 f"-{secs_cs(cut.timeline_out_frames, fps)})")
     start = cut.source_in_seconds
@@ -1251,7 +1313,14 @@ class Cut:
     timeline_in_tc: str = ""
     timeline_out_tc: str = ""
 
-    # source range (source frame rate)
+    # source range — ⚠️ TWO MEANINGS, BY PATH. From FCP7 XML these are the clipitem's own <in>/
+    # <out>, which Premiere writes at the CLIP's rate (the sequence rate for a conformed
+    # clip), and they are never touched by the whole-frame trim: they are the REQUEST as the
+    # editor made it, and a clipitem that starts before its media keeps its negative here.
+    # From a panel dump they are round(seconds × the file's rate). A reader that needs the
+    # frame the delivered file actually starts on must use round(source_in_seconds ×
+    # source_fps) — verify.py does — not this column: on a real 24-in-30 export it disagreed
+    # with the delivered frame on 52 of 54 rows.
     source_in_frames: int = 0
     source_out_frames: int = 0
     source_in_tc: str = ""
@@ -2165,7 +2234,8 @@ class Timeline:
 
     def _parse_nested(self, clip, track_type, t_idx, depth: int,
                       edges: Optional[dict] = None,
-                      premiere_track: Optional[int] = None) -> list[Cut]:
+                      premiere_track: Optional[int] = None,
+                      parent_fps: Optional[float] = None) -> list[Cut]:
         """Resolve a clipitem that contains a <sequence> instead of a <file>.
 
         The cuts are inside the nest; what the parent timeline contributes is a window
@@ -2304,7 +2374,16 @@ class Timeline:
         if _ti is not None and _to is not None and _to > _ti:
             win_lo = _ti / PPRO_TICKS_PER_SECOND
             win_hi = _to / PPRO_TICKS_PER_SECOND
-        parent_lo_s = nest_start / self.sequence_fps
+        # ⚠️ THE CALLER'S RATE, NOT THE TOP-LEVEL ONE. A nest inside a nest is positioned in the
+        # frames of the nest that CONTAINS it, at that nest's rate — so its <start> divided by the
+        # sequence rate was the wrong time base whenever the two differ, and its cuts then
+        # skipped the window below entirely (see the `cands` loop). Measured: an outer nest at
+        # [100,160) and [300,330) holding an inner nest holding one shot produced ONE cut at
+        # [0,60) — nothing at either real position — and a "merged into an identical earlier
+        # cut" warning for the second instance. On a real export the instance that showed the
+        # deep shots held 0 cuts before this and 6 after; 8 real exports carry that shape.
+        pfps = parent_fps or self.sequence_fps
+        parent_lo_s = nest_start / pfps
 
         out: list[Cut] = []
         # EVERY inner track, onto the parent's track index. Not the nest's inner V1 alone:
@@ -2337,72 +2416,81 @@ class Timeline:
                     # positioned, and was dropped with "no usable timeline position".
                     _deeper = self._parse_nested(inner, track_type, t_idx, depth + 1,
                                                  edges=edges,
-                                                 premiere_track=premiere_track)
+                                                 premiere_track=premiere_track,
+                                                 parent_fps=nest_fps)
                     _mark_track_enabled(_deeper, inner_track_on)
                     _mark_audio_level(_deeper, inner_level, inner_level_kf)
-                    out.extend(_deeper)
-                    continue
-                # The nest's inner cuts report the PARENT's track, both the lane ordinal and
-                # the Premiere number — they are placed on the parent's timeline, so the
-                # parent's track is where they live.
-                c = self._parse_clipitem(inner, track_type, t_idx, transitions,
-                                         seq_fps=nest_fps, edges=edges,
-                                         premiere_track=premiere_track)
-                if c is None:
-                    continue
-                _mark_track_enabled([c], inner_track_on)
-                _mark_audio_level([c], inner_level, inner_level_kf)
-
-                a = c.timeline_in_frames / nest_fps      # inner extent, nest seconds
-                b = c.timeline_out_frames / nest_fps
-                lo, hi = max(a, win_lo), min(b, win_hi)
-                if hi - lo <= 1e-9:
-                    # ⚠️ COUNTED, NOT JUST SKIPPED. Falling outside the window is a real and
-                    # ordinary thing — a nest is usually trimmed — but until this the only
-                    # report was the all-or-nothing advisory below, which fires only when a
-                    # nest yields ZERO cuts. That silence is why a window that was wrong by
-                    # the speed factor deleted 1,539 parent frames of finished edit across
-                    # 26 real exports without anything anywhere saying so.
-                    outside_window += 1
-                    continue                             # scrolled out of the window
-
-                head = lo - a
-                tail = b - hi
-                if head > 1e-9 or tail > 1e-9:
-                    c.nested_trimmed = ("both" if head > 1e-9 and tail > 1e-9
-                                        else "head" if head > 1e-9 else "tail")
-                    # Trim the source range by the same amount of material, scaled by
-                    # the inner clip's own speed. A reversed clip is consumed from the
-                    # far end, so its head trim comes off the tail of the source range.
-                    k_in = (c.speed_percent / 100.0) or 1.0
-                    if c.reversed:
-                        c.source_duration_seconds -= (head + tail) * k_in
-                    else:
-                        c.source_in_seconds += head * k_in
-                        c.source_duration_seconds -= (head + tail) * k_in
-                    if c.source_duration_seconds <= 0:
+                    cands = _deeper
+                else:
+                    # The nest's inner cuts report the PARENT's track, both the lane ordinal and
+                    # the Premiere number — they are placed on the parent's timeline, so the
+                    # parent's track is where they live.
+                    c = self._parse_clipitem(inner, track_type, t_idx, transitions,
+                                             seq_fps=nest_fps, edges=edges,
+                                             premiere_track=premiere_track)
+                    if c is None:
                         continue
-                    if c.source_fps > 0:
-                        c.source_consumed_frames = consumed_frames(
-                            c.source_in_seconds, c.source_duration_seconds,
-                            c.source_fps)
+                    _mark_track_enabled([c], inner_track_on)
+                    _mark_audio_level([c], inner_level, inner_level_kf)
+                    cands = [c]
+                # ⚠️ ONE WINDOW PASS FOR BOTH KINDS OF INNER ITEM. A plain clipitem and the cuts
+                # that came back from a deeper nest are the same thing at this point: cuts
+                # expressed in THIS nest's time, at nest_fps. The deeper ones used to be
+                # appended and `continue`d past the window, trim and re-expression that every
+                # direct clipitem gets — so they were never clipped to what this instance shows
+                # and never moved to where this instance sits.
+                for c in cands:
 
-                # re-express in parent time
-                vis = (hi - lo) / k_nest
-                p_in = parent_lo_s + (lo - win_lo) / k_nest
-                c.timeline_in_frames = int(round(p_in * self.sequence_fps))
-                c.timeline_out_frames = int(round((p_in + vis) * self.sequence_fps))
-                c.duration_frames = max(1, c.timeline_out_frames - c.timeline_in_frames)
-                c.timeline_in_tc = frames_to_tc(c.timeline_in_frames, self.sequence_fps)
-                c.timeline_out_tc = frames_to_tc(c.timeline_out_frames, self.sequence_fps)
-                c.duration_seconds = round(vis, 6)
+                    a = c.timeline_in_frames / nest_fps      # inner extent, nest seconds
+                    b = c.timeline_out_frames / nest_fps
+                    lo, hi = max(a, win_lo), min(b, win_hi)
+                    if hi - lo <= 1e-9:
+                        # ⚠️ COUNTED, NOT JUST SKIPPED. Falling outside the window is a real and
+                        # ordinary thing — a nest is usually trimmed — but until this the only
+                        # report was the all-or-nothing advisory below, which fires only when a
+                        # nest yields ZERO cuts. That silence is why a window that was wrong by
+                        # the speed factor deleted 1,539 parent frames of finished edit across
+                        # 26 real exports without anything anywhere saying so.
+                        outside_window += 1
+                        continue                             # scrolled out of the window
 
-                # the nest's own retime compounds with the clip's
-                c.speed_percent = round(c.speed_percent * nest_speed / 100.0, 6)
-                c.reversed = bool(c.reversed) != bool(nest_rev)   # both = forwards again
-                c.speed_varies = c.speed_varies or nest_varies
-                c.nested_from = name
-                out.append(c)
+                    head = lo - a
+                    tail = b - hi
+                    if head > 1e-9 or tail > 1e-9:
+                        c.nested_trimmed = ("both" if head > 1e-9 and tail > 1e-9
+                                            else "head" if head > 1e-9 else "tail")
+                        # Trim the source range by the same amount of material, scaled by
+                        # the inner clip's own speed. A reversed clip is consumed from the
+                        # far end, so its head trim comes off the tail of the source range.
+                        k_in = (c.speed_percent / 100.0) or 1.0
+                        if c.reversed:
+                            c.source_duration_seconds -= (head + tail) * k_in
+                        else:
+                            c.source_in_seconds += head * k_in
+                            c.source_duration_seconds -= (head + tail) * k_in
+                        if c.source_duration_seconds <= 0:
+                            continue
+                        if c.source_fps > 0:
+                            c.source_consumed_frames = consumed_frames(
+                                c.source_in_seconds, c.source_duration_seconds,
+                                c.source_fps)
+
+                    # re-express in parent time
+                    vis = (hi - lo) / k_nest
+                    p_in = parent_lo_s + (lo - win_lo) / k_nest
+                    c.timeline_in_frames = int(round(p_in * pfps))
+                    c.timeline_out_frames = int(round((p_in + vis) * pfps))
+                    c.duration_frames = max(1, c.timeline_out_frames - c.timeline_in_frames)
+                    c.timeline_in_tc = frames_to_tc(c.timeline_in_frames, pfps)
+                    c.timeline_out_tc = frames_to_tc(c.timeline_out_frames, pfps)
+                    c.duration_seconds = round(vis, 6)
+
+                    # the nest's own retime compounds with the clip's
+                    c.speed_percent = round(c.speed_percent * nest_speed / 100.0, 6)
+                    c.reversed = bool(c.reversed) != bool(nest_rev)   # both = forwards again
+                    c.speed_varies = c.speed_varies or nest_varies
+                    c.nested_from = name
+                    out.append(c)
 
         # The nest clipitem's own fader rides on everything inside it, the same way a
         # track's does — a nest is a submix, and Premiere lets you pull it down as one.
@@ -3425,8 +3513,24 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
             _vf.append(sf)
         if _vf:
             cmd += ["-filter:v", ",".join(_vf)]
-        cmd += [*codec_flags(cut, args), "-movflags", "+faststart", "-an",
-                str(out_path)]
+        # ⚠️ THE RENDER CARRIES PREMIERE'S MIX — a Match Source preset renders AAC alongside
+        # the picture (measured: every _renders/*.mp4 has an aac stereo stream) — and this
+        # branch threw it away with -an on every clip, so a Timeline Render clip was always
+        # silent whatever the timeline played. With --render-audio the mix is kept, re-encoded
+        # and cut off with the pinned video (-shortest) rather than running on to the render's
+        # own end. WHICH tracks are in that mix is decided upstream: the panel mutes the
+        # unticked audio tracks before Premiere renders. Default unchanged — silent, as every
+        # export so far — so nobody's clips gain sound without asking.
+        if getattr(args, "render_audio", False):
+            # -t at the cut's own length, NOT -shortest: a render's AAC can end a hair before
+            # its last picture frame, and -shortest would then clip the VIDEO and fail the
+            # frame-count check. -t bounds the sound; -frames:v still pins the picture.
+            _dur = max(1, cut.duration_frames) / (cut.render_fps or seq_fps or 30.0)
+            cmd += [*codec_flags(cut, args), "-movflags", "+faststart",
+                    "-c:a", "aac", "-b:a", "192k", "-t", f"{_dur:.6f}", str(out_path)]
+        else:
+            cmd += [*codec_flags(cut, args), "-movflags", "+faststart", "-an",
+                    str(out_path)]
         return cmd
 
     if cut.media_kind == "still":
@@ -3549,10 +3653,20 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
             while rem < 0.5:
                 chain.append("atempo=0.5"); rem /= 0.5
             chain.append(f"atempo={rem:.6f}")
-        cmd += ["-ss", f"{ss:.6f}", "-t", f"{cut.source_duration_seconds:.6f}",
-                "-i", cut.source_path, "-vn"]
-        if chain:
-            cmd += ["-filter:a", ",".join(chain)]
+        # Seek early, trim the lead off in the graph — see AUDIO_SEEK_LEAD. atrim goes FIRST
+        # so areverse/atempo act on exactly the wanted range, and asetpts re-zeroes the
+        # timestamps so the container starts at 0 rather than at the lead.
+        lead = min(AUDIO_SEEK_LEAD, ss)
+        # ⚠️ NO -ss AT ALL WHEN IT WOULD BE ZERO. Even `-ss 0` is a seek, and a seek on an
+        # audio-only AAC file drops the priming: measured, the click AT the in-point vanished
+        # and the next one arrived 21.3 ms early. Decoding from the start with no seek keeps
+        # it (0 samples off, measured). atrim=start=0 is then a no-op and stays for symmetry.
+        if ss - lead > 1e-9:
+            cmd += ["-ss", f"{ss - lead:.6f}"]
+        cmd += ["-t", f"{cut.source_duration_seconds + lead:.6f}", "-i", cut.source_path, "-vn"]
+        chain = [f"atrim=start={lead:.6f}:end={lead + cut.source_duration_seconds:.6f}",
+                 "asetpts=N/SR/TB"] + chain
+        cmd += ["-filter:a", ",".join(chain)]
         cmd += ["-c:a", "aac", "-b:a", "192k", str(out_path)]
         return cmd
 
@@ -4006,7 +4120,11 @@ def vo_mix_command(cut: Cut, parts: list[dict], total: float, out_path: Path,
            "-f", "lavfi", "-t", f"{total:.6f}",
            "-i", f"anullsrc=r={VO_RATE}:cl=stereo"]
     for p in parts:
-        cmd += ["-ss", f"{p['src_in']:.6f}", "-t", f"{p['dur']:.6f}", "-i", p["path"]]
+        # Same lead as the per-clip branch, trimmed back off in this part's chain below.
+        p["_lead"] = min(AUDIO_SEEK_LEAD, float(p["src_in"]))
+        if p["src_in"] - p["_lead"] > 1e-9:          # see the per-clip branch: -ss 0 still seeks
+            cmd += ["-ss", f"{p['src_in'] - p['_lead']:.6f}"]
+        cmd += ["-t", f"{p['dur'] + p['_lead']:.6f}", "-i", p["path"]]
     chains = []
     labels = ["[0:a]"]
     for i, p in enumerate(parts, start=1):
@@ -4031,7 +4149,8 @@ def vo_mix_command(cut: Cut, parts: list[dict], total: float, out_path: Path,
         _g = float(p.get("gain", 1.0) or 0.0)
         _pre = f"volume={_g:.6f}," if abs(_g - 1.0) > 1e-9 else ""
         _pan = "pan=stereo|c0=c0|c1=c0," if p.get("channels") == 1 else ""
-        chains.append(f"[{i}:a]{_pre}aresample={VO_RATE},{_pan}"
+        chains.append(f"[{i}:a]atrim=start={p['_lead']:.6f}:end={p['_lead'] + p['dur']:.6f},"
+                      f"asetpts=N/SR/TB,{_pre}aresample={VO_RATE},{_pan}"
                       f"adelay=delays={ms}:all=1[v{i}]")
         labels.append(f"[v{i}]")
     chains.append("".join(labels)
@@ -4384,6 +4503,13 @@ def attach_renders(cuts: list[Cut], render_dir: Path) -> tuple[int, list[Cut]]:
     cache: dict = {}
     matched, missing = 0, []
     for c in cuts:
+        # ⚠️ AUDIO CUTS ARE NOT RENDERED. Premiere renders picture ranges; an audio clipitem is
+        # cut from its own source file in every mode, exactly as in Source Render. Looking for
+        # a render here put every audio cut into `missing`, and run_cut then refused it with
+        # "no render for this cut" — which is why a Timeline Render export could never carry
+        # the per-track audio files the ticks ask for.
+        if c.track_type == "audio":
+            continue
         found = None
         for ext in RENDER_EXTS:
             p = render_dir / (render_name(c) + ext)
@@ -4430,6 +4556,83 @@ def attach_renders(cuts: list[Cut], render_dir: Path) -> tuple[int, list[Cut]]:
                 except ValueError:
                     pass
     return matched, missing
+
+
+def collapse_exploded_audio_lanes(cuts: list[Cut]) -> tuple[list[Cut], list[dict]]:
+    """One clipitem on one Premiere AUDIO track becomes ONE cut, not one per channel.
+
+    ⚠️ THE BUG, MEASURED ON A STEREO TIMELINE. Premiere writes one <track> per audio
+    CHANNEL — Timeline.premiere_track_numbers documents 9 lanes for 4 tracks on the one
+    real export — and cut construction emits a Cut per clipitem per lane with nothing
+    collapsing them. So a two-lane track holding three clips gave SIX cuts in three
+    byte-identical pairs: six rows in the panel's list, six entries in the pick file, six
+    files on disk. Meanwhile args.audio_tracks_available de-duplicated its own count, so
+    the panel offered "A2 · 3 items" and ticking it delivered six — the menu and the
+    delivery disagreed by a factor of two and neither said so.
+
+    Nothing downstream reads <sourcetrack>, so both halves of a pair are the same
+    full-width cut of the same source range: the second file is a redundant copy of the
+    first, exactly as _drop_duplicate_cuts describes for stacked nest layers.
+
+    THE GROUPING IS PREMIERE'S OWN. premiere_track already carries the A-number derived
+    from currentExplodedTrackIndex — that logic is not re-derived here, it is read. Two
+    cuts on DIFFERENT Premiere tracks that merely share a source range are two different
+    clips (the same music bed under two shots, one on A2 and one on A3) and keep their
+    keys: premiere_track is in the identity.
+
+    WHY track_index IS NOT IN THE IDENTITY, and this is the whole point: the lane ordinal
+    is the ONLY field two exploded halves differ in. It stays on the surviving cut, which
+    is the LOWEST lane of the group — the one Premiere writes first — so pick_key,
+    render_name and the panel's clipKey keep reading a lane ordinal and stay unique.
+    Nothing is renumbered.
+
+    EVERY OTHER FIELD THAT COULD MOVE A BYTE OR A LABEL KEEPS BOTH CUTS, the same rule
+    _drop_duplicate_cuts states: name, timeline range, source path, source range, speed,
+    reverse, enabled, the nest it came out of, and the audio fader (a level that differs
+    per channel is a mix this pass must not average away).
+
+    A TIMELINE WITH NO EXPLODED LANES CANNOT BE TOUCHED BY THIS, by construction rather
+    than by luck: with the attribute absent premiere_track_numbers returns 1..n, so
+    premiere_track == track_index, so two cuts sharing premiere_track share their lane
+    ordinal too — and _drop_duplicate_cuts has already removed any pair identical in
+    every remaining field. Measured on tests/PROMO_MASTER_v7.xml: 0 merged.
+
+    Returns (kept, merged), where merged records what went and what it merged into, so the
+    manifest can say WHICH clips collapsed rather than only that a number moved.
+    """
+    seen: dict = {}
+    keep: list[Cut] = []
+    merged: list[dict] = []
+    for c in cuts:
+        if c.track_type != "audio":
+            keep.append(c)
+            continue
+        key = (int(c.premiere_track),
+               c.clip_name or "",
+               c.timeline_in_frames, c.timeline_out_frames,
+               c.source_path,
+               round(c.source_in_seconds or 0.0, 6),
+               round(c.source_duration_seconds or 0.0, 6),
+               round(c.speed_percent or 100.0, 6),
+               bool(c.reversed),
+               bool(c.enabled),
+               c.nested_from or "",
+               round(c.audio_level or 1.0, 9),
+               bool(c.audio_level_varies))
+        first = seen.get(key)
+        if first is not None:
+            merged.append({
+                "name": c.clip_name or "(unnamed)",
+                "track": f"A{int(c.premiere_track)}",
+                "lane": int(c.track_index),
+                "kept_lane": int(first.track_index),
+                "in": c.timeline_in_frames,
+                "out": c.timeline_out_frames,
+            })
+            continue
+        seen[key] = c
+        keep.append(c)
+    return keep, merged
 
 
 def overlapping_cut_frames(cuts: list[Cut]) -> tuple[int, int]:
@@ -4550,7 +4753,7 @@ def split_transition_overlaps(cuts: list[Cut], seq_fps: float) -> int:
     return moved
 
 
-def trim_to_whole_frames(cuts: list[Cut]) -> int:
+def trim_to_whole_frames(cuts: list[Cut], warnings: Optional[list] = None) -> int:
     """Pull every cut back to whole frames: the frame Premiere SHOWED at the in-point,
     through the last frame that ends inside its own source range.
 
@@ -4580,6 +4783,7 @@ def trim_to_whole_frames(cuts: list[Cut]) -> int:
     """
     e = 1e-4
     n_touched = 0
+    clamped: list[str] = []
     for c in cuts:
         fps = c.source_fps or 0.0
         if fps <= 0 or c.track_type == "audio" or c.media_kind == "still":
@@ -4593,6 +4797,17 @@ def trim_to_whole_frames(cuts: list[Cut]) -> int:
         # material from the neighbour. Same argument at the tail, mirrored.
         first = math.ceil(in_f - e)
         last = math.floor(out_f + e)            # a fractional end moves DOWN
+        # ⚠️ NOTHING BEFORE FRAME 0. A clipitem whose media begins inside a head dissolve
+        # carries a NEGATIVE <in>: Premiere shows a held first frame there, the file has no
+        # frames there at all. build_command clamps the seek to 0.0 but used to keep the full
+        # pin, so the delivery ran on past the timeline's out-point by exactly the clamped
+        # count — measured against Premiere's own render of the same cut: 12 frames of footage
+        # the edit never showed, on the one clip per timeline that has this shape (24 of 40
+        # real exports). The range starts at the first frame that exists; the loss is on the
+        # record in frames_trimmed and named in the warning below.
+        if first < 0:
+            clamped.append(c.clip_name or Path(c.source_path).name)
+            first = 0
         n = last - first
         if n < 1:
             continue
@@ -4605,7 +4820,38 @@ def trim_to_whole_frames(cuts: list[Cut]) -> int:
         c.source_consumed_frames = n
         c.frames_trimmed = max(0, before - n)
         n_touched += 1
+    if clamped and warnings is not None:
+        warnings.append(
+            f"{len(clamped)} cut(s) start before their media begins — the frames before "
+            f"frame 0 were never shown and are not cut: " + ", ".join(clamped[:4])
+            + (", …" if len(clamped) > 4 else ""))
     return n_touched
+
+
+def cut_from_of(args) -> str:
+    """Where this run's pixels come from: "render" or "source".
+
+    One expression, in one place, because four callers now depend on the answer and three
+    of them already computed it by hand: the manifest's settings block, the resume
+    settings-drift comparison, and — since the filename fix — tc_range, which names a
+    render-mode clip after its TIMELINE position. Two of those must agree exactly or
+    --resume compares a name built one way against a name recorded the other.
+
+    ⚠️ render_planned COUNTS, and reading only render_dir made the SCAN and the EXPORT name
+    the same cut two different things. The panel sends --render-planned on the scan and
+    --render-dir on the export — the render does not exist yet when the scan runs — so a
+    render-mode scan named every clip on the SOURCE clock and the export renamed it on the
+    TIMELINE clock. MEASURED on tests/PROMO_MASTER_v7.xml: 19 shared cuts, 16 of the 19
+    filenames differ, e.g. 01_(05.71-07.71)_CAM_A.mp4 in the scan against
+    01_(00.00-02.00)_CAM_A.mp4 in the export. The panel shows the scan's names, --resume
+    matches on index_free() of the recorded name (16 of 19 misses, so a complete folder
+    re-encodes), and a --pick file written from the scan names files the export never
+    writes. Every other render-aware branch in this file already reads the pair — the
+    probe skip, estimate_sizes, the nest default, the transition split, the --ext filter —
+    so this is the one that disagreed with all of them.
+    """
+    return ("render" if (getattr(args, "render_planned", False)
+                         or getattr(args, "render_dir", None)) else "source")
 
 
 _INDEX_PREFIX_RE = re.compile(r"^\d+_(.*)$")
@@ -4723,7 +4969,7 @@ def resume_settings_drift(previous: dict, args) -> list[str]:
         "scale_percent": scale_of(args),
         "output_fps": (float(args.fps) if getattr(args, "fps", None) else None),
         "speed": getattr(args, "speed", "native"),
-        "cut_from": "render" if getattr(args, "render_dir", None) else "source",
+        "cut_from": cut_from_of(args),
     }
     out = []
     for k in RESUME_DRIFT_FIELDS:
@@ -4738,7 +4984,8 @@ def resume_settings_drift(previous: dict, args) -> list[str]:
     return out
 
 
-def assign_output_names(cuts: list[Cut], container: str, seq_fps: float) -> None:
+def assign_output_names(cuts: list[Cut], container: str, seq_fps: float,
+                        cut_from: str = "source") -> None:
     """Name every clip before anything is cut.
 
     Done here rather than inside run_cut for two reasons: a scan can then show and export
@@ -4748,12 +4995,19 @@ def assign_output_names(cuts: list[Cut], container: str, seq_fps: float) -> None
 
     Shape: index _ (start-end) _ the SOURCE file's name. The source name rather than the
     clip name because that is what you go looking for when you want the original.
+
+    `cut_from` decides which clock (start-end) is counted on — see tc_range. It is a
+    PARAMETER and not a module flag on purpose: run_cut re-names a single cut when it
+    arrives without one, and if that path could answer the question differently from the
+    batch pass, --resume would compare a name built one way against a name recorded the
+    other and re-encode a folder that was already complete. Both call sites read it from
+    cut_from_of(args).
     """
     pad = max(2, len(str(len(cuts))))
     for c in cuts:
         ext = ".m4a" if c.track_type == "audio" else f".{container}"
         stem = Path(c.source_path).stem or c.clip_name or "clip"
-        c.output_file = (f"{c.index:0{pad}d}_{tc_range(c, seq_fps)}"
+        c.output_file = (f"{c.index:0{pad}d}_{tc_range(c, seq_fps, cut_from)}"
                          f"_{sanitize(stem, 40)}{ext}")
 
 
@@ -4829,7 +5083,8 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
     # below — but Premiere resolves it through Dynamic Link while rendering, so in render
     # mode it exports like anything else. So does a clip whose media has gone offline
     # since the render was made.
-    if getattr(args, "render_dir", None) and not cut.render_path:
+    if (getattr(args, "render_dir", None) and not cut.render_path
+            and cut.track_type != "audio"):           # audio cuts from source in every mode
         cut.status = "no_render"
         cut.error = ("no render for this cut — Premiere did not produce "
                      f"{render_name(cut)}")
@@ -4886,7 +5141,7 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
 
     cut.pix_fmt_out = pix_fmt_for(cut)
     if not cut.output_file:          # assign_output_names normally did this already
-        assign_output_names([cut], args.container, seq_fps)
+        assign_output_names([cut], args.container, seq_fps, cut_from_of(args))
     out_path = outdir / cut.output_file
 
     if args.dry_run:
@@ -5402,7 +5657,7 @@ def export_summary(tl: Timeline, args) -> dict:
             # What the pixels came from. A dataset reader cannot tell a clip cut from
             # source from one cut from a render by looking at it, and they are different
             # things: one is the camera original, the other is the edit as it played.
-            "cut_from": "render" if getattr(args, "render_dir", None) else "source",
+            "cut_from": cut_from_of(args),
             "render_planned": bool(getattr(args, "render_planned", False)),
             # What a nest became, and how it was applied. Both are kept: `nest` is the
             # user-facing word, `nest_applied` the state the parser actually ran, and they
@@ -5443,6 +5698,14 @@ def export_summary(tl: Timeline, args) -> dict:
             # The pairs themselves, so a dataset reader can see WHAT was merged and where
             # rather than only that the number moved.
             "merged_duplicate_cuts": list(getattr(tl, "merged_duplicates", []) or []),
+            # Premiere's extra audio CHANNEL lanes, dropped as redundant copies. A separate
+            # number from merged_duplicates because it has a different cause and a
+            # different fix: that one is stacked layers inside a nest, this one is one
+            # clipitem written once per channel. Zero on every mono timeline.
+            "exploded_audio_lanes_merged": int(
+                getattr(args, "exploded_lanes_merged", 0) or 0),
+            "exploded_audio_lane_merges": list(
+                getattr(args, "exploded_lane_merges", []) or []),
             "overlapping_pairs": int(getattr(args, "overlap_pairs", 0) or 0),
             "overlapping_frames": int(getattr(args, "overlap_frames", 0) or 0),
             "render_dir": str(getattr(args, "render_dir", "") or ""),
@@ -5814,6 +6077,10 @@ def main():
     # Whole-frame trimming is unconditional now; passing this changes nothing.
     ap.add_argument("--whole-frames", dest="whole_frames", action="store_true",
                     help="accepted and ignored — whole-frame trimming is always on")
+    ap.add_argument("--render-audio", dest="render_audio", action="store_true",
+                    help="keep the render's own sound in each Timeline Render clip instead of "
+                         "stripping it. The panel mutes the audio tracks that were not ticked "
+                         "before Premiere renders, so what is heard is what was chosen.")
     ap.add_argument("--render-dir", dest="render_dir", type=Path, metavar="DIR",
                     help="cut from PRE-RENDERED TIMELINE RANGES in DIR instead of the raw "
                          "source, so colour, titles, Motion, transitions and speed ramps "
@@ -6145,6 +6412,44 @@ def main():
     # question from "what was playing over this shot". Taken before the filter, because after it
     # they are gone.
     tl.audio_items = [c for c in tl.cuts if c.track_type == "audio"]
+
+    # ⚠️ PREMIERE'S EXPLODED AUDIO CHANNELS, COLLAPSED OUT OF THE OUTPUT LIST.
+    #
+    # One <track> per audio CHANNEL means a stereo track's every clipitem arrives TWICE.
+    # MEASURED on a two-lane stereo fixture of three clips: the menu offered "A1 · 3 items"
+    # and the run produced SIX cuts in three byte-identical pairs — six rows in the panel,
+    # six selectors in the pick file, six files on disk. Nothing reads <sourcetrack>, so
+    # both halves of a pair are the same full-width cut of the same source range.
+    #
+    # ⚠️ AFTER THE audio_items CAPTURE ON PURPOSE, AND IT IS NOT AN OVERSIGHT. The mix has
+    # its own collapse (vo_contributions), keyed on the PART — path, source in, duration,
+    # offset — not on the cut, so that a dual-mono clip routed to take only channel 2 of
+    # its file keeps both parts. That guard is graded by a listening test: an exploded pair
+    # must mix at the same level as one lane, not +6.02 dB, with no extra samples pinned at
+    # 0 dBFS. Collapsing upstream of it would leave that test with nothing to catch and the
+    # +6 dB defence unmeasured. So the mix still sees every lane and still collapses them
+    # itself; this pass decides what gets WRITTEN.
+    #
+    # ⚠️ AND NOT INSIDE Timeline: the parse product is what the XML says — 9 lanes, one cut
+    # each — which is what premiere_track_numbers' regression tests read, including the
+    # tripwire that proves the two halves of a pair are distinguishable at all.
+    #
+    # Both the SCAN and the EXPORT come through here, so they collapse identically and
+    # their cut_ids — assigned at parse time, above this — still line up.
+    _lanes_kept, _lanes_merged = collapse_exploded_audio_lanes(tl.cuts)
+    tl.cuts = _lanes_kept
+    args.exploded_lanes_merged = len(_lanes_merged)
+    args.exploded_lane_merges = _lanes_merged
+    if _lanes_merged:
+        # NAMED, WITH THE TRACK. A bare count reads like a bug report; the names say which
+        # clips Premiere had written once per channel.
+        _shown = sorted({f"{m['name']} on {m['track']}" for m in _lanes_merged})
+        tl.warnings.append(
+            f"{len(_lanes_merged)} audio cut(s) were Premiere's extra CHANNEL lanes of a "
+            f"clip already in the list and were merged into it: "
+            + ", ".join(_shown[:4]) + (", …" if len(_shown) > 4 else "")
+            + ". One clipitem on one audio track is one cut")
+
     # WHICH of those tracks the mix may read. Parsed here, once, so every later reader sees a
     # set of ints rather than re-parsing a string — and an unknown number is dropped with a
     # warning rather than silently selecting nothing.
@@ -6168,16 +6473,25 @@ def main():
     # every track as "used" and so looks exactly like "all tracks were requested" — the two have
     # to be separate numbers for a verifier to tell them apart.
     args.audio_tracks_requested = sorted(want)
-    # ⚠️ DISTINCT ITEMS, NOT CUTS. Both lanes of a stereo pair now sit in one Premiere
-    # track, so counting cuts would report "A2 only · 4 items" for what Premiere shows as
-    # two clips — still a wrong number, just a different one.
+    # ⚠️ CUTS, AND THAT IS NOW THE HONEST NUMBER. This used to de-duplicate by
+    # (source, timeline in, timeline out, source in) because both lanes of a stereo pair
+    # were still in the list, and counting cuts reported "A2 · 4 items" for what Premiere
+    # showed as two clips. The de-duplication made the MENU right and left the DELIVERY
+    # doubled: "A2 · 3 items", tick it, six files. collapse_exploded_audio_lanes has
+    # removed the extra lanes above, so the count of cuts and the count of clips Premiere
+    # shows are the same number — and this is the number the panel's tick actually
+    # produces, which is the property that was broken.
+    #
+    # ⚠️ DO NOT PUT THE SET BACK. Its key omits clip_name, the lane, the speed, the fader
+    # and `enabled`, so it under-counts any pair of genuinely different audio clipitems
+    # that happen to share one source range on one track — the menu would then promise
+    # fewer files than the tick delivers, which is this defect mirrored.
     args.audio_tracks_available = []
     for n in have:
-        seen = {(a.source_path, a.timeline_in_frames, a.timeline_out_frames,
-                 round(a.source_in_seconds or 0.0, 6))
-                for a in tl.cuts
-                if a.track_type == "audio" and a.premiere_track == n}
-        args.audio_tracks_available.append({"index": n, "items": len(seen)})
+        args.audio_tracks_available.append(
+            {"index": n,
+             "items": sum(1 for a in tl.cuts
+                          if a.track_type == "audio" and a.premiere_track == n)})
     # Carried on args because that is what every run_cut() call already takes. Not a module
     # global: two sequences in one process would then share one timeline's voice-over.
     args.vo_items = tl.audio_items
@@ -6319,7 +6633,12 @@ def main():
         want = int(getattr(args, "video_track", 0) or 0)
         before = len(tl.cuts)
         tl.cuts = [c for c in tl.cuts
-                   if c.track_type == "video" and (not want or int(c.track_index) == want)]
+                   # Audio cuts pass through untouched: the master-track choice is about which
+                   # PICTURE Premiere renders, and audio clips are cut from their own source in
+                   # every mode. Filtering them here is why a Timeline Render could never carry
+                   # the per-track audio files — they were gone before attach_renders ran.
+                   if c.track_type == "audio"
+                   or (c.track_type == "video" and (not want or int(c.track_index) == want))]
         dropped = before - len(tl.cuts)
         matched, missing = attach_renders(tl.cuts, Path(args.render_dir))
         args.render_matched = matched
@@ -6346,22 +6665,6 @@ def main():
         # rate") makes Premiere declare a rate that is deliberately not the file's, and
         # VFR media differs routinely. Recomputed after the probe; see below.
         c.frame_exact = not forced_rate_resamples(c, args, tl.sequence_fps)
-    # Named now, while the list is final — so --manifest-only and the sheet can show the
-    # filenames without a single frame being encoded.
-    # BEFORE the names and the manifest: both are built from the ranges this may change.
-    # ⚠️ ALWAYS, NOT A CHOICE. This was a tick nobody could evaluate: "whole frames only"
-    # asks the editor to reason about sub-frame source positions in order to decide whether
-    # they want a frame of the neighbouring shot at the head. Nobody wants that, so the
-    # tick had exactly one correct setting and shipping the other one was a trap. It is now
-    # the behaviour. --whole-frames is still ACCEPTED and ignored, because an installed
-    # panel older than this release still sends it and argparse would refuse the run.
-    # In render mode a timeline range is already frame-aligned, so this finds nothing to do.
-    if not getattr(args, "render_dir", None):
-        n_trim = trim_to_whole_frames(tl.cuts)
-        if n_trim:
-            print(f"\n  pulled {n_trim} cut(s) in to whole source frames "
-                  f"({sum(c.frames_trimmed for c in tl.cuts)} frame(s) dropped in total)")
-    assign_output_names(tl.cuts, args.container, tl.sequence_fps)
 
     # ⚠️ THE COST OF --transitions ignore, ON THE RECORD AS A NUMBER. Measured on the final
     # cut list, after every filter, so it describes the folder that is about to be written
@@ -6498,6 +6801,38 @@ def main():
             print(f"  size     : "
                   + (f"at most ~{human_bytes(est)} total (a ceiling)" if capped
                      else f"~{human_bytes(est)} total (estimate)"))
+
+    # ⚠️ AFTER THE PROBE, NOT BEFORE IT — and the order is the whole fix. This block used to run
+    # while cut.source_fps was still the XML's DECLARED <file><rate>, which apply_probe()
+    # then replaced. Premiere writes 23/29/59 with <ntsc>FALSE for 23.976/29.97/59.94 media
+    # (and "Interpret Footage" declares whatever the editor typed), so the trim snapped the
+    # in-point onto a grid the encode never used, and the probe then recomputed the count
+    # from the already-snapped seconds: ceil on the wrong grid, floor on the right one.
+    # MEASURED on a 29.97 source declared 29: true range 200..259 delivered as 200..258, last
+    # frame lost, frames_trimmed=1 for a range that was already whole. A 23.976 source
+    # declared 23: frame 0 was 72, the neighbour's frame, where 73 was right. 4 of 4 cuts
+    # wrong at one edge; the control with correct declarations was exact. 62 of 87 real
+    # exports on the shared drive carry at least one such file. Nothing between the old
+    # position and this one reads a trimmed value or an output name, and the manifest is
+    # written after this point on every path, so the move costs nothing but the fix.
+    # Outside the `if not args.no_probe` block on purpose: a --no-probe run must still be
+    # trimmed and named — on whatever rate it has.
+    # Named now, while the list is final — so --manifest-only and the sheet can show the
+    # filenames without a single frame being encoded.
+    # BEFORE the names and the manifest: both are built from the ranges this may change.
+    # ⚠️ ALWAYS, NOT A CHOICE. This was a tick nobody could evaluate: "whole frames only"
+    # asks the editor to reason about sub-frame source positions in order to decide whether
+    # they want a frame of the neighbouring shot at the head. Nobody wants that, so the
+    # tick had exactly one correct setting and shipping the other one was a trap. It is now
+    # the behaviour. --whole-frames is still ACCEPTED and ignored, because an installed
+    # panel older than this release still sends it and argparse would refuse the run.
+    # In render mode a timeline range is already frame-aligned, so this finds nothing to do.
+    if not getattr(args, "render_dir", None):
+        n_trim = trim_to_whole_frames(tl.cuts, tl.warnings)
+        if n_trim:
+            print(f"\n  pulled {n_trim} cut(s) in to whole source frames "
+                  f"({sum(c.frames_trimmed for c in tl.cuts)} frame(s) dropped in total)")
+    assign_output_names(tl.cuts, args.container, tl.sequence_fps, cut_from_of(args))
 
     # Only a panel dump carries Premiere's interpreted rate, and only after probing can
     # it be compared with the file's own. A disagreement means the edit was built on a

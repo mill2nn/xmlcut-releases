@@ -49,8 +49,23 @@
                "onlyproblab",
                "actionbar", "barready", "retry", "audiosel",
                "pocrender", "pocnote",
-               "cutfrom", "vtrack", "vtrackfield",
-               "vinclude"];
+               /* THE MODE, as two buttons rather than a select. #cutfrom is GONE — see the
+                * comment above the buttons in index.html. state.cutFrom and the
+                * xmlcut.cutfrom localStorage key are unchanged, so every reader of the mode
+                * and every saved value still work; only the control moved.
+                * NOTE: no quoted strings and no regex literals in a comment inside this
+                * array. checkIds() in tests/panel_dom.js reads the ids straight out of this
+                * literal by scanning for quoted words, so anything quoted in a comment here
+                * becomes a phantom id and the drift check fails on it. Both mistakes were
+                * made writing this comment. */
+               "modesrc", "modeseq", "vtrack", "vtrackfield",
+               "vinclude",
+               /* The four framed groups that carry a caption, and the fold over the four
+                * settings that have a correct default. */
+               "destgroup", "trackgroup", "audiofield", "setdet", "setsum",
+               // The three engine flags the panel could not reach, and the fps option whose
+               // label is filled in from the read: --transitions, --tracks, --remap, --fps.
+               "splitdis", "dissnote", "atracksfield", "atracks", "relink", "fpssrc"];
     for (var i = 0; i < ids.length; i++) el[ids[i]] = document.getElementById(ids[i]);
 
     var state = {
@@ -92,6 +107,37 @@
         // "premiere" once the engine reports it numbers tracks Premiere's way; "" for a
         // manifest from before that, whose numbers mean something else.
         audioNumbering: "",
+        /* WHICH AUDIO TRACKS BECOME CLIPS OF THEIR OWN, as Premiere's A-numbers: "" for none
+         * — which is what every earlier version did, since the panel never passed --tracks —
+         * or "1,3". A DIFFERENT question from audioWant above, which narrows the one mixed
+         * mp3. Kept as a string for the same reason vIncludeWant is: it goes to localStorage
+         * and comes back without a parse step that could half-fail. */
+        audioCutWant: "",
+        audioHearWant: null,       // null = every audio track is heard, as Premiere renders it
+        /* WHERE A CROSS-DISSOLVE IS CUT. true = --transitions split, and it is the DEFAULT:
+         * every report about the extra frame at head and tail has been a request for it, and
+         * the engine has carried the flag since before the panel had any way to send it.
+         * Restored from localStorage at boot — see loadSplitTrans(). */
+        splitTrans: true,
+        /* THE ENGINE'S OWN OVERLAP ACCOUNTING for the timeline that was last scanned:
+         * `pairs` and `frames` from overlapping_cut_frames(), `split` from
+         * split_transition_overlaps(). Read from the manifest rather than computed here, so
+         * the count beside the tick describes what the engine actually did — a panel-side
+         * guess would keep claiming a split on a run where the engine did not make one. */
+        overlapPairs: 0,
+        overlapFrames: 0,
+        transSplit: 0,
+        /* THE SEQUENCE'S OWN FRAME RATE as the ENGINE parsed it out of the XML, which is the
+         * number --fps is compared against. Premiere's own dump reports a rate too
+         * (state.info.fps) and it arrives a scan earlier, so that one is the fallback rather
+         * than the answer: on a 29.97003 timeline they agree to well inside the tolerance,
+         * and where they do not it is the engine's that decides frame_exact. */
+        seqFps: 0,
+        /* ONE --remap pair, as {old, now, found, total}. Empty until the person picks a
+         * folder for media that has moved. NOT persisted: a remap belongs to a project, not
+         * to the panel, and a stale one silently rewriting the next job's paths is the
+         * failure this is meant to prevent. Cleared by every fresh read. */
+        remap: null,
         /* WHERE THE PIXELS COME FROM: "source" cuts the camera originals, "render" cuts
          * ranges Premiere rendered from the timeline, with the effects already in them.
          * Held here as well as on the select because renderVideoTracks() rebuilds the
@@ -104,6 +150,24 @@
          * answer different questions — where the cuts are, and what is visible in them.
          * Empty means "not chosen yet"; renderVideoTracks fills it from the timeline. */
         vIncludeWant: "",
+        /* WHICH TIMELINE vIncludeWant WAS CHOSEN ON, as its track list ("1,2,3").
+         *
+         * ⚠️ A TRACK NUMBER IS ONLY MEANINGFUL ALONGSIDE THE TIMELINE IT CAME FROM, and this
+         * field is what carries the second half. Without it the remembered set was applied to
+         * whatever opened next: a "keep 1,3,4,5,6" from a six-track job, carried into a
+         * two-track one, left V2 out of the render — a caption or a lower third missing from
+         * every file with nothing on screen saying so, because V2 was simply not on a list
+         * written about a different timeline. Measured, not theorised.
+         *
+         * Empty means "nothing has been applied yet", so the next render of the ticks looks
+         * the choice up rather than trusting what is already in vIncludeWant. */
+        vIncludeSig: "",
+        /* The remembered set from a build before the ticks were kept per timeline, as a bare
+         * "1,3". Adopted by the FIRST timeline whose tracks it all fits — which is his last
+         * project far more often than not — and cleared once it has been. Held until then
+         * rather than dropped on the first mismatch: opening some other job first must not
+         * throw away the setting he actually left behind. */
+        vIncludeLegacy: "",
         // The render phase's own progress, read off a file Premiere writes as it goes:
         // {done, total, current, failed}. Null when no render phase is running.
         renderProg: null,
@@ -567,7 +631,11 @@
      * was read, every other row on the rail — the destination folder, the cut list, the size
      * estimate — is describing a sequence that is not on screen, so it is the row that has to
      * be read first. */
-    var RAIL_KEYS = ["seq", "err", "failures", "audionum", "audio", "fps", "readmode",
+    /* "media" sits with the other facts about the material rather than with the settings:
+     * it is the answer to "why is this cut not going to work", which is the same class of
+     * row as "audionum" and "ramps". */
+    var RAIL_KEYS = ["seq", "err", "failures", "audionum", "audio", "fps", "media",
+                     "readmode",
                      "ramps", "types", "preset", "dest", "stall", "sizes", "rendermode",
                      "complete", "renders", "exportwait", "scan", "saved"];
     var railRows = {};        // key -> {sev, text, title}
@@ -685,8 +753,12 @@
             + "tắt giữa chừng vẫn còn dữ liệu đầu vào. Log ghi lúc chạy xong."
     ].concat(CL_364);
 
-    var CHANGELOG = {
-        "3.66": [
+    /* Pulled out of the CHANGELOG literal below and given a name, exactly like every
+     * release before it — because 3.67 has to CONTAIN it. Inline, it could not be
+     * concatenated onto, and a "3.67" built on CL_365 would silently swallow 3.66's two
+     * notes for anyone jumping 3.65 -> 3.67. That is the defect the chain check in
+     * tests/check_panel.js exists for; it caught this. */
+    var CL_366 = [
             "Log ngắn hơn nhiều. Trên một timeline 87 cut: 214 dòng còn 69. Bỏ các dòng "
             + "\">>\" (panel đã đọc rồi để cập nhật trạng thái từng dòng clip) và bỏ dòng "
             + "\"OK\" của từng clip chạy được — clip nào xong đã có dấu ✓ trên danh sách và "
@@ -694,7 +766,53 @@
             "Lý do giống nhau lặp lại giờ chỉ in một lần kèm số lần lặp — trước đây một câu "
             + "95 ký tự bị in 19 lần trong cùng một lần chạy. Manifest vẫn ghi đủ lỗi của "
             + "từng clip."
-        ].concat(CL_365),
+    ].concat(CL_365);
+
+    /* ⚠️ 3.67 IS WHAT THIS SHIPS AS, AND xmlcut.py VERSION AND panel/CSXS/manifest.xml
+     * MUST BOTH SAY 3.67 FOR ANY OF IT TO BE SEEN. noteVersion() renders
+     * CHANGELOG[engineVersion] and nothing else — so while the engine still says 3.66 this
+     * array is unreachable, which is the right state for a release nobody has stamped yet,
+     * and a silent one if the stamp is forgotten. ONE key for this release: the mode
+     * buttons, the frames, the audio ticks, the fps warning, the transitions tick, the
+     * relink and the corrected filenames are all in it, because they all ship together.
+     *
+     * TONE: information only, no explanation, matching every entry above. */
+    var CL_367 = [
+            "UI: hai nút Source Render / Timeline Render trên cùng; mỗi nhóm cài đặt có khung và tên.",
+            "Save to ngay dưới hai nút, sáng khi chưa chọn folder.",
+            "Preset · encoder · quality · size gộp thành một dòng gấp được.",
+            "Audio tracks: tick từng track để xuất clip audio riêng.",
+            "Cross-dissolve: cắt giữa đoạn chồng, mặc định bật (Timeline Render).",
+            "Frame rate hiện fps thật của sequence; chọn khác thì cảnh báo.",
+            "Media đổi chỗ: nút find the media tự dựng --remap.",
+            "Timeline Render: timecode trong tên file theo timeline."
+    ].concat(CL_366);
+
+    var CL_368 = [
+            "Cắt đúng frame khi file khai báo 23/29/59 fps.",
+            "Nest trong nest: cut đúng vị trí nest ngoài.",
+            "Clip bắt đầu trước media: không cắt thừa frame cuối.",
+            "Audio .m4a không mất đầu.",
+            "verify.py chạy được trên folder export của người khác."
+    ].concat(CL_367);
+
+    var CL_369 = [
+            "Audio tracks có hai cột: HEAR (nghe trong clip Timeline Render) · FILE (xuất file audio riêng, cả hai chế độ).",
+            "Clip Timeline Render có tiếng; mặc định nghe tất cả track.",
+            "Xuất file audio riêng được trong Timeline Render."
+    ].concat(CL_368);
+
+    var CL_370 = [
+            "UI: tên nhóm chữ in nhỏ, nhãn trong nhóm chữ thường; khung rõ hơn; dấu ? mờ hơn.",
+            "Bỏ dấu ? lẻ trên nút Export khi chưa Read."
+    ].concat(CL_369);
+
+    var CHANGELOG = {
+        "3.70": CL_370,
+        "3.69": CL_369,
+        "3.68": CL_368,
+        "3.67": CL_367,
+        "3.66": CL_366,
         "3.65": CL_365,
         "3.64": CL_364,
         "3.63": CL_362,
@@ -749,9 +867,17 @@
          * across a real 3.57 -> 3.58 transition: 4052 characters of notes, shown to nobody.
          * No key here means this panel is older than the engine; leave the marker alone and
          * let the next launch, running the newer code, do the telling. */
-        var lines = CHANGELOG[ver];
-        if (!lines || !lines.length) return;
+        var all = CHANGELOG[ver];
+        if (!all || !all.length) return;
+        /* ⚠️ ONLY WHAT IS NEW SINCE THE VERSION HE LAST SAW. Each CL_N is chained onto the one
+         * before it, so CHANGELOG[ver] is the whole history — measured: a first-time 3.70
+         * opener was shown 76 lines. The new entries sit at the FRONT of the array, so the
+         * ones to show are the first (all − seen) of them; with no usable seen version
+         * (fresh install, or one older than the map), the newest eight. */
+        var prev = (seen && CHANGELOG[seen]) ? CHANGELOG[seen] : null;
+        var lines = prev ? all.slice(0, Math.max(0, all.length - prev.length)) : all.slice(0, 8);
         try { window.localStorage.setItem("xmlcut.seenver", ver); } catch (e) {}
+        if (!lines.length) return;
         say("changelog", "info", "Bản " + ver + " có gì mới:\n• "
             + lines.join("\n• "), "", true);
     }
@@ -1175,6 +1301,17 @@
         state.types = {};
         state.typesReset = "";
         state.readDone = "";
+        /* ⚠️ THE PATH REPAIR DIES WITH THE READ THAT NEEDED IT. --remap is a prefix rewrite
+         * over every source path, so one left standing from the last project would silently
+         * rewrite this one's — and the paths it rewrote would still resolve to files, so
+         * nothing downstream could tell. Same reasoning as state.dump three lines up. */
+        state.remap = null;
+        // This timeline's overlap accounting, not the last one's: the count beside the
+        // cross-dissolve tick must go blank until a scan of THIS sequence supplies it.
+        state.overlapPairs = 0;
+        state.overlapFrames = 0;
+        state.transSplit = 0;
+        state.seqFps = 0;
         el.clipbody.innerHTML = "";
         el.types.innerHTML = "";
         el.listnote.textContent = "";
@@ -1484,6 +1621,11 @@
                + " a keyframed speed ramp — range exact, speed treated as constant.")
             : "");
 
+        /* THE RATE GOES ON THE OPTION AS SOON AS THE READ KNOWS IT, which is here — a scan
+         * later. Premiere's own number answers until the engine's does; they agree to well
+         * inside a thousandth, and waiting for the scan would leave the Frame rate menu
+         * saying nothing during the window in which the choice is actually made. */
+        renderFpsOptions();
         // The destination folder is named after this sequence, so it is only knowable now.
         setOutDest();
         /* ⚠️ AND THE RENDER-MODE NOTE, WHICH COULD NOT APPEAR BEFORE THIS LINE EXISTED.
@@ -2101,10 +2243,40 @@
             : "", d);
     }
 
+    /* THE ONE CONTROL WITH NO CORRECT DEFAULT, so it is the one that lights up.
+     *
+     * MEASURED on the strip this replaced: of the fourteen controls #step3 held, #pickout
+     * was the ONLY one that had to be touched before an export could happen — and it was
+     * ELEVENTH in DOM order, after the preset, the encoder, the quality slider and the frame
+     * rate, every one of which can be left alone. It is second now, in its own frame,
+     * directly under the mode buttons.
+     *
+     * EMPTY: the frame takes the accent border and the button takes the primary treatment,
+     * so the one thing that must happen is the one lit thing on screen. Copy goes, because
+     * there is no path to copy — removed rather than dimmed, since it returns the instant
+     * there is one.
+     *
+     * SET: everything goes quiet. Nothing about a folder that has been chosen needs
+     * attention, and this panel has exactly one primary per screen. */
+    function paintDest() {
+        var empty = !state.out;
+        if (el.destgroup) {
+            el.destgroup.className = "group g-dest" + (empty ? " lit" : "");
+        }
+        if (el.pickout) {
+            el.pickout.className = empty ? "mini want" : "mini";
+            /* The label says which of the two situations you are in, so the button is not
+             * "Change" over a dash. */
+            el.pickout.textContent = empty ? "Choose folder" : "Change";
+        }
+        show(el.copyout, !empty);
+    }
+
     function setOut(p) {
         state.out = p || "";
         setPathLabel(el.outpath, state.out, 40);
         try { window.localStorage.setItem("xmlcut.out", state.out); } catch (e) {}
+        paintDest();
         setOutDest();
         refreshExportEnabled();
     }
@@ -2376,7 +2548,7 @@
             msg = "Wrong sequence.\n\n"
                 + "Read:  " + read + "\n"
                 + "Open:  " + open + "\n\n"
-                + "Timeline render uses the OPEN one. You would get " + open
+                + "Timeline Render uses the OPEN one. You would get " + open
                 + "'s pictures under " + read + "'s names.\n\n"
                 + "Export anyway?";
         } else {
@@ -2705,7 +2877,8 @@
         pollRenderProgress(dir, spec.length);
 
         cs.evalScript("renderCuts(" + jsStr(dir) + ", " + jsStr(spec.join(";"))
-            + ", " + renderMbps() + ", 1, " + jsStr(includeList().join(",")) + ")",
+            + ", " + renderMbps() + ", 1, " + jsStr(includeList().join(","))
+            + ", " + jsStr(hearList().join(",")) + ")",
             function (raw) {
                 stopRenderPoll();
                 var i, t, r = hostReply(raw);
@@ -3186,7 +3359,23 @@
                 // The Audio dropdown is built from what the scan just reported, so it is filled
                 // here — where the data arrives — rather than only on the next settings repaint.
                 renderAudioTracks();
+                /* Same rule, three more readouts that are functions of what the scan just
+                 * said and of nothing on screen: which audio tracks exist to tick, how many
+                 * cross-dissolves this timeline has, and how many sources are not where the
+                 * XML says. Each was empty until something unrelated was nudged when it was
+                 * reached only from renderSettings() — the defect renderStripFoot() carries
+                 * its own note about. */
+                renderAudioCutTracks();
+                renderDissolveNote();
+                renderRelink();
                 renderVideoTracks();
+                /* ⚠️ AND applyCutFrom(), for the same reason as the four above it: the
+                 * Tracks frame is shown or hidden on whether this timeline HAS audio tracks,
+                 * which is a fact the scan just delivered. Reached only from
+                 * renderSettings(), the frame stayed hidden on a timeline with audio until
+                 * something unrelated was nudged — measured as a captioned frame missing on
+                 * the first screen after a read. */
+                applyCutFrom();
                 renderClips();
                 show(el.tablewrap, true);
                 show(el.opts, true);
@@ -3257,6 +3446,21 @@
          * sequence_width, these stay 0, and the branch in clipBytes() never fires. */
         state.seqW = Number(pset.sequence_width || 0);
         state.seqH = Number(pset.sequence_height || 0);
+        /* THE OVERLAP, AS THE ENGINE COUNTED IT ON THIS RUN — the cost of leaving a
+         * cross-dissolve's frames in both clips, which is the defect two editors reported
+         * from 25 Aug. `overlapping_pairs` is what is still shared; `transitions_split` is
+         * how many boundaries --transitions split actually moved. Both are read, and the
+         * note beside the tick says whichever is true, because the engine applies the split
+         * in render mode only — a panel that printed "split" off its own checkbox would
+         * claim a repair that did not happen on a source-media run. */
+        state.overlapPairs = Number(pset.overlapping_pairs || 0);
+        state.overlapFrames = Number(pset.overlapping_frames || 0);
+        state.transSplit = Number(pset.transitions_split || 0);
+        /* THE SEQUENCE'S OWN RATE, off the engine's parse of the XML. This is the number
+         * --fps is measured against — see forced_rate_resamples() — and until it was read
+         * here the panel had no way to tell 29.97 from 30 on screen. A manifest from an
+         * older engine has no `sequence` block; state.info.fps then answers instead. */
+        state.seqFps = Number((data.sequence || {}).fps || 0);
         sayAudioRenumbered();
         var clips = data.clips || [];
         for (var i = 0; i < clips.length; i++) {
@@ -3301,6 +3505,22 @@
                 // clips cannot start on the same frame of the same track.
                 trackType: String(c.track_type || "video"),
                 trackIndex: Number(c.track_index || 1),
+                /* ⚠️ NOT trackIndex, AND THE TWO ARE DIFFERENT NUMBERS ON AUDIO. Premiere
+                 * explodes one stereo track into two per-channel lanes in the XML, so
+                 * track_index counts lanes — nine of them for a four-track timeline — while
+                 * premiere_track is the A-number the editor and the Audio menus speak in.
+                 * audio_tracks_available is keyed by the A-number, so the per-track ticks
+                 * have to match on this one. track_index still owns clipKey and the pick
+                 * file, which is why both are carried. Falls back for a manifest written
+                 * before the engine published it. */
+                premTrack: Number(c.premiere_track || c.track_index || 1),
+                /* Is the media where the XML says it is. The engine reports the same fact on
+                 * stdout as "!! N cut(s) reference media that isn't at the recorded path",
+                 * which the panel could show but not act on. `mediaKind` separates the two
+                 * cases the engine keeps apart: an .aep is not missing, it was never a file
+                 * ffmpeg could open, and no --remap will help it. */
+                srcExists: (c.source_exists !== false),
+                mediaKind: String(c.media_kind || ""),
                 timelineIn: Number(c.timeline_in_frames || 0),
                 // The other end of the same range. Carried for the render probe, which
                 // asks Premiere for a timeline range rather than a source range.
@@ -3424,19 +3644,50 @@
      * were added into an estimate that would never include them, and the count above the
      * button was wrong.
      *
-     * In source mode nothing is excluded and this is always true. */
+     * In SOURCE mode everything the engine reported is in the list. It used to answer the
+     * audio-track question here too, and that conflated two different things: whether a row
+     * BELONGS IN THE LIST, and whether it is in the EXPORT SET. The list is how a person
+     * discovers a track exists at all, so dropping A2's rows from it hid the only evidence
+     * that A2 has anything on it — and check_render_flow.js caught it as "in source mode
+     * every track is listed again", because with the ticks defaulting off audioCutOn() was
+     * false for every track and EVERY audio row vanished. Membership here; the tick in
+     * trackPicked() below. */
     function inRun(c) {
         if (state.cutFrom !== "render") return true;
+        // Audio rows are LISTED in Timeline Render too — they are cut from their source in
+        // every mode now, and the file ticks decide which are exported. Only picture rows
+        // are tied to the rendered video track.
+        if (c.trackType === "audio") return true;
         if (c.trackType !== "video") return false;
         var want = Number(state.vtrackWant || 0);
         return !want || Number(c.trackIndex) === want;
+    }
+
+    /* IS THIS CLIP'S TRACK TICKED FOR EXPORT?
+     *
+     * The other half of the split above, and the ONE place that answer is given — so the
+     * numbering in the list, the count on the Export button, the pick file and the size
+     * estimate cannot disagree about which audio tracks the run will write.
+     *
+     * ⚠️ DEFAULTS TO NO for audio. state.audioCutWant starts "" and the panel has never
+     * passed --tracks, so a 3.66 user upgrading must not silently start getting audio files
+     * next to their clips. Ticking A1 is what asks for them.
+     *
+     * Matched on premTrack, Premiere's A-number, because that is what the ticks are numbered
+     * by; trackIndex on an audio cut is the XML's per-channel lane and there are more of
+     * those than there are tracks. */
+    function trackPicked(c) {
+        if (c.trackType !== "audio") return true;
+        return audioCutOn(c.premTrack);
     }
 
     function pickedClips() {
         var out = [];
         for (var i = 0; i < state.clips.length; i++) {
             var c = state.clips[i];
-            if (c.group === 0 && typeOn(c) && isPicked(c) && inRun(c)) out.push(c);
+            if (c.group === 0 && typeOn(c) && isPicked(c) && inRun(c) && trackPicked(c)) {
+                out.push(c);
+            }
         }
         return out;
     }
@@ -3583,10 +3834,14 @@
         //
         // Unticked clips take no number at all: they will not be in the run, so giving
         // them one would misdescribe every filename after them.
+        //
+        // ⚠️ trackPicked() COUNTS HERE TOO. An audio row whose track is not ticked is in
+        // this list — that is how you find out the track has 12 items on it — but it is not
+        // in the export, so giving it a number would misdescribe every filename after it.
         var n = 0;
         for (var q = 0; q < visible.length; q++) {
             var vv = visible[q];
-            vv.n = (vv.group === 0 && isPicked(vv)) ? (++n) : 0;
+            vv.n = (vv.group === 0 && isPicked(vv) && trackPicked(vv)) ? (++n) : 0;
         }
         /* Each row's group is worked out ONCE, here, and the list is sorted by it —
          * stably, so timeline order survives inside every group. */
@@ -3625,7 +3880,10 @@
         for (var j = 0; j < visible.length; j++) {
             var v = visible[j];
             var tr = document.createElement("tr");
-            var picked = isPicked(v);
+            /* Both halves of "will this row produce a file": his own tick, and whether the
+             * row's track is in the export at all. An audio row on an unticked track reads
+             * exactly like a clip he unticked himself, because that is what it is. */
+            var picked = isPicked(v) && trackPicked(v);
             // Sized at the CURRENT settings, so both the number and the flag move with
             // the sliders. Computed before the row class, which needs to know.
             var eb = clipBytes(v, qs);
@@ -3669,10 +3927,16 @@
                 var box = document.createElement("input");
                 box.type = "checkbox";
                 box.checked = picked;
-                // Nothing to include if it cannot cut, and nothing to change once the
-                // run has the selection on its command line.
-                box.disabled = (clip.group !== 0) || state.running;
-                box.title = clip.clip;
+                /* Nothing to include if it cannot cut, and nothing to change once the
+                 * run has the selection on its command line.
+                 * ⚠️ AND NOTHING TO TICK ON AN AUDIO ROW WHOSE TRACK IS OFF: the tick would
+                 * appear to work and change nothing, because trackPicked() would still say
+                 * no. The control that governs it is the track's own tick, and the row's
+                 * tooltip says which one — no new text on screen. */
+                box.disabled = (clip.group !== 0) || state.running || !trackPicked(clip);
+                box.title = trackPicked(clip) ? clip.clip
+                    : clip.clip + " — tick A" + clip.premTrack + " under Audio tracks"
+                      + " to export this track";
                 box.addEventListener("change", function () {
                     if (box.checked) delete state.unpicked[clipKey(clip)];
                     else state.unpicked[clipKey(clip)] = true;
@@ -3820,7 +4084,11 @@
         var total = 0, on = 0;
         for (var i = 0; i < state.clips.length; i++) {
             var c = state.clips[i];
-            if (c.group !== 0 || !typeOn(c)) continue;
+            /* ⚠️ trackPicked() SKIPS, IT DOES NOT COUNT AS UNTICKED. An audio row on an
+             * unticked track has a DISABLED box, so counting it as "off"
+             * would leave the master tick permanently indeterminate on any timeline with
+             * audio in the list — a tri-state nothing on screen could resolve. */
+            if (c.group !== 0 || !typeOn(c) || !trackPicked(c)) continue;
             total++;
             if (isPicked(c)) on++;
         }
@@ -4173,6 +4441,21 @@
             vcodec: el.vcodec.value || "libx264",
             // "" = no audio files · "all" = every audio track · "2" = that track alone
             audio: String(el.audiosel.value || ""),
+            /* THE CROSS-DISSOLVE BOUNDARY. "split" moves it to the middle of the overlap,
+             * "ignore" is the engine's own default and what every earlier panel produced.
+             * Read off state rather than the box for the same reason cutFrom is: the box is
+             * repainted from state on restore, not the other way round. */
+            transitions: state.splitTrans ? "split" : "ignore",
+            /* WHICH AUDIO TRACKS BECOME CLIPS. "" = none, which is --tracks video, the
+             * engine's default and what the panel has always sent. Anything else needs the
+             * audio cuts to EXIST in the list before --pick can choose between them, which
+             * is what --tracks all is for. Render mode is excluded here rather than at the
+             * flag: the engine drops every audio cut on a render run, so asking for them
+             * would put rows in the list that the export cannot produce. */
+            audioCut: String(state.audioCutWant || ""),
+            // Timeline Render clips carry the render's own sound when at least one track is
+            // ticked to be heard; the engine strips it otherwise, as it always has.
+            renderAudio: state.cutFrom === "render" && hearList().length > 0,
             // Not in settingArgs(): --render-dir is added by the EXPORT only. The scan
             // runs before any render exists, and handing it a folder of nothing would
             // report every clip as having no render.
@@ -4196,6 +4479,27 @@
         if (s.audio) {
             a.push("--audio");
             if (s.audio !== "all") a.push("--audio-tracks", s.audio);
+        }
+        /* ⚠️ EVERY AUDIO TRACK, then narrowed by --pick. --tracks has no per-track form —
+         * it is video|audio|all — so "A1 and A3 but not A2" cannot be said with it. What CAN
+         * say it is the pick file the panel already writes from the cut list, and
+         * trackPicked() is where a cut on an unticked audio track is dropped, so the count
+         * on the button, the size estimate and the pick file cannot disagree about it. The
+         * LIST still shows every audio row — see inRun(), which is where those two questions
+         * were once conflated.
+         *
+         * Never "audio": the video cuts are wanted in every case this control has. */
+        if (s.audioCut) a.push("--tracks", "all");
+        if (s.renderAudio) a.push("--render-audio");
+        /* Only when it differs from the engine's own default, same rule as --vcodec above.
+         * The panel defaults this ON, so "split" is the flag an ordinary export carries. */
+        if (s.transitions === "split") a.push("--transitions", "split");
+        /* ONE PREFIX PAIR, and only the one the person confirmed by picking a folder. The
+         * engine's _resolve() is a startswith/replace over each source path, so this covers
+         * exactly the case it can: every missing file under one shared root that has moved
+         * to one other root. See pickRelinkFolder() for what it does NOT cover. */
+        if (state.remap && state.remap.old && state.remap.now) {
+            a.push("--remap", state.remap.old + "=" + state.remap.now);
         }
         return a;
     }
@@ -4510,6 +4814,356 @@
         state.audioWant = want;
     }
 
+    /* ------------------------------------------- audio tracks as CLIPS, not as a mixdown
+     *
+     * "make it have per track tick box A1 A2 A3 so each audio track exports as its own
+     * clips" — and the same message said, correctly, that the Audio control above only
+     * groups tracks into one file. These are two different exports and they now look like
+     * two different controls.
+     *
+     * ⚠️ WHY THE TRACK CHOICE CANNOT BE A FLAG. --tracks takes video, audio or all. There
+     * is no --tracks a1,a3. So the flag's whole job here is to put the audio cuts INTO the
+     * list (--tracks all), and the choice between them is made the way every other choice
+     * in this panel is made: through --pick, written from the cut list, gated in
+     * trackPicked().
+     * The alternative — teaching the panel to emit --tracks audio and run a second export —
+     * would produce a second folder with its own 01..N numbering, which is the collision the
+     * raw/ and edited/ split exists to avoid.
+     *
+     * Built from what the SCAN reported, like the mixdown menu and the master-track menu:
+     * A2 on one project is not A2 on the next.
+     */
+    var AUDIOCUT_KEY = "xmlcut.audioclips";
+
+    function loadAudioCutWant() {
+        try { state.audioCutWant = String(window.localStorage.getItem(AUDIOCUT_KEY) || ""); }
+        catch (e) { state.audioCutWant = ""; }
+    }
+
+    function rememberAudioCutWant() {
+        try { window.localStorage.setItem(AUDIOCUT_KEY, state.audioCutWant); } catch (e) {}
+    }
+
+    // The ticked A-numbers as an array of numbers. One parser, so the ticks, inRun() and the
+    // argv cannot disagree about what "1,3" means.
+    function audioCutList() {
+        var out = [], parts = String(state.audioCutWant || "").split(",");
+        for (var i = 0; i < parts.length; i++) {
+            var n = parseInt(parts[i], 10);
+            if (n > 0) out.push(n);
+        }
+        return out;
+    }
+
+    function audioCutOn(n) {
+        var list = audioCutList();
+        for (var i = 0; i < list.length; i++) if (list[i] === Number(n)) return true;
+        return false;
+    }
+
+    /* --------------------------------------------- what a Timeline Render HEARS
+     * Per track, like the "In the picture" video ticks: the unticked tracks are muted in
+     * Premiere for the duration of the render and put back afterwards, so the render's own
+     * mix — which the engine keeps under --render-audio — holds only what was chosen. null
+     * means "every track", which is what Premiere renders when nobody touches it. Remembered
+     * as a flat list because muting is about THIS render, not about which timeline it was. */
+    var AUDIOHEAR_KEY = "xmlcut.audiohear";
+    function loadAudioHearWant() {
+        try {
+            var v = window.localStorage.getItem(AUDIOHEAR_KEY);
+            state.audioHearWant = (v === null) ? null : String(v);
+        } catch (e) { state.audioHearWant = null; }
+    }
+    function rememberAudioHearWant() {
+        try {
+            if (state.audioHearWant === null) window.localStorage.removeItem(AUDIOHEAR_KEY);
+            else window.localStorage.setItem(AUDIOHEAR_KEY, state.audioHearWant);
+        } catch (e) {}
+    }
+    function hearList() {
+        var have = state.audioTracks || [], out = [], i;
+        if (state.audioHearWant === null) {
+            for (i = 0; i < have.length; i++) out.push(have[i].index);
+            return out;
+        }
+        var parts = String(state.audioHearWant).split(",");
+        for (i = 0; i < parts.length; i++) {
+            var n = parseInt(parts[i], 10);
+            if (n > 0) out.push(n);
+        }
+        return out;
+    }
+    function audioHearOn(n) {
+        var list = hearList();
+        for (var i = 0; i < list.length; i++) if (list[i] === Number(n)) return true;
+        return false;
+    }
+
+    /* One tick per audio track the timeline has. Hidden entirely when there are none, and in
+     * render mode — where the engine drops every audio cut, so a tick there would offer an
+     * export that cannot happen. Same markup as the `In the picture` ticks so this adds no
+     * shape the eye has not already met in this strip. */
+    function renderAudioCutTracks() {
+        var have = state.audioTracks || [];
+        var render = state.cutFrom === "render";
+        // Shown in BOTH modes now. It used to hide in Timeline Render — the one mode the
+        // per-track ticks were asked for — because the engine refused audio cuts on a render
+        // run. It no longer does; audio cuts come from their source in every mode.
+        show(el.atracksfield, have.length > 0);
+        if (!el.atracks) return;
+        el.atracks.innerHTML = "";
+        if (!have.length) return;
+        // One row per track; a caption row; two tick columns in Timeline Render (hear / file),
+        // one in Source Render (file — a source clip already carries its own camera sound).
+        el.atracks.className = render ? "atgrid two" : "atgrid one";
+        var head = document.createElement("div");
+        head.className = "atrow";
+        head.appendChild(atCap("", ""));
+        if (render) head.appendChild(atCap("hear", "Heard inside each rendered clip"));
+        head.appendChild(atCap("file", "This track's clips cut to their own files"));
+        el.atracks.appendChild(head);
+        for (var i = 0; i < have.length; i++) atRow(have[i]);
+
+        function atCap(text, tip) {
+            var sp = document.createElement("span");
+            sp.className = "atcap";
+            sp.textContent = text;
+            if (tip) sp.title = tip;
+            return sp;
+        }
+        function atTick(idx, attr, on, tip, onChange) {
+            var lab = document.createElement("label");
+            lab.className = "tick attick";
+            lab.title = tip;
+            var box = document.createElement("input");
+            box.type = "checkbox";
+            box.checked = !!on;
+            box.setAttribute(attr, String(idx));
+            box.addEventListener("change", function () { onChange(box.checked); }, false);
+            lab.appendChild(box);
+            return lab;
+        }
+        function atRow(t) {
+            var row = document.createElement("div");
+            row.className = "atrow";
+            var name = document.createElement("span");
+            name.className = "atname";
+            name.textContent = "A" + t.index + " · " + t.items + (t.items === 1 ? " item" : " items");
+            row.appendChild(name);
+            if (render) {
+                row.appendChild(atTick(t.index, "data-h", audioHearOn(t.index),
+                    "Hear A" + t.index + " in each clip", function (on) {
+                    var keep = [], j;
+                    for (j = 0; j < have.length; j++) {
+                        if ((have[j].index === t.index) ? on : audioHearOn(have[j].index)) {
+                            keep.push(have[j].index);
+                        }
+                    }
+                    state.audioHearWant = (keep.length === have.length) ? null : keep.join(",");
+                    rememberAudioHearWant();
+                    renderSettings();
+                }));
+            }
+            row.appendChild(atTick(t.index, "data-a", audioCutOn(t.index),
+                "Cut A" + t.index + "'s clips to their own files", function (on) {
+                var keep = [], j;
+                for (j = 0; j < have.length; j++) {
+                    if ((have[j].index === t.index) ? on : audioCutOn(have[j].index)) {
+                        keep.push(have[j].index);
+                    }
+                }
+                state.audioCutWant = keep.join(",");
+                rememberAudioCutWant();
+                renderSettings();
+                rescanForSetting("Re-reading…");
+            }));
+            el.atracks.appendChild(row);
+        }
+    }
+
+    /* ------------------------------------------------------ where a cross-dissolve is cut
+     *
+     * The count, and ONLY the count: the label beside the tick already says what the setting
+     * does, and a second sentence explaining it would be the "calmer pass that came out
+     * busier" all over again. Blank until a scan has something to report, which on a timeline
+     * with no dissolves is always.
+     *
+     * ⚠️ READ OFF THE MANIFEST, NEVER OFF THE CHECKBOX, and this is not a style preference.
+     * MEASURED on a 14-frame overlap built from tests/PROMO_MASTER_v7.xml:
+     *
+     *   source, --transitions ignore   0-60 / 46-135   transitions_split 0, pairs 1, 14 frames
+     *   source, --transitions split    0-60 / 46-135   transitions_split 0, pairs 1, 14 frames
+     *   --render-planned  … split      0-53 / 53-135   transitions_split 1, pairs 0,  0 frames
+     *
+     * split_transition_overlaps() has exactly one call site in the engine and it is gated on
+     * `render_planned or render_dir`, so on a source-media run the flag is accepted and moves
+     * nothing. A note built from the tick would announce a repair that did not happen. This
+     * one prints `transitions_split` when the engine moved boundaries and `overlapping_pairs`
+     * when it did not — and in source mode it names the mode that WILL move them, because a
+     * tick that is on and silent is the worse failure. Four words, on a timeline that
+     * actually has dissolves, and nothing at all on one that does not. */
+    function renderDissolveNote() {
+        if (!el.dissnote) return;
+        var txt = "";
+        if (state.transSplit > 0) {
+            txt = state.transSplit + " split";
+        } else if (state.overlapPairs > 0) {
+            txt = state.overlapPairs + " overlap";
+            if (state.splitTrans && state.cutFrom !== "render") {
+                txt += " · needs Timeline Render";
+            }
+        }
+        el.dissnote.textContent = txt;
+    }
+
+    var SPLIT_KEY = "xmlcut.transitions";
+
+    /* ⚠️ THE DEFAULT IS ON, AND THE ABSENCE OF A SAVED VALUE MEANS ON. Anyone upgrading has
+     * no key, and every complaint this setting answers came from someone who had no key —
+     * so "not stored yet" has to resolve to the new behaviour, not to the old one. Only the
+     * literal string "ignore", which only this panel writes, turns it off. */
+    function loadSplitTrans() {
+        var v = null;
+        try { v = window.localStorage.getItem(SPLIT_KEY); } catch (e) {}
+        state.splitTrans = (String(v) !== "ignore");
+        if (el.splitdis) el.splitdis.checked = state.splitTrans;
+    }
+
+    function rememberSplitTrans() {
+        try {
+            window.localStorage.setItem(SPLIT_KEY, state.splitTrans ? "split" : "ignore");
+        } catch (e) {}
+    }
+
+    /* ---------------------------------------------------------------- media that moved
+     *
+     * One real project's 79 cuts point at a network mount — a volume that exists on
+     * one machine. The engine already detects it, counts it and prints "Fix with --remap
+     * OLD=NEW"; nothing in the panel could act on that, so the advice was addressed to a
+     * command line the reader was not at.
+     */
+
+    /* The cuts whose media is not where the XML says it is.
+     *
+     * ⚠️ NOT `!srcExists` ALONE. A Dynamic Link .aep is not missing — it was never a file
+     * ffmpeg could open, and no path repair will make it one. The engine keeps the two
+     * apart in its own report for the same reason, and offering to relink a comp would be
+     * offering a fix that cannot work. */
+    function missingClips() {
+        var out = [];
+        for (var i = 0; i < state.clips.length; i++) {
+            var c = state.clips[i];
+            if (!c.srcExists && c.mediaKind !== "unsupported" && c.source) out.push(c);
+        }
+        return out;
+    }
+
+    /* The deepest folder every one of these paths is inside, with its trailing slash. This is
+     * the OLD half of the --remap pair, and it is a plain string prefix because that is
+     * exactly what the engine's _resolve() applies: `if path.startswith(old): path = new +
+     * path[len(old):]`.
+     *
+     * Cut back to a SLASH, never left mid-name. Two files at /a/shoot1.mp4 and /a/shoot2.mp4
+     * share the prefix "/a/shoot", and remapping that would rewrite half a filename. */
+    function commonDir(paths) {
+        if (!paths.length) return "";
+        var pre = paths[0];
+        for (var i = 1; i < paths.length; i++) {
+            var b = paths[i], j = 0;
+            while (j < pre.length && j < b.length && pre.charAt(j) === b.charAt(j)) j++;
+            pre = pre.substring(0, j);
+        }
+        var cut = pre.lastIndexOf("/");
+        return cut < 0 ? "" : pre.substring(0, cut + 1);
+    }
+
+    /* The link into the fix, on the heading of the list it is about. Hidden when every source
+     * is where it says it is, which is most runs — so a first-time reader of a healthy
+     * timeline meets nothing new here at all. */
+    function renderRelink() {
+        if (!el.relink) return;
+        /* ⚠️ SOURCE MODE ONLY, and for the same reason an .aep is left out above: --remap
+         * rewrites the paths the ENGINE hands to ffmpeg, and in render mode ffmpeg opens
+         * Premiere's render instead. If the media is offline in Premiere too then the render
+         * is what is broken, and no path this panel rewrites reaches it. Offering the repair
+         * there would be offering a fix that cannot work. */
+        var miss = state.cutFrom === "render" ? [] : missingClips();
+        if (!miss.length) {
+            show(el.relink, false);
+            el.relink.textContent = "";
+            return;
+        }
+        el.relink.textContent = "find the media for " + miss.length + " cut"
+            + (miss.length === 1 ? "" : "s");
+        show(el.relink, true);
+    }
+
+    /* Pick the folder the media is in NOW, and derive OLD=NEW from the recorded paths.
+     *
+     * ⚠️ WHAT THIS DOES NOT COVER, said here and said on screen rather than discovered:
+     * ONE prefix pair. If the missing files sat under two different roots, their common
+     * prefix is the shortest thing both share — often "/" — and pointing that at one folder
+     * is wrong. So the pair is VERIFIED before it is kept: every missing path is rewritten
+     * and tested with fs, and the row says how many of them were actually found. Zero found
+     * means the pair is not applied at all, because a --remap that resolves nothing still
+     * rewrites every path in the manifest and makes the next report harder to read, not
+     * easier. Nested folders below the shared root are covered, because the rewrite keeps
+     * everything after the prefix. */
+    function applyRelink(folder) {
+        var miss = missingClips();
+        if (!miss.length || !folder) return;
+        var paths = [];
+        for (var i = 0; i < miss.length; i++) paths.push(miss[i].source);
+        var oldPrefix = commonDir(paths);
+        if (!oldPrefix) {
+            say("media", "warn", "Those " + miss.length + " cuts have no folder in common, "
+                + "so one path repair cannot cover them.");
+            return;
+        }
+        // A trailing slash on both halves or on neither: "/a/b" -> "/x" must not turn
+        // "/a/b/c.mp4" into "/xc.mp4".
+        var now = String(folder);
+        if (now.charAt(now.length - 1) !== "/") now += "/";
+        var found = 0;
+        for (var k = 0; k < paths.length; k++) {
+            if (exists(now + paths[k].substring(oldPrefix.length))) found++;
+        }
+        if (!found) {
+            state.remap = null;
+            say("media", "warn", "None of the " + miss.length
+                + " files are in that folder. Pick the folder that holds "
+                + baseName(paths[0]) + ".");
+            renderSettings();
+            return;
+        }
+        state.remap = { old: oldPrefix, now: now, found: found, total: paths.length };
+        log("remap " + oldPrefix + " = " + now + " (" + found + " of " + paths.length
+            + " found)");
+        say("media", found === paths.length ? "info" : "warn",
+            found + " of " + paths.length + " found in " + now
+            + (found === paths.length ? "" : " — the rest are somewhere else."));
+        renderSettings();
+        rescanForSetting("Re-reading…");
+    }
+
+    function baseName(p) {
+        var i = String(p).lastIndexOf("/");
+        return i < 0 ? String(p) : String(p).substring(i + 1);
+    }
+
+    /* ⚠️ ONE GUARD, ONE CALLER. Three controls now need "ask the engine again with the new
+     * flag": the cross-dissolve tick, the audio-clip ticks and a path repair. Each of them
+     * changes what the manifest CONTAINS — which cuts exist and where their boundaries are —
+     * so a repaint would leave a list on screen that the export would not reproduce. Copying
+     * the mode switch's four-clause guard three times is three chances to drop a clause. */
+    function rescanForSetting(label) {
+        if (!(state.clips.length && state.dump && state.script
+              && !state.busy && !state.running)) return false;
+        setBusy(true, label || "Re-reading…");
+        scanClips();
+        return true;
+    }
+
     /* ------------------------------------------------------- cutting from a render
      *
      * A render is the finished picture at that instant, so ONE video track supplies the
@@ -4654,11 +5308,96 @@
         out.sort(function (a, b) { return a - b; });
         return out;
     }
+    /* ------------------------------------- the ticks, remembered PER TIMELINE
+     *
+     * The include set is the one remembered track value that used to be applied to any
+     * timeline that came along. Every other one is re-checked against what was actually
+     * read — the master track at renderVideoTracks() ("V2 on one project is not V2 on the
+     * next"), the audio choice at loadAudioWant() — and this one was not, so a set chosen
+     * on a six-track job silently decided a two-track one.
+     *
+     * So the store is keyed by the timeline's own track list. A layout that has been seen
+     * gets its ticks back exactly; a layout that has not gets the safe default of every
+     * track present, which is the only default that cannot drop a picture nobody asked to
+     * drop. */
+    var VINCLUDE_KEEP = 12;
+
+    /* The timeline's identity for this purpose: its video track numbers, in order. NOT the
+     * sequence name — the name changes on a copy and two cuts of the same job share a
+     * layout, and it is the LAYOUT the track numbers are relative to. */
+    function includeSig(have) {
+        var out = [];
+        for (var i = 0; i < have.length; i++) out.push(have[i].index);
+        return out.join(",");
+    }
+
+    function savedIncludeSets() {
+        try {
+            var raw = window.localStorage.getItem("xmlcut.vinclude.by");
+            var o = raw ? JSON.parse(raw) : null;
+            return (o && typeof o === "object") ? o : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
     function rememberInclude() {
         state.vIncludeWant = includeList().join(",");
+        var sig = state.vIncludeSig;
         try {
+            /* ⚠️ THE FLAT KEY IS STILL WRITTEN, and not for nothing: it is what a build
+             * without this change reads, so rolling one back leaves his last choice in place
+             * instead of a panel that has forgotten every tick. */
             window.localStorage.setItem("xmlcut.vinclude", state.vIncludeWant);
+            if (!sig) return;
+            var o = savedIncludeSets(), keys = [], k;
+            for (k in o) {
+                if (Object.prototype.hasOwnProperty.call(o, k) && k !== sig) keys.push(k);
+            }
+            /* Rebuilt oldest-first with this layout appended, so the cap drops the layout
+             * touched longest ago rather than an arbitrary one. A panel that accumulated a
+             * key per timeline forever would be a store that only ever grows. */
+            var next = {};
+            for (var i = Math.max(0, keys.length - (VINCLUDE_KEEP - 1)); i < keys.length; i++) {
+                next[keys[i]] = o[keys[i]];
+            }
+            next[sig] = state.vIncludeWant;
+            window.localStorage.setItem("xmlcut.vinclude.by", JSON.stringify(next));
         } catch (e) {}
+    }
+
+    /* What this timeline's ticks should start as. Called only when the layout on screen is
+     * not the one vIncludeWant was last applied to. */
+    function includeForLayout(have, sig) {
+        var i, all = [], hs = {};
+        for (i = 0; i < have.length; i++) { all.push(have[i].index); hs[have[i].index] = true; }
+
+        var seen = savedIncludeSets();
+        if (Object.prototype.hasOwnProperty.call(seen, sig) && seen[sig]) {
+            return String(seen[sig]);
+        }
+        /* The pre-per-layout setting, taken up by the first layout it could have been
+         * written about. "Could have been" is every index in it existing here — a set naming
+         * a track this timeline does not have was demonstrably written about another one. */
+        var legacy = state.vIncludeLegacy;
+        if (legacy) {
+            var parts = String(legacy).split(","), fits = false, v;
+            for (i = 0; i < parts.length; i++) {
+                v = parseInt(parts[i], 10);
+                if (v > 0) {
+                    if (!hs[v]) { fits = false; break; }
+                    fits = true;
+                }
+            }
+            if (fits) {
+                state.vIncludeLegacy = "";
+                return legacy;
+            }
+        }
+        /* Default: everything the timeline has. Overlays are the exception, not the rule,
+         * and a default that silently dropped a track would be a default that changed the
+         * picture without being asked. */
+        return all.join(",");
     }
 
     function renderIncludeTracks() {
@@ -4673,13 +5412,17 @@
             box.appendChild(none);
             return;
         }
-        /* Default: everything the timeline has. Overlays are the exception, not the rule,
-         * and a default that silently dropped a track would be a default that changed the
-         * picture without being asked. */
-        if (!state.vIncludeWant) {
-            var all = [];
-            for (var d = 0; d < have.length; d++) all.push(have[d].index);
-            state.vIncludeWant = all.join(",");
+        /* ⚠️ THE SET IS RE-READ WHENEVER THE LAYOUT ON SCREEN IS NOT THE ONE IT WAS CHOSEN
+         * ON. Testing `!state.vIncludeWant` instead — filling in a default only when nothing
+         * at all was remembered — is what let a set from another job through untouched.
+         *
+         * The signature comparison is also what keeps the ordinary case cheap and stable:
+         * this function re-runs on every tick and on every master change, and in those the
+         * layout has not moved, so the choice already in vIncludeWant stands. */
+        var sig = includeSig(have);
+        if (sig !== state.vIncludeSig) {
+            state.vIncludeWant = includeForLayout(have, sig);
+            state.vIncludeSig = sig;
         }
         var set = includeSet();
         var master = Number(state.vtrackWant || 0);
@@ -4718,19 +5461,97 @@
         rememberInclude();
     }
 
-    /* Source media or a timeline render. The track field only exists in render mode. */
+    /* ------------------------------------------------------------------- THE MODE SWITCH
+     *
+     * Two buttons, and the panel's ONE most prominent control: "nên để 2 nút Source và
+     * Timeline nổi bật nhất" — 28 Aug. It was a <select> before, which hid the choice it was
+     * offering behind a click, and whose two option labels ("Source media", "Timeline render
+     * (effects)") were not the two names he asked to standardise on.
+     *
+     * ⚠️ THE SELECT IS GONE, THE STATE IS NOT. state.cutFrom is still the only place the
+     * mode lives, and it is still written to xmlcut.cutfrom — so the 40-odd readers of
+     * state.cutFrom, the render branches in doExport(), outKind() and settings(), and a
+     * saved value from any earlier build all keep working untouched. What changed is which
+     * element the person clicks.
+     *
+     * The selection is marked by ADDING — accent border, lit label, --glow — never by
+     * degrading the other one, which is the same rule the sliders and the primary button
+     * follow. No new colour: --accent and --glow are the tokens that were already there.
+     */
+    function paintMode() {
+        var render = state.cutFrom === "render";
+        if (el.modesrc) {
+            el.modesrc.className = "modebtn" + (render ? "" : " on");
+            el.modesrc.setAttribute("aria-pressed", render ? "false" : "true");
+        }
+        if (el.modeseq) {
+            el.modeseq.className = "modebtn" + (render ? " on" : "");
+            el.modeseq.setAttribute("aria-pressed", render ? "true" : "false");
+        }
+    }
+
+    /* ⚠️ NAMED setCutFrom, NOT setMode. setMode() already exists in this file — it is the
+     * read's busy-text setter, called as setMode("Exporting XML…") — and a second function
+     * declaration by that name silently REPLACED it. Every read then called the mode switch
+     * with a progress string, which is not "render", so a Timeline Render panel reset itself
+     * to Source Render on Read and wrote that to localStorage. Nine checks in
+     * check_panel.js went red at once and not one of them named the mode switch.
+     *
+     * ⚠️ NOT a preset, and not in the setInputs loop. A preset is the ENGINE's file and
+     * describes an ENCODE — crf, codec, scale, rate. Where the pixels come from is a
+     * different kind of choice, and putting it in a preset would mean applying a saved
+     * preset could silently switch a run from Source Render to Timeline Render.
+     *
+     * @param m  "source" | "render"
+     */
+    function setCutFrom(m) {
+        var want = (m === "render") ? "render" : "source";
+        if (want === state.cutFrom) return;   // clicking the lit one is not a change
+        state.cutFrom = want;
+        try { window.localStorage.setItem("xmlcut.cutfrom", state.cutFrom); } catch (e) {}
+        applyCutFrom();
+        renderSettings();
+        if (state.clips.length) renderClips();
+        /* ⚠️ RE-READ THE LIST, because the mode changes what is IN it.
+         *
+         * `cuttable` depends on the mode: typesFromClips() switches DEAD_TYPES back on in
+         * Timeline Render, since Premiere resolves a Dynamic Link that ffmpeg cannot open. So
+         * after a switch the list on screen was the OTHER mode's answer — an .aep shown as
+         * uncuttable in the mode that can cut it, and the destination folder had changed
+         * under it too.
+         *
+         * A rescan rather than a stale marker: it costs one --manifest-only run, it is the
+         * same call a re-read makes, and the alternative is a list that is on screen and
+         * wrong with a disabled Export button beside it — which is the state this panel has
+         * been reported for twice. scanClips() keeps the existing rows up while it runs, so
+         * nothing blanks. */
+        if (state.clips.length && state.dump && state.script && !state.busy
+            && !state.running) {
+            setBusy(true, "Re-reading…");
+            scanClips();
+        }
+    }
+
+    /* Source Render or Timeline Render. The track field only exists in Timeline Render. */
     function applyCutFrom() {
         var render = state.cutFrom === "render";
-        if (el.cutfrom) el.cutfrom.value = state.cutFrom;
+        paintMode();
         show(el.vtrackfield, render);
-        /* whole-frames only means anything OUT of render mode. It stays on screen either
-         * way — dimmed and disabled rather than removed, because a control that vanishes
-         * is a control you go looking for. */
-        /* THE FILE-TYPE CHIPS GO ENTIRELY IN RENDER MODE — hidden, not dimmed, and the
-         * departure from the `whole frames only` convention two lines up is deliberate.
+        /* THE TRACKS FRAME, and it is hidden ENTIRELY when there is nothing in it to
+         * answer: source mode on a timeline with no audio tracks. A caption over a disabled
+         * select is a frame that promises a choice and offers none, which is the newcomer
+         * reading of the old strip — nine boxes, several of them inert.
          *
-         * That convention is for a control whose STATE still means something in the mode you
-         * are in: one checkbox, one line, and four words beside it saying why it is asleep.
+         * ⚠️ THE GROUP, NOT ITS FIELDS. Hiding only the fields would leave the frame and its
+         * caption drawn around 0px of content: a labelled empty box, measured at 34px tall. */
+        show(el.trackgroup, render || (state.audioTracks || []).length > 0);
+        /* And the mixdown goes with the same fact: with no audio tracks it can only ever
+         * offer "no audio tracks", which is a sentence, not a setting. */
+        show(el.audiofield, (state.audioTracks || []).length > 0);
+        /* THE FILE-TYPE CHIPS GO ENTIRELY IN TIMELINE RENDER — hidden, not dimmed.
+         *
+         * Dimming is for a control whose STATE still means something in the mode you are in:
+         * one checkbox, one line, and four words beside it saying why it is asleep.
          * The chips are not that. They are a variable-length row of three to eight
          * interactive labels, each carrying a COUNT, which wraps to two or three lines at a
          * 320px dock. Dimming them would leave twenty-odd nodes and eight numbers on screen
@@ -4743,8 +5564,8 @@
          * it, and it leaves nothing that can disagree with the list.
          *
          * And it is not a control he could go looking for and fail to find: the mode is a
-         * deliberate choice in a dropdown, and putting it back brings the whole block back
-         * visibly in the same gesture. */
+         * deliberate press on one of two lit buttons, and pressing the other one brings the
+         * whole block back visibly in the same gesture. */
         show(el.typelbl, !render);
         show(el.types, !render);
         renderStripFoot();
@@ -5116,50 +5937,183 @@
      * a clip that actually failed to write. Nothing about this stops an export: it is a
      * caveat about what the files will contain.
      */
+    /* Rates are rationals: 29.97 is 30000/1001 and is not 30. A thousandth is the same
+     * tolerance renderSequence() prints the sequence rate at, and the same one
+     * forced_rate_resamples() uses in the engine. */
+    var FPS_TOL = 0.001;
+
+    /* THE SEQUENCE'S OWN RATE, from whichever source has it.
+     *
+     * The engine's parse of the XML is preferred because it is the number --fps is compared
+     * against when frame_exact is decided. Premiere's dump arrives a scan earlier, so it
+     * answers until the manifest lands — otherwise the Frame rate menu would say nothing at
+     * all for the whole of step 2, which is when the choice is made. */
+    function seqFps() {
+        if (state.seqFps > 0) return state.seqFps;
+        return state.info ? Number(state.info.fps || 0) : 0;
+    }
+
+    // 29.97002997 -> "29.97", 30 -> "30", 23.976 -> "23.976". Same rounding as the sequence
+    // card, so the two places that print this rate cannot print it differently.
+    function fpsText(f) { return String(Math.round(f * 1000) / 1000); }
+
+    /* ⚠️ THE TRAP, DEFUSED WHERE IT IS SET: on the option itself.
+     *
+     * The menu offered "Source rate — frame exact", "30" and "60". On four real exports of a
+     * 29.97003 fps timeline, 30 was chosen — it is the only number on the list that looks
+     * like 29.97 — and 34 of 34 and 26 of 26 cuts came back frame_exact=false. Nothing on
+     * screen had ever said what the sequence's rate was, so there was no way to see that the
+     * two numbers were different.
+     *
+     * Naming the rate ON the option that keeps it makes the comparison possible before the
+     * choice, rather than warning about it afterwards. Filled in from the read; the static
+     * label stands until there is a rate to print. */
+    function renderFpsOptions() {
+        if (!el.fpssrc) return;
+        var f = seqFps();
+        el.fpssrc.textContent = f > 0
+            ? "Source rate — frame exact (" + fpsText(f) + ")"
+            : "Source rate — frame exact";
+    }
+
+    /* WHAT A FORCED FRAME RATE WOULD ACTUALLY RESAMPLE — and silence when it would
+     * resample nothing.
+     *
+     * ⚠️ THIS ROW USED TO FIRE ON ANY NON-EMPTY RATE, compared against nothing at all. The
+     * reviewer's timeline is 30 fps, he chose 30 fps, and got a red row telling him his
+     * frames would be wrong; he reported it as "cannot export with this setting". A warning
+     * that is right only by accident teaches you to ignore the rail.
+     *
+     * ⚠️ AND IT NAMED ONLY ONE OF THE TWO NUMBERS. "Forcing 30 fps RESAMPLES 34 of 34 ticked
+     * clips" is true and useless: the reader already knows he chose 30, and the fact he
+     * cannot see is that the timeline is 29.97. Both rates are in the sentence now, and the
+     * sentence is shorter than the one it replaces — 29.97 vs 30 is the whole bug.
+     *
+     * THE COMPARISON IS NOT THE SAME IN THE TWO MODES, because ffmpeg is not opening the
+     * same file:
+     *
+     *   SOURCE — ffmpeg opens each camera file, so the rate that matters is each CLIP's
+     *   own. A 24 fps source in a 30 fps timeline IS resampled at 30 even though the
+     *   sequence matches, so this is per clip and counts them.
+     *
+     *   RENDER — ffmpeg opens Premiere's render, which comes out at the SEQUENCE rate
+     *   whatever the sources were. One comparison, not one per clip.
+     *
+     * A clip whose source rate is unknown COUNTS AS AFFECTED. Silence there would be a
+     * promise the panel has no way to keep.
+     *
+     * ⚠️ "warn", NEVER "error". renderRail() sorts by RAIL_SEV, so red here would sit above
+     * a clip that actually failed to write. Nothing about this stops an export: it is a
+     * caveat about what the files will contain, and forcing a rate is a legitimate thing
+     * to want.
+     */
     function fpsResampleNote() {
         var want = parseFloat(el.fps.value);
         if (!el.fps.value || !(want > 0)) return "";
-        // Rates are rationals: 29.97 is 30000/1001 and is not 30. A thousandth is the same
-        // tolerance renderSequence() prints the sequence rate at.
-        var TOL = 0.001;
-        var tail = " Frames are dropped or duplicated — not frame exact, and the manifest "
-                 + "records frame_exact = false.";
+        var seq = seqFps();
+        // The half a person cannot see. Held apart from the count below because it is true
+        // whether or not any individual clip is resampled: it is a fact about the timeline.
+        var vs = (seq > 0 && Math.abs(seq - want) >= FPS_TOL)
+            ? (el.fps.value + " fps, not this timeline's " + fpsText(seq) + " fps.")
+            : "";
         if (state.cutFrom === "render") {
-            var seq = state.info ? Number(state.info.fps || 0) : 0;
-            if (seq > 0 && Math.abs(seq - want) < TOL) return "";
-            return "Forcing " + el.fps.value + " fps RESAMPLES the render"
-                + (seq > 0
-                    ? " — this timeline is " + (Math.round(seq * 1000) / 1000) + " fps."
-                    : ".")
-                + tail;
+            // The render comes out at the sequence rate whatever the sources were, so the
+            // sequence comparison IS the whole question here.
+            if (!vs) return "";
+            return vs + " The render is resampled — frame_exact = false.";
         }
         var picked = pickedClips(), n = 0, unknown = 0;
+        /* NO LIST YET — the rate can be chosen before a read, and it is remembered across
+         * sessions. The mismatch is still worth saying; a count over an empty list is not,
+         * and "0 of 0 clips resampled" beside a rate that IS wrong reads as reassurance. */
+        if (!picked.length) return vs;
         for (var i = 0; i < picked.length; i++) {
             var sf = Number(picked[i].srcFps || 0);
             if (!(sf > 0)) { unknown++; n++; continue; }
-            if (Math.abs(sf - want) >= TOL) n++;
+            if (Math.abs(sf - want) >= FPS_TOL) n++;
         }
-        if (!n) return "";
-        return "Forcing " + el.fps.value + " fps RESAMPLES " + n + " of " + picked.length
-            + " ticked clip" + (picked.length === 1 ? "" : "s")
-            + " — their sources are not at that rate"
-            + (unknown
-                ? " (" + unknown + " because the source rate could not be read)."
-                : ".")
-            + tail;
+        /* NOTHING RESAMPLED AND THE RATES MATCH: silence, which is the case the old row got
+         * wrong. A mismatch with no clip affected still speaks — the sources happen to sit at
+         * the forced rate while the timeline does not, and the cut LENGTHS come off the
+         * timeline. */
+        if (!n) return vs;
+        return (vs ? vs + " " : "") + n + " of " + picked.length + " ticked clip"
+            + (picked.length === 1 ? "" : "s") + " resampled"
+            + (unknown ? ", " + unknown + " of them at an unreadable rate" : "")
+            + " — frame_exact = false.";
     }
 
     /* Called from BOTH renderSettings and renderClips: the note is a function of the rate
      * AND of what is ticked, and a rate chosen before the read would otherwise keep
      * answering for an empty list. */
-    function renderFpsNote() { say("fps", "warn", fpsResampleNote()); }
+    function renderFpsNote() {
+        renderFpsOptions();
+        say("fps", "warn", fpsResampleNote());
+    }
+
+    /* ------------------------------------------------- the four defaulted settings, folded
+     *
+     * THE FOUR FIELDS BEHIND THIS LINE ALL HAVE A CORRECT DEFAULT: the preset (Custom), the
+     * encoder (H.264 — its field is hidden outright anyway), the quality (crf 1) and the
+     * resolution (Full). Between them they were four labels, three readouts, a slider, a
+     * three-part scale legend and two buttons, sitting in the middle of a flat row of nine
+     * fields — and none of them has to be touched to get a correct export.
+     *
+     * ⚠️ WHAT MAKES THIS DIFFERENT FROM THE COLLAPSIBLE BOX HE REJECTED. That one summarised
+     * itself as "Export settings", so the only way to know what an export would produce was
+     * to open it — and his answer was "the setting should alway be visible". This line IS the
+     * values, built from the same settings() the argv is built from, so nothing about the
+     * output is hidden by the fold: "H.264 · CRF 1 · Full size" is on screen closed.
+     *
+     * A PRESET NAME REPLACES the three figures when one is chosen, because that is what the
+     * person set — and the figures are what the preset means, one click away.
+     */
+    function renderSetSummary() {
+        if (!el.setsum) return;
+        var s = settings();
+        var name = el.preset ? String(el.preset.value || "") : "";
+        var NAMES = { 100: "Full", 50: "Half", 25: "Quarter", 12.5: "Eighth" };
+        var size = NAMES[state.scale] || (state.scale + "%");
+        var bits = [codecName(s.vcodec), "CRF " + s.crf,
+                    // "Full size", not "Full": on its own the word answers a different
+                    // question ("full quality?") than the field it stands for.
+                    size + " size"];
+        el.setsum.textContent = name ? ("“" + name + "” · " + bits.join(" · "))
+                                     : bits.join(" · ");
+    }
+
+    /* OPEN OR CLOSED, REMEMBERED. Someone who works at crf 18 opens this once a session and
+     * then wants it open; someone who never touches it never sees it again. Kept in
+     * localStorage under the same xmlcut.* namespace as every other remembered choice.
+     *
+     * ⚠️ THE ABSENCE OF A VALUE MEANS CLOSED, which is the whole point of the fold — so this
+     * only ever opens on the literal string this panel writes. A loader that treated "not
+     * stored" as open would ship the flat strip to everyone upgrading. */
+    var SETOPEN_KEY = "xmlcut.setopen";
+
+    function loadSetOpen() {
+        var v = null;
+        try { v = window.localStorage.getItem(SETOPEN_KEY); } catch (e) {}
+        if (el.setdet) el.setdet.open = (String(v) === "open");
+    }
+
+    function rememberSetOpen() {
+        try {
+            window.localStorage.setItem(SETOPEN_KEY,
+                                        (el.setdet && el.setdet.open) ? "open" : "shut");
+        } catch (e) {}
+    }
 
     function renderSettings() {
         applyScale();
+        renderSetSummary();
         renderFpsNote();
         renderAudioTracks();
+        renderAudioCutTracks();
         renderVideoTracks();
         applyCutFrom();
+        renderDissolveNote();
+        renderRelink();
         renderListLabel();
         renderSizeEstimate();
         rememberSettings();
@@ -5768,7 +6722,7 @@
             missing: "Premiere has no file behind this clip — offline media or a broken "
                    + "link — so there was nothing to cut from.",
             unsupported: "Nothing to cut from a source file: a title, a graphic or an "
-                       + "effect layer. A timeline render includes these.",
+                       + "effect layer. Timeline Render includes these.",
             ramps: "The clip's speed CHANGES across the cut, so its source range is the "
                  + "engine's best reading of the ramp.",
             retimed: "The clip's speed was changed in the timeline, so the cut is longer or "
@@ -6073,7 +7027,9 @@
         var on = el.pickall.checked;
         for (var i = 0; i < state.clips.length; i++) {
             var c = state.clips[i];
-            if (c.group !== 0 || !typeOn(c)) continue;
+            // Same skip as syncPickAll(), so the master tick acts on exactly the rows it
+            // counted — an audio row on an unticked track is governed by that track.
+            if (c.group !== 0 || !typeOn(c) || !trackPicked(c)) continue;
             if (on) delete state.unpicked[clipKey(c)];
             else state.unpicked[clipKey(c)] = true;
         }
@@ -6124,6 +7080,35 @@
         try { window.localStorage.setItem("xmlcut.resume",
                                           state.resume ? "1" : ""); } catch (e) {}
     });
+
+    /* ⚠️ A RESCAN, NOT A REPAINT, and this is the difference between the two ticks above it.
+     * `sound when done` and `skip clips already there` change nothing about which cuts exist
+     * or where their boundaries are. --transitions split MOVES the boundaries — the frame
+     * numbers in the filenames and the lengths in the size estimate both come off them — so
+     * the list on screen has to be the list the engine would produce, or the panel is again
+     * describing one export and running another. */
+    if (el.splitdis) {
+        el.splitdis.addEventListener("change", function () {
+            state.splitTrans = !!el.splitdis.checked;
+            rememberSplitTrans();
+            renderSettings();
+            rescanForSetting("Re-reading…");
+        });
+    }
+
+    /* Media that moved. The folder picker is the host's, the same one the destination row
+     * uses — so the person points at the folder rather than typing a path pair. */
+    if (el.relink) {
+        el.relink.addEventListener("click", function () {
+            if (state.busy || state.running) return;
+            var miss = missingClips();
+            if (!miss.length) return;
+            cs.evalScript("pickFolder(" + jsStr(state.out || "") + ")",
+                function (p) {
+                    if (p && p !== "null" && p !== "undefined") applyRelink(String(p));
+                });
+        });
+    }
 
     el.copyrep.addEventListener("click", function () {
         copyText(reportText(), el.copyrep, "Copy report");
@@ -6460,6 +7445,11 @@
         el.preset.value = "";
         el.delpreset.disabled = true;
         say("preset", "warn", "");
+        /* ⚠️ THE FOLD'S SUMMARY LINE IS THE VALUES, so it has to move with them. Without
+         * this the line said "CRF 1" over a slider sitting at 18 whenever the fold was open,
+         * and said it with the fold shut too — a value line that is stale is worse than a
+         * label, because it is believed. */
+        renderSetSummary();
         renderSizeEstimate();
         if (state.clips.length) renderClips();
     });
@@ -6477,6 +7467,8 @@
         say("preset", "warn", "");
         rememberSettings();
         renderScaleRead();
+        // Same reason as the quality slider: the summary line names the size.
+        renderSetSummary();
         renderSizeEstimate();
         if (state.clips.length) renderClips();
     });
@@ -6569,34 +7561,12 @@
         if (el.preset.value) applyPreset(el.preset.value);
     });
 
-    /* ⚠️ NOT in the setInputs loop above, and not in a preset. A preset is the ENGINE's
-     * file and describes an ENCODE — crf, codec, scale, rate. Where the pixels come from
-     * is a different kind of choice, and putting it in a preset would mean applying a
-     * saved preset could silently switch a run from source to render. */
-    el.cutfrom.addEventListener("change", function () {
-        state.cutFrom = String(el.cutfrom.value || "source");
-        try { window.localStorage.setItem("xmlcut.cutfrom", state.cutFrom); } catch (e) {}
-        applyCutFrom();
-        renderSettings();
-        if (state.clips.length) renderClips();
-        /* ⚠️ RE-READ THE LIST, because the mode changes what is IN it.
-         *
-         * `cuttable` depends on the mode: typesFromClips() switches DEAD_TYPES back on in
-         * render mode, since Premiere resolves a Dynamic Link that ffmpeg cannot open. So after
-         * a switch the list on screen was the OTHER mode's answer — an .aep shown as
-         * uncuttable in the mode that can cut it, and the destination folder had changed under
-         * it too.
-         *
-         * A rescan rather than a stale marker: it costs one --manifest-only run, it is the same
-         * call a re-read makes, and the alternative is a list that is on screen and wrong with
-         * a disabled Export button beside it — which is the state this panel has been reported
-         * for twice. scanClips() keeps the existing rows up while it runs, so nothing blanks. */
-        if (state.clips.length && state.dump && state.script && !state.busy
-            && !state.running) {
-            setBusy(true, "Re-reading…");
-            scanClips();
-        }
-    });
+    /* THE MODE. Two buttons, one state — the whole body of this is in setCutFrom(), beside
+     * applyCutFrom() and paintMode(), because "what does pressing this do" and "what does
+     * that make the panel look like" belong together rather than one of them living down
+     * here in the wiring. */
+    el.modesrc.addEventListener("click", function () { setCutFrom("source"); });
+    el.modeseq.addEventListener("click", function () { setCutFrom("render"); });
 
     el.vtrack.addEventListener("change", function () {
         state.vtrackWant = String(el.vtrack.value || "");
@@ -6637,6 +7607,14 @@
             loadPresets();
         });
     });
+
+    /* The fold over the four defaulted settings. `toggle` rather than `click` on the
+     * summary: <details> flips its own `open` on click, and reading it from a click handler
+     * reads the value from BEFORE the flip — so the remembered state would be inverted, and
+     * inverted consistently enough to look like it worked. */
+    if (el.setdet) {
+        el.setdet.addEventListener("toggle", function () { rememberSetOpen(); });
+    }
 
     el.gear.addEventListener("click", function () {
         var open = el.gearmenu.hidden;
@@ -6707,6 +7685,19 @@
         // rather than of this timeline. The TRACK part of it is re-checked against each
         // timeline in renderAudioTracks(), because A2 on one project is not A2 on the next.
         loadAudioWant();
+        /* The audio tracks that become CLIPS, kept apart from the mixdown choice above
+         * because they are different exports. Same re-validation against the timeline that
+         * gets read: renderAudioCutTracks() draws a tick only for a track that exists. */
+        loadAudioCutWant();
+        loadAudioHearWant();
+        /* WHERE A CROSS-DISSOLVE IS CUT. Loaded before restoreSettings() so the box on
+         * screen and state agree from the first paint — the tick is `checked` in the markup,
+         * and a stored "ignore" has to win over that rather than the other way round. */
+        loadSplitTrans();
+        /* WHETHER THE FOUR DEFAULTED SETTINGS ARE FOLDED OPEN. Loaded before applyCutFrom()
+         * and renderSettings() below, so the first paint is the state he left rather than
+         * closed-then-open. */
+        loadSetOpen();
         /* Remembered across sessions, like the audio choice and for the same reason: it is
          * a property of how he works, not of this one timeline. The track number is kept
          * too but re-validated against whatever gets read — V3 on the last project may not
@@ -6720,10 +7711,19 @@
         } catch (e) { state.vtrackWant = ""; }
         /* Default ON. The overlays being baked in was reported as a bug, so the useful
          * default is the one that does not do it — but the choice is remembered, because
-         * a timeline whose upper track is an adjustment layer wants the opposite. */
+         * a timeline whose upper track is an adjustment layer wants the opposite.
+         *
+         * ⚠️ IT IS NOT LOADED STRAIGHT INTO vIncludeWant ANY MORE, and that one line was the
+         * bug. A remembered "1,3" went in as the answer for whatever timeline opened next,
+         * and renderIncludeTracks() only ever filled in a default when the string was EMPTY —
+         * so a two-track sequence inherited a six-track job's exclusions and rendered without
+         * V2. The per-layout store below is what the ticks are actually read from; this flat
+         * value is the pre-per-layout setting, and it waits for a layout it fits. */
         try {
-            state.vIncludeWant = window.localStorage.getItem("xmlcut.vinclude") || "";
-        } catch (e) { state.vIncludeWant = ""; }
+            state.vIncludeLegacy = window.localStorage.getItem("xmlcut.vinclude") || "";
+        } catch (e) { state.vIncludeLegacy = ""; }
+        state.vIncludeWant = "";
+        state.vIncludeSig = "";
         applyCutFrom();
         restoreSettings();
         renderSettings();

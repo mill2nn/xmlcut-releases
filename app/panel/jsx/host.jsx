@@ -1408,7 +1408,7 @@ function writeRenderProgress(file, done, total, current, failed) {
     } catch (e) {}
 }
 
-function renderCuts(destFolder, spec, mbps, onePass, keepTracks) {
+function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
     var res = { ok: false, renders: [], tried: [], written: 0, failed: 0 };
     var i;
     try {
@@ -1486,6 +1486,18 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks) {
         var before = rangeTicks(seq);
         res.in_out_before = before;
 
+        /* WHAT THE RENDER HEARS. The unticked audio tracks are muted for the duration of the
+         * render and put back at the bottom (and on the video-solo failure path below), the
+         * same way the video ticks decide what it sees. Skipped entirely when the caller sent
+         * nothing — an older panel — so the mix is then Premiere's own. */
+        var asolo = null;
+        if (keepAudio !== undefined && keepAudio !== null) {
+            asolo = soloAudioTrack(seq, keepAudio);
+            for (i = 0; i < asolo.tried.length; i++) res.tried.push("audio: " + asolo.tried[i]);
+            res.audio_muted = asolo.muted;
+            res.audio_kept = asolo.kept;
+        }
+
         /* ⚠️ AFTER every early return above, so no failure path can leave the user's
          * tracks switched off. Everything from here reaches the restore at the bottom. */
         var solo = null;
@@ -1496,6 +1508,7 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks) {
             res.tracks_kept = solo.kept;
             if (!solo.ok) {
                 restoreVideoTracks(seq, solo.before);
+                if (asolo) restoreAudioTracks(seq, asolo.before);
                 res.error = solo.error;
                 return ser(res);
             }
@@ -1593,6 +1606,13 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks) {
 
         /* Tracks first, then the in/out points. Both are the user's timeline and both go
          * back whatever happened in between. */
+        if (asolo) {
+            var backA = restoreAudioTracks(seq, asolo.before);
+            res.audio_restored = backA.restored;
+            for (i = 0; i < backA.tried.length; i++) {
+                res.tried.push("audio restore: " + backA.tried[i]);
+            }
+        }
         if (solo) {
             var back2 = restoreVideoTracks(seq, solo.before);
             res.tracks_restored = back2.restored;
@@ -1927,6 +1947,77 @@ function restoreVideoTracks(seq, before) {
         } catch (e) {
             res.failed++;
             res.tried.push("V" + was.index + ": " + String(e));
+        }
+    }
+    return res;
+}
+
+/* THE SAME THREE FOR AUDIO TRACKS — what the render HEARS. A Match Source preset renders the
+ * sequence's mix, so a track muted here is out of every clip's sound. Two deliberate
+ * differences from the video solo: an EMPTY keep list is honoured, not refused — "hear
+ * nothing" is a silent render, a legitimate ask, where "see nothing" is a black one — and a
+ * track Premiere will not mute is reported and counted, never silently skipped, because the
+ * clip would then carry sound the editor unticked. Verifiable only in Premiere itself:
+ * isMuted() is asked back after every setMute(). */
+function audioTrackStates(seq) {
+    var out = [];
+    var tracks = get(seq, "audioTracks", null);
+    var n = tracks ? Number(get(tracks, "numTracks", 0)) : 0;
+    for (var i = 0; i < n; i++) {
+        var m = call(tracks[i], "isMuted", null);
+        out.push({ index: i + 1, muted: (m === null ? null : !!m) });
+    }
+    return out;
+}
+
+function soloAudioTrack(seq, keepList) {
+    var res = { ok: true, tried: [], before: [], unverified: 0, denied: 0, muted: 0,
+                kept: [] };
+    var tracks = get(seq, "audioTracks", null);
+    var n = tracks ? Number(get(tracks, "numTracks", 0)) : 0;
+    if (!n) return res;                          // nothing to hear, nothing to mute
+    res.before = audioTrackStates(seq);
+    var keep = {}, parts = String(keepList || "").split(",");
+    for (var p = 0; p < parts.length; p++) {
+        var v = parseInt(parts[p], 10);
+        if (v > 0 && !keep[v]) { keep[v] = 1; res.kept.push(v); }
+    }
+    for (var i = 0; i < n; i++) {
+        if (keep[i + 1]) continue;               // ticked: heard
+        try {
+            tracks[i].setMute(1);
+        } catch (e) {
+            res.tried.push("A" + (i + 1) + ": setMute threw: " + String(e));
+            res.unverified++;
+            continue;
+        }
+        var back = call(tracks[i], "isMuted", null);
+        if (back === null) { res.unverified++; continue; }
+        if (!back) {
+            res.tried.push("A" + (i + 1) + ": asked to mute, still reports audible");
+            res.denied++;
+            continue;
+        }
+        res.muted++;
+    }
+    return res;
+}
+
+function restoreAudioTracks(seq, before) {
+    var res = { restored: 0, failed: 0, tried: [] };
+    var tracks = get(seq, "audioTracks", null);
+    var n = tracks ? Number(get(tracks, "numTracks", 0)) : 0;
+    for (var i = 0; i < (before || []).length; i++) {
+        var was = before[i];
+        if (!was || was.muted === null) continue;
+        var idx = Number(was.index) - 1;
+        if (idx < 0 || idx >= n) continue;
+        try {
+            tracks[idx].setMute(was.muted ? 1 : 0);
+            res.restored++;
+        } catch (e) {
+            res.failed++;
+            res.tried.push("A" + was.index + ": " + String(e));
         }
     }
     return res;

@@ -93,7 +93,8 @@ def decoded_count(path: str) -> int:
             ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
              "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", path],
             capture_output=True, text=True, timeout=1800)
-        return int((r.stdout.strip().rstrip(",") or "0"))
+        _l = next((l for l in r.stdout.splitlines() if l.strip()), "0")
+        return int(_l.strip().rstrip(",").split(",")[0] or "0")
     except Exception:
         return -1
 

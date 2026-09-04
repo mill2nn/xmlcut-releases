@@ -136,13 +136,176 @@ body {
 /* THE STRIP. Fields side by side, each showing its label and its current value, wrapping
  * when there is not room rather than scrolling or squeezing. Docked at 320px it becomes a
  * single column of fields, which is what the settings used to be everywhere. */
+/* ⚠️ THE STRIP ITSELF IS NO LONGER A SURFACE, and that is what makes the frames inside it
+ * read as frames. It was `--card` with a `--line` border — one box around everything — and
+ * the groups inside it are `--card` too, so leaving both meant a card on a card: 1.23:1
+ * against 1.23:1, which is 1.00:1, which is not a frame. The ladder is now used the way it
+ * is written: the strip is the GROUND, each group is a CARD on it, and each control inside a
+ * group is a SUNKEN well in that card.
+ *
+ * "nhiều phần cần tích chọn thì chưa có khung rõ ràng nên nhìn hơi rối… nên có cái khung ở
+ * đấy để mọi người biết là chỗ đấy có thể bấm vào chọn option được" — 27 Aug. */
 .strip {
     margin: 0 0 14px;
-    padding: 10px 12px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    display: grid;
+    /* 8px, MEASURED against 10 and 12. Four frames means three gaps plus four sets of
+     * padding, and that chrome is what the fold's 211px has to pay for: at 10px the strip
+     * came out 558px at a 320px dock against 615px flat, and every px of frame here is a px
+     * the clip list starts further down. */
+    gap: 8px;
+}
+
+/* A GROUP: one frame, one caption, the controls that answer one question.
+ *
+ * FOUR of them, in the order the work happens — Cut from · Save to · Tracks · Render
+ * settings — where there used to be one flat grid of nine fields with nothing between them.
+ * The caption is what the reviewer asked for by name: something that says this box is a
+ * place where you choose. */
+.group {
+    padding: 8px 10px 10px;
     background: var(--card);
     border: 1px solid var(--line);
     border-radius: 5px;
 }
+.group[hidden] { display: none; }
+
+/* The caption. Same treatment as a field's own label — 10px, tracked, uppercase, --dim — so
+ * it reads as the frame's NAME and not as another value competing with the ones inside it. */
+.gcap {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    margin-bottom: 6px;
+    font-size: 10px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--dim);
+}
+/* Same rule as the fields' question marks: present, hoverable, not part of the scan. */
+.gcap .q { opacity: .3; transition: opacity .12s, color .12s; }
+.gcap:hover .q, .gcap .q:focus { opacity: 1; color: var(--accent); }
+
+/* ═════════════════════════════════════════════════ THE MODE, AS TWO BUTTONS
+ *
+ * "nên để 2 nút Source và Timeline nổi bật nhất" — 28 Aug. Side by side at EVERY width,
+ * including a 320px dock: stacking them would make the second one look like a consequence
+ * of the first rather than the alternative to it.
+ *
+ * MEASURED at a real 320px viewport (tests/check_layout.js): 270px of group content, 8px
+ * gap, so 131px a button — and "Timeline Render" at 12px/600 inks 96px, which is why the
+ * name is nowrap and the padding is 7px rather than the 9px a primary button uses. */
+.modepair {
+    display: flex;
+    gap: 8px;
+}
+.modebtn {
+    flex: 1 1 0;
+    min-width: 0;
+    display: block;
+    padding: 6px 8px;
+    text-align: left;
+    /* SUNKEN, not raised, while unselected: two raised buttons side by side both read as
+     * "the live one" and there would be nothing to say which is chosen. The selected one
+     * lifts instead — mark the state by ADDING. */
+    background: #14171d;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+}
+.modebtn:hover:not(:disabled) { background: #1d222c; border-color: #39424f; }
+.modename {
+    display: block;
+    font-size: var(--fs-base);
+    font-weight: 600;
+    color: var(--dim);
+    white-space: nowrap;
+}
+/* What it PRODUCES, in three words. Not a sentence, and not a justification of the control —
+ * "camera originals" and "effects included" are the difference between the two, which is the
+ * only thing the sub-line has to carry. */
+.modenote {
+    display: block;
+    margin-top: 1px;
+    font-size: var(--fs-small);
+    color: var(--off);
+}
+/* THE SELECTED ONE, and it is unmistakable: accent border, accent name, and the same --glow
+ * every other lit thing in this panel uses. No new colour and no new token. */
+.modebtn.on {
+    background: #1d222c;
+    border-color: var(--accent);
+    box-shadow: var(--glow) rgba(0, 180, 255, .30);
+}
+.modebtn.on .modename { color: var(--accent); }
+.modebtn.on .modenote { color: var(--dim); }
+
+/* ═════════════════════════════════════════════════ SAVE TO, LIT WHEN IT IS EMPTY
+ *
+ * The only control in this panel with no correct default. Empty, the frame and its button
+ * are the one lit thing on screen; set, both go quiet. See paintDest() in main.js for the
+ * measurement that put it second instead of eleventh. */
+.group.lit {
+    border-color: var(--accent);
+    box-shadow: var(--glow) rgba(0, 180, 255, .20);
+}
+.group.lit .gcap { color: var(--accent); }
+/* The primary treatment, on a button that has to stay inside a flex row — so it takes the
+ * fill and the glow of `button.primary` without its `width: 100%` and `margin-top`. */
+.mini.want {
+    background: var(--accent);
+    border-color: transparent;
+    color: #07121a;
+    font-weight: 700;
+    box-shadow: var(--glow) rgba(0, 180, 255, .38);
+}
+.mini.want:hover:not(:disabled) {
+    background: var(--accent);
+    filter: brightness(1.1);
+}
+
+/* ═════════════════════════════════════════ THE FOUR DEFAULTED SETTINGS, FOLDED
+ *
+ * The summary line is the VALUES, not a label — see renderSetSummary(). That is the
+ * difference from the collapsible box that was rejected in 3.24, which said "Export
+ * settings" and made you open it to find out what an export would do. */
+.setdet > summary {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    /* The native marker is a wide grey triangle that sits at a different baseline in every
+     * engine; ::-webkit-details-marker is the one CEP 11 (Chromium 88) draws. */
+    list-style: none;
+    cursor: pointer;
+}
+.setdet > summary::-webkit-details-marker { display: none; }
+.setdet > summary::before {
+    content: "\25B8";
+    color: var(--dim);
+    font-size: 10px;
+    line-height: 1.5;
+}
+.setdet[open] > summary::before { content: "\25BE"; }
+.setsumval {
+    min-width: 0;
+    font-size: var(--fs-base);
+    font-weight: 600;
+    color: var(--fg);
+    /* One line. The three figures are short; a preset with a long name elides rather than
+     * making this row two lines tall. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.setdet > summary:hover .setsumval { color: var(--accent); }
+/* The rule that separates the fold's fields from the line they summarise is further down,
+ * beside the strip's other overrides for that class — ⚠️ deliberately, and not for
+ * tidiness: check_panel.js pulls that class's declaration block out of this stylesheet with
+ * a first-match regex, so a descendant selector ending in the same class ABOVE the real
+ * rule is what it finds instead, and it reported the strip as having no track grid at all.
+ * Do not name the class followed by a brace anywhere in a comment above that rule either —
+ * the regex cannot tell a comment from a selector, which is how this was found twice. */
 /* A GRID of equal tracks, not a flex row.
  *
  * Flex wrapping sized each field to its own content, so the fields on the second row did not
@@ -181,8 +344,52 @@ body {
  * layout, and it is here rather than around the grid itself because the grid needs none. */
 @media (min-width: 420px) {
     .f-qual, .f-dest { grid-column: span 2; }
-    /* Audio names a track and a count — "A2 only · 3 items" — which needs more than a track. */
-    .f-audio { grid-column: span 2; }
+    /* ⚠️ .f-audio's span 2 IS GONE, and removing it made the audio select WIDER, not
+     * narrower. It was written when every field shared one grid across the whole panel, so a
+     * track was ~148px and "A2 only · 3 items" needed two of them. The audio field now lives
+     * inside the Tracks frame, which is a half or a third of the panel — 296px of content at
+     * 1000px — where one auto-fit track fits and two do not. The span forced the count up
+     * anyway (the documented trap), so the frame resolved to two 138px tracks and every
+     * select in it was 138px. Without it: one track, 296px, and the fields stack full width.
+     * MEASURED at 1000px: narrowest select 138px -> 296px. */
+}
+
+/* ══════════════════════════ TWO COLUMNS OF FRAMES ONCE THERE IS ROOM FOR TWO
+ *
+ * ⚠️ THIS IS THE SECOND BREAKPOINT IN THE LAYOUT, and it is here because the frames cost
+ * height that the flat strip did not. MEASURED on the real files, post-Read, in headless
+ * Chrome:
+ *
+ *   at a real 320px dock   flat 615px  ·  framed, one column 529px      (the fold pays)
+ *   at 620px               flat 394px  ·  framed, one column 440px      (the frames cost)
+ *   at 620px                           ·  framed, two columns 384px
+ *
+ * So one column is right at a dock and wrong at the width he undocks to, where four stacked
+ * frames re-introduce exactly the scrolling the fold was removing. Two columns from 560px up
+ * puts Tracks beside Render settings and leaves the whole panel shorter than the flat strip
+ * was at every width measured.
+ *
+ * The mode and the destination SPAN BOTH: the two mode buttons are the panel's headline and
+ * halving them would make them ordinary, and a path is the one value here with no natural
+ * width. */
+@media (min-width: 560px) {
+    .strip { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
+    .g-mode, .g-dest { grid-column: 1 / -1; }
+}
+/* And THREE from 900px up, where the destination stops spanning and joins the other two on
+ * one row — mode across the top, then Save to · Tracks · Render settings.
+ *
+ * MEASURED, post-Read, same harness:  at 1000px  flat 259px · two columns 360px · three 284px
+ *                                     at 1600px  flat 259px · two columns 335px · three 284px
+ *
+ * ⚠️ THE DESTINATION FIELD STILL SPANS TWO TRACKS INSIDE ITS OWN GROUP, and at a third of a
+ * 1000px panel only ONE ~148px track fits — so the span forces the repetition count to two
+ * and the field resolves to the group's full 296px. That is the documented `span 2` trap
+ * being useful for once rather than harmful: no overflow, and the path row gets the same
+ * width it has at a 320px dock. */
+@media (min-width: 900px) {
+    .strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .g-dest { grid-column: auto; }
 }
 
 /* The field's own label line: name, its tooltip, and the readout that used to sit in a row
@@ -207,6 +414,17 @@ body {
  * width. `.sel` is margin-left:auto elsewhere in the panel, which would push it off the end
  * of a field. */
 .field .sel, .field select { margin: 0; max-width: none; width: 100%; }
+/* ⚠️ A PATH BOX DOES NOT GET BETTER PAST A READABLE MEASURE, and the destination now has a
+ * frame of its own to fill. Alone in its group the field takes the whole frame: measured at
+ * 700px, 643px of path row for a path that elides in the middle at any width. 460px is where
+ * a 40-character elided path stops gaining anything. It does not bite at a 320px dock, where
+ * the field is 274px.
+ *
+ * ⚠️ max-width WORKS HERE and did not on the clip table's name column — a grid item is sized
+ * by max-width, a column under `table-layout: fixed` is not. That distinction cost a whole
+ * debugging session once; both halves of it are now written down. */
+.g-dest .f-dest { max-width: 460px; }
+
 /* ⚠️ min-width: 0 IS LOAD-BEARING HERE. A grid item's automatic minimum is min-content, and
  * the path row's min-content includes the path box — so the row sized itself to the path and
  * overflowed its own field, pushing the Change button off the right edge of the panel.
@@ -1339,26 +1557,36 @@ code, .log {
 .strip .flbl .q { opacity: .3; transition: opacity .12s, color .12s; }
 .strip .flbl:hover .q, .strip .flbl .q:focus { opacity: 1; color: var(--accent); }
 
-/* A control that reads as text. The bottom border is transparent rather than absent so
-   nothing moves by a pixel when it appears. */
+/* ⚠️ A SELECT IS A BOX AGAIN, and this is the other half of the reviewer's complaint.
+ *
+ * These were chromeless — `background: transparent; border: 0`, with a hairline appearing
+ * under them only on hover — on the reasoning that a control reading as text is calmer. It
+ * is calmer and it is unusable to someone who has not been shown: "chỗ chọn Timeline render
+ * và Source Media thì nên có cái khung ở đấy để mọi người biết là chỗ đấy có thể bấm vào
+ * chọn option được" — 27 Aug. He named two of them; every select in the strip had the same
+ * problem, and the two he named are now buttons for the same reason.
+ *
+ * SUNKEN inside a card, which is the ladder's own rung for a well in a surface (#14171d,
+ * 1.09:1 on the ground, against the group's 1.23:1). Not `raised`: a raised control inside
+ * a raised frame reads as a button, and these are values you change, not actions.
+ *
+ * ⚠️ THE `option` RULE BELOW IS LOAD-BEARING and must stay: a select with a non-default
+ * background leaves the native popup with no ground of its own, and the options render
+ * nearly invisible. That shipped once. */
 .strip .field .sel {
-    background: transparent;
-    border: 0;
-    border-bottom: 1px solid transparent;
-    border-radius: 0;
+    background: #14171d;
+    border: 1px solid var(--line);
+    border-radius: 4px;
     color: var(--fg);
     font-size: 12px;
     font-weight: 600;
-    padding: 2px 0;
+    padding: 4px 6px;
 }
-.strip .field .sel:hover { border-bottom-color: var(--line); }
-.strip .field .sel:focus { border-bottom-color: var(--accent); outline: none; }
+.strip .field .sel:hover { border-color: #39424f; }
+.strip .field .sel:focus { border-color: var(--accent); outline: none; }
 
-/* THE MODE. Not a box and not a tint — one hairline under it says everything below is
-   downstream of it. Its own value is the only thing in the strip at accent colour. */
-.strip .f-mode { grid-column: 1 / -1; }
-.strip .f-mode .sel { color: var(--accent); font-size: 13px; }
-.strip .f-mode .sel:hover { border-bottom-color: var(--accent); }
+/* .strip .f-mode is gone with the <select> it styled — the mode is two buttons now, and
+   .modepair above is what draws them. */
 
 /* Every tick in one row, under a rule. */
 .strip .opts {
@@ -1429,9 +1657,28 @@ tbody tr.grouphead.g-dead td { background: #2a1218; }
 
 /* Spacing. 1px between a 9px label and its value read as one clenched block, and a 16px
    column gap let a full-width select butt into the next field's buttons. */
-.strip .fields { gap: 17px 20px; }
+/* 13px between stacked fields, not 17. Inside a captioned frame the caption already says
+ * where the group begins, so the row gap only has to separate one field from the next —
+ * it was doing the job of a group boundary as well, in a strip that had none. */
+.strip .fields { gap: 13px 20px; }
+/* ⚠️ AN AUTHOR `display` RULE BEATS THE BROWSER'S CLOSED-DETAILS RULE, and this file already
+ * carries the same warning for [hidden] a few hundred lines up. A closed <details> hides its
+ * non-summary children with a UA `display: none`, and author declarations win over UA
+ * declarations whatever their specificity — so the grid declaration on this class kept the
+ * folded fields on screen with the fold shut. MEASURED: the strip was 404px tall at a 320px
+ * dock with every one of the four folded fields still drawn in it, and no test in the suite
+ * could see it, because the shim computes no styles and the geometry check was reading the
+ * fields it expected to find. Anything that sets `display` must restate the hidden case. */
+.setdet:not([open]) > .fields { display: none; }
+/* The fold's fields appear UNDER the line they summarise, with a hairline between, so
+ * opening it reads as the line expanding rather than as a new region arriving. */
+.setdet[open] > .fields {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+}
 .strip .field { gap: 4px; }
-.strip .opts { gap: 8px 18px; margin-top: 16px; padding-top: 12px; }
+.strip .opts { gap: 8px 18px; margin-top: 12px; padding-top: 10px; }
 
 th.sts, td.sts { width: 76px; }
 @media (min-width: 420px) {
@@ -1471,6 +1718,18 @@ td.clipname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
    grading meant for the shot. The master is ticked and locked — a render without the track
    the cuts come from is a folder of black files. */
 .vinclude { display: flex; flex-wrap: wrap; gap: 4px 12px; padding-top: 2px; }
+
+/* Audio tracks: one row per track under a caption row, one or two tick columns — two in
+ * Timeline Render (hear / file), one in Source Render (file). A grid, so at a 320px dock the
+ * ticks sit under their captions instead of wrapping into a flex soup. `display: contents`
+ * on the row lets the grid place the cells directly (Chromium 88 supports it). */
+.atgrid { display: grid; gap: 3px 10px; align-items: center; padding-top: 2px; }
+.atgrid.two { grid-template-columns: minmax(0, 1fr) auto auto; }
+.atgrid.one { grid-template-columns: minmax(0, 1fr) auto; }
+.atrow { display: contents; }
+.atcap { font-size: var(--fs-small); color: var(--dim); text-align: center; letter-spacing: .04em; }
+.atname { font-size: var(--fs-small); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.attick { margin: 0; justify-self: center; }
 .vintick {
     display: flex; align-items: center; gap: 5px;
     font-size: var(--fs-small); color: var(--dim);
@@ -1525,3 +1784,89 @@ body { position: relative; }
     cursor: pointer;
 }
 .msgx:hover { color: var(--fg); background: var(--card); }
+
+/* =====================================================================================
+ * HIERARCHY PASS — 4 Sep 2026. Measured on the docked panel after Read, at 320px:
+ *   · THREE caption styles on one screen — .stephead (bold caps), .gcap (10px small caps),
+ *     .lbl (11px sentence) — plus the in-group field labels (.strip .flbl) drawn in the SAME
+ *     10px small caps as the group captions above them. CUT FROM, MASTER TRACK, IN THE
+ *     PICTURE, AUDIO TRACKS, FRAME RATE all shouted at one weight, so nothing read as inside
+ *     anything. The editors' words for it were "rối" and "ugly".
+ *   · FOURTEEN bordered "?" circles visible at once. Every one is a tooltip worth keeping;
+ *     none of them is worth a ring.
+ *   · The size estimate's "?" sat alone above the export bar before a read, because the
+ *     estimate it belongs to is hidden and the bubble was not.
+ * Two levels below the step title, and only two: GROUP CAPTION (small caps, dim) over
+ * FIELD LABEL (sentence case, dim). Appended as one block so it can be lifted out whole.
+ * ===================================================================================== */
+
+/* level 0 — the steps. Bolder than anything under them, and ruled off. */
+.stephead {
+    margin: 12px 0 8px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+    letter-spacing: .06em;
+}
+#step1 .stephead { margin-top: 4px; }
+
+/* level 1 — group captions. .lbl joins .gcap instead of being a third style. */
+.lbl, .gcap {
+    font-size: 10px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--dim);
+    font-weight: 600;
+}
+.lbl { margin: 10px 0 5px; }
+
+/* level 2 — field labels INSIDE a group: sentence case, so the caption above them is the
+ * only thing in small caps. This is the rule that was making the whole strip one flat shout. */
+.strip .flbl, .group .flbl {
+    font-size: 10.5px;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--dim);
+    font-weight: 500;
+}
+
+/* frames people can see — the ask, verbatim: "nên có cái khung ở đấy". --off is the ladder's
+ * 2.49:1 step; --line at 1.54:1 was a hairline you had to look for. */
+.group, .card {
+    border-color: var(--off);
+    border-radius: 6px;
+    padding: 8px 12px 9px;      /* vertical padding as before: the frame is the change, not the height */
+}
+
+/* the two jobs, biggest thing on the panel after Read */
+.modebtn { padding: 6px 10px 6px; border-radius: 6px; }
+.modename { font-size: 12.5px; letter-spacing: .01em; }
+.modenote { font-size: 10px; }
+.modebtn.on { background: rgba(0, 180, 255, .08); }
+
+/* the help marks: a glyph, not a badge */
+.q {
+    width: auto;
+    height: auto;
+    border: 0;
+    border-radius: 0;
+    padding: 0 1px;
+    font-size: 10px;
+    opacity: .55;
+    color: var(--dim);
+}
+.q:hover { opacity: 1; }
+.flbl .q { font-size: 9px; opacity: .45; }
+
+/* a "?" with nothing to explain yet is hidden with the fact it explains */
+.abfacts .abfact[hidden] + .q { display: none; }
+
+/* a .lbl INSIDE a group is a field label, not a caption — "Flag large clips" sits under
+ * RENDER SETTINGS and must not compete with it. Same level-2 treatment as .flbl. */
+.group .lbl {
+    margin: 8px 0 4px;
+    font-size: 11px;
+    letter-spacing: 0;
+    text-transform: none;
+    font-weight: 500;
+}

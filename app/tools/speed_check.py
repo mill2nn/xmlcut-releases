@@ -35,7 +35,8 @@ def real_frames(path: str) -> int:
     r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
                         "-count_frames", "-show_entries", "stream=nb_read_frames",
                         "-of", "csv=p=0", path], capture_output=True, text=True)
-    return int(r.stdout.strip() or 0)
+    _l = next((l for l in r.stdout.splitlines() if l.strip()), "")
+    return int(_l.split(",")[0] or 0)
 
 
 def main() -> int:

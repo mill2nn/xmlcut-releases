@@ -1,6 +1,6 @@
 {
-  "version": "3.66",
-  "notes": "Release 3.65 \u2014 every export leaves a report/ folder you can zip and send",
+  "version": "3.70",
+  "notes": "3.70 \u2014 Audio tracks hai c\u1ed9t (hear / file), clip Timeline Render c\u00f3 ti\u1ebfng, c\u1eaft \u0111\u00fang frame v\u1edbi file 23/29/59 fps, nest trong nest, UI ph\u00e2n c\u1ea5p l\u1ea1i nh\u00e3n",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
