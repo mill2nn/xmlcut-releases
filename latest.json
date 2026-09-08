@@ -1,6 +1,6 @@
 {
-  "version": "3.72",
-  "notes": "Title/graphic/adjustment layer kh\u00f4ng c\u00f2n b\u1ecb \u0111\u1ebfm l\u00e0 l\u1ed7i \u2014 panel b\u00e1o l\u00e0 c\u1ea7n Timeline Render. L\u1eddi nh\u1eafc r\u00f5 h\u01a1n gi\u1eefa vi\u1ec7c b\u00ecnh th\u01b0\u1eddng v\u00e0 l\u1ed7i th\u1eadt.",
+  "version": "3.73",
+  "notes": "Clip k\u00e9o qu\u00e1 \u0111u\u00f4i media l\u1ec7ch 1-2 frame nay t\u1ef1 c\u1eaft g\u1ecdn thay v\u00ec b\u00e1o l\u1ed7i; l\u1ed7i n\u00f3i r\u00f5 clip d\u00e0i h\u01a1n media bao nhi\u00eau v\u00e0 ph\u1ea3i s\u1eeda g\u00ec; MP3 t\u1ed5ng timeline kh\u00f4ng c\u00f2n h\u1ecfng v\u00ec graphic Dynamic Link tr\u00ean track audio.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

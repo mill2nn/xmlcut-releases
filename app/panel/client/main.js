@@ -831,7 +831,15 @@
             "Lời nhắc rõ hơn: cái nào là bình thường, cái nào là lỗi thật."
     ].concat(CL_371);
 
+    var CL_373 = [
+            "Clip kéo quá đuôi media: lệch 1-2 frame nay tự cắt gọn, không còn báo lỗi.",
+            "Lỗi báo rõ nguyên nhân: clip dài hơn media bao nhiêu, và phải sửa gì.",
+            "MP3 tổng timeline không còn hỏng khi có graphic Dynamic Link trên track audio.",
+            "Cảnh báo VFR nói đúng thứ đo được: header của file tự mâu thuẫn."
+    ].concat(CL_372);
+
     var CHANGELOG = {
+        "3.73": CL_373,
         "3.72": CL_372,
         "3.71": CL_371,
         "3.70": CL_370,

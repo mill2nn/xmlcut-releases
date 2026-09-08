@@ -40,7 +40,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.72"
+VERSION = "3.73"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -1594,6 +1594,16 @@ class Cut:
     # Frames dropped by --whole-frames, and from which end. 0 when the range already landed on
     # frame boundaries, which is most cuts on most timelines.
     frames_trimmed: int = 0
+
+    # ⚠️ HOW FAR THIS CUT REACHES PAST THE END OF ITS OWN MEDIA, in seconds, and how much of
+    # that was given back. Premiere and the file disagree about how long the file is, and the
+    # editor is not the one who got it wrong: MEASURED on a real phone clip, Premiere declares
+    # 1913 frames where 1912 exist, so a clip dragged to the end of the footage — the ordinary
+    # thing to do — asks for one frame that was never recorded. An mp3 in the same timeline was
+    # declared 6.56 s and holds 4.36 s. Both then failed the delivered-count check with "the
+    # source is shorter than the cut, or unreadable", which named neither the cause nor the fix.
+    overhang_seconds: float = 0.0
+    overhang_trimmed: bool = False
 
     # source media
     source_path: str = ""
@@ -3684,6 +3694,38 @@ def apply_probe(cut: Cut, cache: dict, timeout: float = PROBE_READ_TIMEOUT) -> N
     br = data.get("format", {}).get("bit_rate")
     cut.bitrate = int(br) if br else None
 
+    # ⚠️ DOES THIS CUT REACH PAST THE END OF THE FILE? Asked here because this is the first
+    # point that knows both numbers: what the timeline asked for, and how long the media
+    # really is. Trimmed BEFORE consumed_frames below, so the pinned count, the manifest and
+    # the filename all describe the same range — the alternative is failing at the encoder
+    # with a count nobody can trace back to a cause.
+    #
+    # TWO FRAMES, and the number is derived rather than picked. Premiere rounds a file's
+    # length UP to a whole frame (measured: 1913 declared against 1912 real), which is one;
+    # the cut boundary can then land a frame either side of that, which is the second. More
+    # than two frames is not arithmetic, it is material the file does not contain, and that
+    # still fails — a voice-over declared 6.56 s that holds 4.36 s must not be quietly
+    # delivered 2.2 s short. Measured across 242 real delivered clips: 3 overhang at all, at
+    # 1.00, 1.61 and 5.94 frames, and this line passes the first two and refuses the third.
+    if cut.media_kind != "still" and not cut.render_path:
+        _media = 0.0
+        try:
+            _media = float((data.get("format") or {}).get("duration") or 0.0)
+        except (TypeError, ValueError):
+            _media = 0.0
+        if _media > 0:
+            _over = (cut.source_in_seconds + cut.source_duration_seconds) - _media
+            if _over > 1e-6:
+                cut.overhang_seconds = _over
+                _fps = cut.source_fps or 0.0
+                _cap = (OVERHANG_TRIM_FRAMES / _fps) if _fps > 0 else 0.0
+                # The epsilon is not decoration: an overhang of exactly two frames
+                # arrives as 0.06666666666666687 against a cap of 0.06666666666666667 and
+                # was refused for a rounding error a micro-second wide.
+                if _fps > 0 and _over <= _cap + 1e-6:
+                    cut.source_duration_seconds = max(0.0, _media - cut.source_in_seconds)
+                    cut.overhang_trimmed = True
+
     # ffprobe is more authoritative about the native rate than the XML's <file><rate>,
     # so recompute the consumed-frame count against it. This keeps the manifest column
     # identical to the -frames:v value build_command pins, by construction.
@@ -4927,6 +4969,29 @@ RENDER_EXTS = (".mp4", ".mov", ".m4v", ".mxf", ".mkv")
 RENDER_FRAME_SLACK = 2
 
 
+# How far a cut may reach past the end of its own media before the run refuses it, in frames
+# of the SOURCE's own rate. See apply_probe for why two: one for Premiere rounding a file's
+# length up to a whole frame, one for the cut boundary landing either side of that.
+OVERHANG_TRIM_FRAMES = 2
+
+
+def _overhang_note(cut) -> str:
+    """Why this cut came up short, when the reason is that the media ran out.
+
+    Returns "" when the cut does not reach past its media, so the caller keeps its old
+    wording — a shortfall in the MIDDLE of a readable range is a different problem and must
+    not be explained away as an overhang.
+    """
+    over = float(getattr(cut, "overhang_seconds", 0.0) or 0.0)
+    if over <= 0:
+        return ""
+    fps = getattr(cut, "source_fps", 0.0) or 0.0
+    frames = f", {over * fps:.1f} frame(s)" if fps > 0 else ""
+    return (f"this clip runs {over:.3f}s{frames} past the end of its media. Premiere "
+            f"believes the file is longer than it is; trim the clip to the end of the "
+            f"footage, or replace the media")
+
+
 # Which warnings are advice rather than alarm. Matched on the phrase the advisory itself
 # carries, not on a second field, because `warnings` is one list that the manifest, the
 # panel rail and the console all read — a second class of record would have to be kept in
@@ -4935,6 +5000,7 @@ ADVISORY_WARNING_MARKS = (
     "switch to Timeline Render",     # titles, graphics, adjustment layers: normal, not broken
     "were merged into it",           # Premiere's extra channel lanes of a clip already listed
     "nested sequence(s) skipped",    # --nest one-cut, which is a choice the caller made
+    "reach the last frame of their media",   # Premiere counting a file longer than it is
 )
 
 
@@ -5962,16 +6028,22 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
             want_s = audio_target_seconds(cut, args, seq_fps)
             got_s = progress_seconds(r.stdout)
             timed = want_s is not None and got_s is not None
+            # ⚠️ NAME THE CAUSE WHEN IT IS KNOWN. "the source is shorter than the cut, or
+            # unreadable" covers two unrelated things and pointed at neither: an editor who
+            # dragged nothing anywhere spent an evening looking at their footage because the
+            # real answer — Premiere thinks this file is longer than it is — was not in the
+            # sentence. apply_probe measured the overhang; say it, and say the fix.
+            _over = _overhang_note(cut)
             if counted and got != want:
                 cut.status = "failed"
                 cut.error = (f"ffmpeg exited 0 but wrote {got} frame(s) where {want} "
-                             f"were asked for ({got - want:+d}) — the source is shorter "
-                             f"than the cut, or unreadable")
+                             f"were asked for ({got - want:+d}) — "
+                             + (_over or "the source is shorter than the cut, or unreadable"))
             elif timed and got_s < want_s - AUDIO_SHORT_TOLERANCE:
                 cut.status = "failed"
                 cut.error = (f"ffmpeg exited 0 but wrote {got_s:.3f}s of audio where "
-                             f"{want_s:.3f}s were asked for ({got_s - want_s:+.3f}s) — the "
-                             f"source is shorter than the cut, or unreadable")
+                             f"{want_s:.3f}s were asked for ({got_s - want_s:+.3f}s) — "
+                             + (_over or "the source is shorter than the cut, or unreadable"))
             elif not counted and err:
                 cut.status = "failed"
                 cut.error = ("ffmpeg exited 0 but reported: "
@@ -7235,7 +7307,14 @@ def main():
     # of the voice-over mix, and "should audio clipitems become files of their own" is a different
     # question from "what was playing over this shot". Taken before the filter, because after it
     # they are gone.
-    tl.audio_items = [c for c in tl.cuts if c.track_type == "audio"]
+    # ⚠️ ONLY AUDIO FFMPEG CAN ACTUALLY OPEN. A Dynamic Link graphic with an audio lane is an
+    # audio cut like any other here, and the per-clip path skips it correctly — but the mix
+    # fed it to ffmpeg as an input and lost the WHOLE mp3 to "Invalid data found when
+    # processing input". Measured on a real export: one .aegraphic on A3 and no timeline
+    # audio at all, twice in one session, while thirteen clips wrote fine. One unreadable
+    # input must not cost the other twelve.
+    tl.audio_items = [c for c in tl.cuts
+                      if c.track_type == "audio" and c.media_kind != "unsupported"]
 
     # ⚠️ PREMIERE'S EXPLODED AUDIO CHANNELS, COLLAPSED OUT OF THE OUTPUT LIST.
     #
@@ -7725,6 +7804,19 @@ def main():
         if n_trim:
             print(f"\n  pulled {n_trim} cut(s) in to whole source frames "
                   f"({sum(c.frames_trimmed for c in tl.cuts)} frame(s) dropped in total)")
+    # ⚠️ A CUT PULLED BACK TO THE END OF ITS MEDIA IS ANNOUNCED, not quietly shortened. It is
+    # a frame or two and it is not the editor's doing — Premiere counts a file's length in
+    # whole frames and can count one more than the file holds — but a delivered clip that is
+    # shorter than its timeline slot has to be traceable to a sentence somebody read.
+    _hang = [c for c in tl.cuts if getattr(c, "overhang_trimmed", False)]
+    if _hang:
+        _names = sorted({c.clip_name or Path(c.source_path).name for c in _hang})
+        tl.warnings.append(
+            f"{len(_hang)} clip(s) reach the last frame of their media and were pulled back "
+            f"to it — Premiere counts the file as longer than it is, so these are up to "
+            f"{OVERHANG_TRIM_FRAMES} frame(s) shorter than their timeline slot: "
+            + ", ".join(_names[:4]) + (", …" if len(_names) > 4 else ""))
+
     assign_output_names(tl.cuts, args.container, tl.sequence_fps, cut_from_of(args))
 
     # Only a panel dump carries Premiere's interpreted rate, and only after probing can
@@ -7763,15 +7855,24 @@ def main():
            and abs(c.source_fps - c.source_avg_fps) / c.source_fps > 0.002]
     if vfr:
         _vfr_names = sorted({c.clip_name or Path(c.source_path).name for c in vfr})
-        print(f"\n  !! {len(vfr)} cut(s) come from VARIABLE frame rate media — their "
-              f"frames are not evenly spaced:")
+        # ⚠️ SAY WHAT WAS MEASURED, WHICH IS THE CONTAINER'S OWN TWO NUMBERS DISAGREEING —
+        # not "the frames are not evenly spaced", which this check never looked at and which
+        # was false on the file that produced the report. Measured on that phone clip: 1,906
+        # of its 1,911 frame gaps are identical and the largest is 0.0183 s, so its frames
+        # ARE evenly spaced; what differs is the header, which declares a nominal rate and an
+        # average that cannot both be true of 1,912 frames. Asserting unevenness sent the
+        # reporting editor to inspect footage that was fine, while the real cause — a clip
+        # reaching past the end of its media — went unnamed for an evening.
+        print(f"\n  !! {len(vfr)} cut(s) come from media whose own header disagrees about "
+              f"its frame rate:")
         for c in vfr[:8]:
-            print(f"     {c.clip_name}: {c.source_fps:g} fps nominal, "
-                  f"{c.source_avg_fps:g} average")
+            print(f"     {c.clip_name}: {c.source_fps:g} fps declared, "
+                  f"{c.source_avg_fps:g} average over the file")
         print("     Ranges are right; the delivered length may not fill the timeline slot.")
         tl.warnings.append(
-            f"{len(vfr)} cut(s) come from variable frame rate media, so the delivered "
-            f"length may not match the timeline slot: " + ", ".join(_vfr_names[:4])
+            f"{len(vfr)} cut(s) come from media whose header disagrees with itself about "
+            f"the frame rate, so the delivered length may not match the timeline slot: "
+            + ", ".join(_vfr_names[:4])
             + (", …" if len(_vfr_names) > 4 else ""))
 
     # An .aep isn't "missing" — it's a Dynamic Link comp that was never a file ffmpeg
