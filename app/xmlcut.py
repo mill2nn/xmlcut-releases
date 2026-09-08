@@ -40,7 +40,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.71"
+VERSION = "3.72"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -2131,8 +2131,17 @@ class Timeline:
         for why, e in sorted(self.skipped.items()):
             names = ", ".join(e["names"])
             more = "" if e["count"] <= len(e["names"]) else ", …"
+            # ⚠️ "WERE NOT CUT" IS AN ACCUSATION, and for one of these reasons it is the
+            # wrong one. Most skips are things going wrong — a -1 transition boundary, a
+            # clip with no usable length — and that phrasing is right for them. A title is
+            # not one of those: it appears on every timeline that has titles, and this
+            # sentence is what the panel puts on the rail, so the commonest normal export
+            # in this shop opened by announcing 31 clipitems that "were not cut". The
+            # advisory reasons state what the clips ARE, so the count introduces them
+            # rather than indicting them.
             self.warnings.append(
-                f"{e['count']} clipitem(s) were not cut — {why}"
+                (f"{e['count']} clip(s): {why}" if is_advisory_warning(why)
+                 else f"{e['count']} clipitem(s) were not cut — {why}")
                 + (f": {names}{more}" if names else ""))
 
         # ⚠️ SAID OUT LOUD, both of them. A cut count that quietly shrinks because the
@@ -2896,11 +2905,21 @@ class Timeline:
             if not finfo.get("path"):
                 # Also the shape of the bug fixed in 3.10, where files defined under
                 # another sequence were never registered. Counted either way.
-                no_media = "no media file (an adjustment layer, a graphic or a title)"
+                #
+                # ⚠️ WORDED AS WHAT THEY ARE, not as what went wrong. This text is what the
+                # panel shows on the rail, and "no media file … listed as needing a render"
+                # read as 31 broken clips on a real timeline whose 31 titles were perfectly
+                # normal. Nothing is wrong with a title; it simply cannot be cut from a
+                # source file, because there is no source file — Premiere draws it. Naming
+                # the mode that DOES produce them turns the sentence from a complaint into
+                # the instruction the reader needs.
+                no_media = ("they are titles, graphics or adjustment layers, which Premiere "
+                            "draws itself — there is no media file to cut from, so switch "
+                            "to Timeline Render to get them")
         if no_media:
             # Counted in nests_one_cut and reported by its own advisory instead.
             if nest_node is None:
-                self._skip(no_media + " — listed as needing a render", txt(clip, "name"))
+                self._skip(no_media, txt(clip, "name"))
             finfo = {"path": "", "fps": 0.0}
 
         start = num(clip, "start", 0) or 0
@@ -4908,6 +4927,22 @@ RENDER_EXTS = (".mp4", ".mov", ".m4v", ".mxf", ".mkv")
 RENDER_FRAME_SLACK = 2
 
 
+# Which warnings are advice rather than alarm. Matched on the phrase the advisory itself
+# carries, not on a second field, because `warnings` is one list that the manifest, the
+# panel rail and the console all read — a second class of record would have to be kept in
+# step in three places, and the one that fell behind would be the one nobody saw.
+ADVISORY_WARNING_MARKS = (
+    "switch to Timeline Render",     # titles, graphics, adjustment layers: normal, not broken
+    "were merged into it",           # Premiere's extra channel lanes of a clip already listed
+    "nested sequence(s) skipped",    # --nest one-cut, which is a choice the caller made
+)
+
+
+def is_advisory_warning(w: str) -> bool:
+    """True when this warning describes the timeline rather than a problem with the run."""
+    return any(m in (w or "") for m in ADVISORY_WARNING_MARKS)
+
+
 def render_name(cut: Cut) -> str:
     """The basename a pre-rendered range for this cut must carry.
 
@@ -5701,8 +5736,10 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
             cut.error = (f"{Path(cut.source_path).suffix} is a project/comp file "
                          f"(Dynamic Link), not decodable media — render it first")
         else:
-            cut.error = ("no media file (a title, a graphic, an adjustment layer or a "
-                         "nest) — render it first")
+            # Reads in the row tooltip and in the error column of the sheet, so it says the
+            # same thing as the rail: what the clip is, and which mode produces it.
+            cut.error = ("a title, graphic, adjustment layer or nest — Premiere draws it, "
+                         "so there is no media to cut from. Timeline Render produces it")
         return cut
     if not cut.source_exists and not cut.render_path:
         cut.status = "missing_source"
@@ -6181,9 +6218,23 @@ def describe(cut: Cut) -> dict:
     if cut.pix_fmt_out and cut.pix_fmt and cut.pix_fmt_out != cut.pix_fmt:
         notes.append(f"{cut.pix_fmt} → {cut.pix_fmt_out}")
 
+    # ⚠️ A CLIP THAT NEVER HAD A MEDIA FILE IS NOT A FAILURE, and the line below used to make
+    # it one. A title, a graphic, an adjustment layer or a nest has no <pathurl>, so
+    # source_exists is False and the missing-source rule claimed it before the `warn` line
+    # underneath — which is where this file has always meant these to land. The panel builds
+    # its headline from `bad`, so a source-mode export of a timeline carrying 31 graphics
+    # opened with "31 clips did not write. Retry below", in red, above a list headed "Why
+    # each one failed" — for 31 clips that were never cuttable from source and that a retry
+    # would refuse again the same way. Measured on a real 64-cut timeline: 31 ok, 31
+    # unsupported, ZERO failed, and the panel called it 31 failures.
+    #
+    # Missing media and absent media are different things. The first is a file that moved
+    # and can be relinked; the second is Premiere drawing the picture itself, which needs
+    # Timeline Render and no relink will ever help.
     kind = ("bad" if cut.status in ("failed", "missing_source", "no_render",
                                     "render_mismatch")
-            or (not cut.source_exists and not cut.render_path)
+            or (not cut.source_exists and not cut.render_path
+                and cut.media_kind != "unsupported")
             else "warn" if cut.media_kind == "unsupported" or cut.status == "no_audio"
             else "ok" if cut.status in ("ok", "skipped_existing")
             else "ramp" if is_retimed(cut.speed_percent) or cut.reversed
@@ -7553,8 +7604,15 @@ def main():
     if tl.markers:
         print(f"  markers  : {len(tl.markers)}")
     print(f"  encode   : {describe_encode(args, tl.cuts)}")
+    # ⚠️ NOT EVERY WARNING IS A COMPLAINT. `!!` is the file's alarm marker and it belongs on
+    # the ones that mean something went wrong; a timeline carrying titles produces the
+    # no-media line on every single export, and under `!!` a normal run of a normal sequence
+    # read as 31 things having broken. The advisory ones say what a clip IS and which mode
+    # produces it, so they print under `++`, which this file already uses for the
+    # "nothing was resampled" note. The manifest keeps one warnings list either way — the
+    # marker is how the CONSOLE ranks them, not a second class of record.
     for w in tl.warnings:
-        print(f"  !! {w}")
+        print(f"  {'++' if is_advisory_warning(w) else '!!'} {w}")
     if getattr(args, "fps", None):
         # Loud, and not buried among the other warnings: this is the one setting that
         # changes what the files CONTAIN rather than how big they are.
@@ -7761,10 +7819,19 @@ def main():
             print(f"     {p}")
     if _pathless:
         _names = sorted({c.clip_name or "(unnamed)" for c in _pathless})
-        print(f"\n  !! {len(_pathless)} cut(s) have no media file (a title, a graphic, an "
-              f"adjustment layer or a nest) — render them first:")
-        for n in _names[:8]:
-            print(f"     {n}")
+        # ⚠️ NOT `!!`, AND NOT "not cut". This is the one advisory in the summary that is
+        # normal rather than wrong: every timeline with a title on it produces it. Under the
+        # alarm prefix, a source-mode export of a real timeline carrying 31 graphics read as
+        # 31 things having gone wrong — the reporting editor asked why 31 files "failed"
+        # when nothing had. It says what these clips ARE and which mode does produce them.
+        # The warnings list above already carries this sentence, and the console prints it
+        # from there. This block adds only the NAMES, which the one-line warning truncates.
+        # Only when the one-line warning had to truncate: it lists four names, and a
+        # timeline with five titles does not need the same four printed twice.
+        if len(_names) > 4:
+            print(f"\n  ++ all {len(_pathless)} of them:")
+            for n in _names[:8]:
+                print(f"     {n}")
     if missing or unsupported:
         print()
 

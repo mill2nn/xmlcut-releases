@@ -1,6 +1,6 @@
 {
-  "version": "3.71",
-  "notes": "S\u1eeda: c\u1eaft l\u1ea1i file h\u1ecfng thay v\u00ec nh\u1eadn l\u00e0 xong; frame \u0111\u1ea7u \u0111\u00fang khi \u0111\u1ed5i fps; track nghe theo timeline \u0111ang m\u1edf; relink kh\u00f4ng l\u00e0m h\u1ecfng clip kh\u00e1c; c\u1eadp nh\u1eadt t\u1eeb ch\u1ed1i file t\u1ea3i thi\u1ebfu.",
+  "version": "3.72",
+  "notes": "Title/graphic/adjustment layer kh\u00f4ng c\u00f2n b\u1ecb \u0111\u1ebfm l\u00e0 l\u1ed7i \u2014 panel b\u00e1o l\u00e0 c\u1ea7n Timeline Render. L\u1eddi nh\u1eafc r\u00f5 h\u01a1n gi\u1eefa vi\u1ec7c b\u00ecnh th\u01b0\u1eddng v\u00e0 l\u1ed7i th\u1eadt.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

@@ -826,7 +826,13 @@
             "Đọc timeline khi chưa tìm thấy engine: báo lỗi thay vì treo panel."
     ].concat(CL_370);
 
+    var CL_372 = [
+            "Title/graphic/adjustment layer không còn bị đếm là lỗi — báo là cần Timeline Render.",
+            "Lời nhắc rõ hơn: cái nào là bình thường, cái nào là lỗi thật."
+    ].concat(CL_371);
+
     var CHANGELOG = {
+        "3.72": CL_372,
         "3.71": CL_371,
         "3.70": CL_370,
         "3.69": CL_369,
@@ -7021,7 +7027,7 @@
             if (c.reversed) facts.push("reversed");
             if (c.speed_varies) facts.push("ramp " + (c.speed_span || "varies"));
             if (bad) facts.push(String(c.error || st).substring(0, 120));
-            else if (st === "unsupported") facts.push("not decodable");
+            else if (st === "unsupported") facts.push("Premiere draws this — Timeline Render");
             else if (st === "skipped_existing") facts.push("kept");
 
             /* The manifest is the AUTHORITY on what happened, and the row states are
@@ -7056,9 +7062,13 @@
                  * The reason now goes where there is room for it: the row's own tooltip, and the
                  * rail when the failures do not share one. This says which of four things
                  * happened, in a word that fits. */
+                /* "needs render" rather than "not media": the cell is read as a verdict on
+                 * the clip, and a title is not a broken file — it is a clip this mode
+                 * cannot produce. Saying which mode does is the only useful thing that
+                 * fits in the width. */
                 note: bad ? "failed"
                     : (st === "skipped_existing" ? "kept"
-                       : (st === "unsupported" ? "not media" : "")),
+                       : (st === "unsupported" ? "needs render" : "")),
                 // The full reason, for the tooltip and the rail. Never for the cell.
                 why: bad ? String(c.error || st).split("\n")[0].substring(0, 160) : "",
                 done: true
