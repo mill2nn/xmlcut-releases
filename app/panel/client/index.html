@@ -257,8 +257,8 @@
                  Hidden until a read finds audio tracks, and hidden in Timeline Render, where
                  the engine drops every audio cut anyway. -->
             <div class="field f-atracks" id="atracksfield" hidden>
-                <div class="flbl">Audio tracks
-                    <span class="q" data-tip="One row per audio track. In Timeline Render, HEAR ticks decide what is inside each clip's sound — unticked tracks are muted while Premiere renders, then put back. FILE ticks cut that track's clips into their own audio files, in either mode. Nothing ticked under file = no audio files, as before."">?</span>
+                <div class="flbl">Sound from each track
+                    <span class="q" data-tip="Two separate questions per track. IN CLIP: is this track audible inside each exported video clip? Untick it and the clips are silent on that track; your timeline is put back afterwards. OWN FILE: does this track also come out as separate audio files, one per clip? The two do not affect each other — you can have sound in the clips with no separate files, or separate files with silent clips.">?</span>
                 </div>
                 <div id="atracks" class="vinclude"></div>
             </div>
@@ -270,8 +270,8 @@
                  voice-over above it, and a dataset of what was SAID wants one and not the
                  other. -->
             <div class="field f-audio" id="audiofield">
-                <div class="flbl">Audio · one file per timeline
-                    <span class="q" data-tip="Writes ONE mp3 for the whole timeline — the chosen tracks at their timeline positions, gaps as silence, exactly as long as the sequence. It lands beside the clips as _timeline_audio.mp3. The clips themselves stay silent. Separate from the per-track ticks, which cut one file per clip instead.">?</span>
+                <div class="flbl">One MP3 of the whole timeline
+                    <span class="q" data-tip="A third, separate thing: ONE mp3 as long as the whole sequence, with the chosen tracks at their timeline positions and gaps as silence. It lands beside the clips as _timeline_audio.mp3. Nothing to do with the ticks above, which are per clip.">?</span>
                 </div>
                 <select id="audiosel" class="sel wide">
                     <option value="">No audio files</option>

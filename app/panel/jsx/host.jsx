@@ -1286,8 +1286,18 @@ function probeRender(destFolder, spec, mbps, onePass) {
         var pre = findRenderPreset();
         for (i = 0; i < pre.tried.length; i++) res.tried.push("preset: " + pre.tried[i]);
         if (!pre.found) {
-            res.error = "No Match Source H.264 preset found. Media Encoder ships one;"
-                + " without it Premiere has nothing to render with.";
+            /* NOT "install Media Encoder". presetRoots() looks inside the running
+             * Premiere FIRST, and this Premiere ships all four Match Source presets
+             * there, so the likeliest reason to be here is that its own folder is
+             * missing or unreadable — an instruction to go and download several
+             * gigabytes of Media Encoder would not change the answer. Every folder
+             * looked in is already in res.tried, which the panel logs before it shows
+             * this. */
+            res.error = "No Match Source H.264 preset found. Premiere ships all four"
+                + " of them inside its own application folder and that is the first"
+                + " place looked, so the likeliest cause is an install those presets"
+                + " are missing from, or one Premiere could not read — not a missing"
+                + " Media Encoder.";
             return ser(res);
         }
         res.preset = pre.found;
@@ -1433,8 +1443,18 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
         var pre = findRenderPreset();
         for (i = 0; i < pre.tried.length; i++) res.tried.push("preset: " + pre.tried[i]);
         if (!pre.found) {
-            res.error = "No Match Source H.264 preset found. Media Encoder ships one;"
-                + " without it Premiere has nothing to render with.";
+            /* NOT "install Media Encoder". presetRoots() looks inside the running
+             * Premiere FIRST, and this Premiere ships all four Match Source presets
+             * there, so the likeliest reason to be here is that its own folder is
+             * missing or unreadable — an instruction to go and download several
+             * gigabytes of Media Encoder would not change the answer. Every folder
+             * looked in is already in res.tried, which the panel logs before it shows
+             * this. */
+            res.error = "No Match Source H.264 preset found. Premiere ships all four"
+                + " of them inside its own application folder and that is the first"
+                + " place looked, so the likeliest cause is an install those presets"
+                + " are missing from, or one Premiere could not read — not a missing"
+                + " Media Encoder.";
             return ser(res);
         }
         res.preset = pre.found;
@@ -1496,6 +1516,25 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
             for (i = 0; i < asolo.tried.length; i++) res.tried.push("audio: " + asolo.tried[i]);
             res.audio_muted = asolo.muted;
             res.audio_kept = asolo.kept;
+            /* THE SAME TWO NOTES THE VIDEO SOLO CARRIES just below. They were missing
+             * here, so every audio-side failure reached `tried` at most — and the panel
+             * writes `tried` to the log under the gear and `warnings` to the run's notes,
+             * which is the thing that actually gets read afterwards.
+             *
+             * A refused mute is NOT a refusal to render the way the video one is. That
+             * refusal exists because a corner logo burned into seventeen clips is
+             * invisible until a client finds it; a whole unticked track left in the mix
+             * announces itself on the first playback. So this says it loudly and lets the
+             * run finish. */
+            if (asolo.denied) {
+                res.warnings.push("Premiere refused to mute " + asolo.denied
+                    + " audio track(s) you unticked — their sound is in every clip");
+            }
+            if (asolo.unverified) {
+                res.warnings.push("Premiere would not confirm " + asolo.unverified
+                    + " audio track(s) were muted — listen to one clip for sound that"
+                    + " should not be there");
+            }
         }
 
         /* ⚠️ AFTER every early return above, so no failure path can leave the user's
@@ -1507,8 +1546,8 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
             res.tracks_hidden = solo.hidden;
             res.tracks_kept = solo.kept;
             if (!solo.ok) {
-                restoreVideoTracks(seq, solo.before);
-                if (asolo) restoreAudioTracks(seq, asolo.before);
+                restoreVideoTracks(seq, solo.changed);
+                if (asolo) restoreAudioTracks(seq, asolo.changed);
                 res.error = solo.error;
                 return ser(res);
             }
@@ -1607,14 +1646,21 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
         /* Tracks first, then the in/out points. Both are the user's timeline and both go
          * back whatever happened in between. */
         if (asolo) {
-            var backA = restoreAudioTracks(seq, asolo.before);
+            var backA = restoreAudioTracks(seq, asolo.changed);
             res.audio_restored = backA.restored;
             for (i = 0; i < backA.tried.length; i++) {
                 res.tried.push("audio restore: " + backA.tried[i]);
             }
+            /* The video half of this has warned since it was written; the audio half only
+             * logged. A timeline left with a track muted is the same size of problem
+             * either way, and the log is not where anyone looks for it. */
+            if (backA.failed) {
+                res.warnings.push("could not un-mute " + backA.failed + " audio track(s)"
+                    + " — check the timeline before you keep editing");
+            }
         }
         if (solo) {
-            var back2 = restoreVideoTracks(seq, solo.before);
+            var back2 = restoreVideoTracks(seq, solo.changed);
             res.tracks_restored = back2.restored;
             for (i = 0; i < back2.tried.length; i++) {
                 res.tried.push("track restore: " + back2.tried[i]);
@@ -1868,15 +1914,17 @@ function videoTrackStates(seq) {
  * grading the editor meant for the shot. Naming the tracks to KEEP separates the two —
  * include V3's grade, leave V2's caption out.
  *
- * Returns {ok, before[], tried[], unverified, denied}. `denied` counts tracks that were
+ * Returns {ok, before[], changed[], tried[], unverified, denied}. `before` is what every
+ * track looked like on the way in; `changed` is only the ones this run actually hid, and
+ * it is what the restore undoes. `denied` counts tracks that were
  * asked to hide and REPORTED BACK STILL VISIBLE — a definite failure, and the caller
  * refuses to render on it: seventeen files with a watermark burned in are worse than a
  * clear stop. `unverified` counts tracks this Premiere would not report on at all, which
  * is a warning rather than a refusal — the difference between knowing it is wrong and not
  * knowing. */
 function soloVideoTrack(seq, keepList) {
-    var res = { ok: false, tried: [], before: [], unverified: 0, denied: 0, hidden: 0,
-                kept: [] };
+    var res = { ok: false, tried: [], before: [], changed: [], unverified: 0, denied: 0,
+                hidden: 0, kept: [] };
     var tracks = get(seq, "videoTracks", null);
     var n = tracks ? Number(get(tracks, "numTracks", 0)) : 0;
     if (!n) {
@@ -1909,6 +1957,19 @@ function soloVideoTrack(seq, keepList) {
             res.unverified++;
             continue;
         }
+        /* ⚠️ WHAT THIS RUN CHANGED, recorded as it changes it — this is the list the
+         * restore works from, and it is deliberately not `before`. A track whose prior
+         * state Premiere will not report reads `muted: null`, and the restore used to skip
+         * every null on the reasoning that an unknown state is left alone. It was not left
+         * alone: the setMute above had just hidden it.
+         *
+         * Measured against the shipped code by driving renderCuts outside Premiere with an
+         * isMuted() that does not exist: four video tracks, one ticked, and all three of
+         * the others came back from the render still hidden — plus two of three audio
+         * tracks still muted. A null prior state therefore goes back VISIBLE below rather
+         * than being left as the run left it. */
+        var was = res.before[i] ? res.before[i].muted : null;
+        res.changed.push({ index: i + 1, muted: was });
         var back = call(tracks[i], "isMuted", null);
         if (back === null) {
             res.unverified++;
@@ -1930,19 +1991,21 @@ function soloVideoTrack(seq, keepList) {
     return res;
 }
 
-/* Put every track back exactly as it was found. A state of null was never known, so it is
- * left alone rather than guessed at. */
-function restoreVideoTracks(seq, before) {
+/* Put back exactly what the run CHANGED, from the list soloVideoTrack recorded as it made
+ * each change — not from the states read before it started. A track it never touched is
+ * never written to, and a track whose prior state was unreadable goes back VISIBLE,
+ * because this run is the only reason it is hidden. */
+function restoreVideoTracks(seq, changed) {
     var res = { restored: 0, failed: 0, tried: [] };
     var tracks = get(seq, "videoTracks", null);
     var n = tracks ? Number(get(tracks, "numTracks", 0)) : 0;
-    for (var i = 0; i < (before || []).length; i++) {
-        var was = before[i];
-        if (!was || was.muted === null) continue;
+    for (var i = 0; i < (changed || []).length; i++) {
+        var was = changed[i];
+        if (!was) continue;
         var idx = Number(was.index) - 1;
         if (idx < 0 || idx >= n) continue;
         try {
-            tracks[idx].setMute(was.muted ? 1 : 0);
+            tracks[idx].setMute(was.muted === true ? 1 : 0);
             res.restored++;
         } catch (e) {
             res.failed++;
@@ -1971,8 +2034,8 @@ function audioTrackStates(seq) {
 }
 
 function soloAudioTrack(seq, keepList) {
-    var res = { ok: true, tried: [], before: [], unverified: 0, denied: 0, muted: 0,
-                kept: [] };
+    var res = { ok: true, tried: [], before: [], changed: [], unverified: 0, denied: 0,
+                muted: 0, kept: [] };
     var tracks = get(seq, "audioTracks", null);
     var n = tracks ? Number(get(tracks, "numTracks", 0)) : 0;
     if (!n) return res;                          // nothing to hear, nothing to mute
@@ -1991,6 +2054,11 @@ function soloAudioTrack(seq, keepList) {
             res.unverified++;
             continue;
         }
+        /* Recorded as it changes, for the same reason as the video solo above: the restore
+         * undoes THIS LIST, not the states read beforehand, so a track whose prior state
+         * Premiere would not report is still put back. */
+        var was = res.before[i] ? res.before[i].muted : null;
+        res.changed.push({ index: i + 1, muted: was });
         var back = call(tracks[i], "isMuted", null);
         if (back === null) { res.unverified++; continue; }
         if (!back) {
@@ -2003,17 +2071,19 @@ function soloAudioTrack(seq, keepList) {
     return res;
 }
 
-function restoreAudioTracks(seq, before) {
+/* Undoes what soloAudioTrack changed, exactly as the video restore does: the list of
+ * tracks it muted, with an unreadable prior state going back AUDIBLE. */
+function restoreAudioTracks(seq, changed) {
     var res = { restored: 0, failed: 0, tried: [] };
     var tracks = get(seq, "audioTracks", null);
     var n = tracks ? Number(get(tracks, "numTracks", 0)) : 0;
-    for (var i = 0; i < (before || []).length; i++) {
-        var was = before[i];
-        if (!was || was.muted === null) continue;
+    for (var i = 0; i < (changed || []).length; i++) {
+        var was = changed[i];
+        if (!was) continue;
         var idx = Number(was.index) - 1;
         if (idx < 0 || idx >= n) continue;
         try {
-            tracks[idx].setMute(was.muted ? 1 : 0);
+            tracks[idx].setMute(was.muted === true ? 1 : 0);
             res.restored++;
         } catch (e) {
             res.failed++;

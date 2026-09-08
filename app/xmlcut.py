@@ -40,7 +40,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.70"
+VERSION = "3.71"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -58,6 +58,29 @@ CUT_FILE_RE = re.compile(r"^\d+_.*\.(?:mp4|mov|mkv|m4v|m4a|wav|mp3|aac)$", re.I)
 # that much back off was measured exact on both encoder families; -advanced_editlist 0 was
 # not (it fails on Apple files) and -ignore_editlist lands 21 ms late.
 AUDIO_SEEK_LEAD = 0.1
+
+# ⚠️ HOW SHORT AN AUDIO DELIVERY MAY BE BEFORE IT IS REFUSED, in seconds. An audio cut pins
+# no -frames:v — there is no frame to count — so until the out_time receipt in run_cut
+# nothing at all compared its length with the length it was asked for, and a cut whose
+# source runs out mid-range shipped at whatever ffmpeg wrote, status ok: MEASURED on an
+# 8.000 s source, a 7.0-9.0 s cut delivered 1.000000 s of the 2.0 s asked and was reported
+# `Done: 2 written`. Only a cut WHOLLY past the end failed, and then via the streamless-file
+# check rather than a length one.
+#
+# 50 ms, not zero, and the number is an AAC frame: 1024 samples is 21.3 ms at 48 kHz, and an
+# Apple-encoded m4a's 2112-sample priming is 33.3 ms (see AUDIO_SEEK_LEAD, where the same two
+# numbers were measured). Anything under one frame of slop is encoder bookkeeping, not a
+# missing tail. Checked in ONE direction only: a long delivery is priming the decoder throws
+# away, a short one is media that is not there.
+AUDIO_SHORT_TOLERANCE = 0.05
+
+# ⚠️ THE MOST SILENCE A RETIMED AUDIO CUT MAY BE PADDED WITH, in seconds, to make up what
+# atempo's WSOLA window swallowed off the tail — see the pin in build_command's audio branch.
+# Deliberately a CAP rather than an open `apad`: an unbounded pad would fill a source that
+# ran out mid-range with silence and hide it from the out_time receipt above. The widest
+# residue measured was 2944 samples (61.3 ms, at 50% speed); a quarter second leaves room for
+# a chained atempo and still fails anything genuinely missing.
+AUDIO_RETIME_PAD = 0.25
 
 # The product name, for anything a person reads. Deliberately NOT applied to the
 # identifiers: this file's own name, PANEL_ID, the release-channel repo, the dump's
@@ -288,6 +311,20 @@ def estimate_bytes_for(cut: Cut, crf: float, pct: float, secs: float,
     x265 export at x264 rates, which is the whole bug this parameter exists to fix; missing
     it should be a TypeError the first time the tests run, not a number that looks fine.
     """
+    # ⚠️ AN AUDIO CUT IS PRICED AS AUDIO, not by the picture its source happens to carry.
+    # Every audio branch of build_command asks ffmpeg for `-c:a aac -b:a 192k`, so the size
+    # is the duration times that rate and nothing else — no width, no frame rate, no crf.
+    # Pricing it with the video model read w/h/fps off the SOURCE video file and produced a
+    # number about twenty times the delivered .m4a, and moved it with the quality slider
+    # although the delivered bytes are identical across the whole slider (measured
+    # byte-for-byte). The panel was corrected first; this is the same fix on the engine
+    # side, so the header total and the panel's column stop disagreeing.
+    #
+    # 192 kbps is what the code ASKS for, so this is a ceiling rather than a fit: a
+    # voice-over lands under it. Over-stating a delivery is the safe direction for someone
+    # sizing a drive, and a constant fitted to one fixture would under-state a music bed.
+    if cut.track_type == "audio":
+        return AUDIO_ESTIMATE_BPS * secs / 8 + CONTAINER_FIXED
     if cut.media_kind == "still" and not cut.render_path:
         w, h = scaled_dims(cut.width, cut.height, pct)
         if not w or not h:
@@ -577,6 +614,16 @@ DOT_OK = {".debug"}
 # repo hands urlopen an arbitrarily large body straight into memory.
 MAX_UPDATE_BYTES = 8 * 1024 * 1024
 
+# And no released file is anywhere near this small. Measured across the 13 files this
+# release ships: the smallest is CSInterface.js at 532 bytes, so 200 is under the real
+# floor by more than a factor of two and can only fire on a body that is not the file.
+MIN_RELEASE_BYTES = 200
+
+# Left beside the installed xmlcut.py when the engine updated but the panel copy did not,
+# holding that version. It is what makes the next check offer the same number again
+# instead of "up to date" — see newer_than_running().
+PANEL_REPAIR_MARKER = ".panel-repair-needed"
+
 
 def cep_extensions_dir() -> Path:
     return (Path.home() / "Library" / "Application Support" / "Adobe" / "CEP"
@@ -683,17 +730,64 @@ def reinstall_panel(here: Path, progress=None) -> tuple[bool, str]:
                 (tdst / t.name).write_bytes(t.read_bytes())
             if progress:
                 progress("panel: lib/tools")
+        # ⚠️ STAGED AND SWAPPED, NEVER DELETED-THEN-COPIED. This was
+        # `rmtree(d, ignore_errors=True)` followed by `copytree(s, d)` straight into the
+        # folder Premiere loads, so anything that stopped the copy part-way left the panel
+        # in whatever state the copy had reached — and apply_update reported ok:true over
+        # it. Staged with copytree raising ENOSPC for `client`: `ok=True`, the failure only
+        # a tail on the success message, `client/` gone, and the next update check answering
+        # "up to date" because the engine had already been bumped. On a real full disk the
+        # damage is a truncated file rather than a vanished folder, and the window is only
+        # as wide as the panel's net growth for that release — about 50 KB — but the outcome
+        # is the same: a success banner over a panel that will never be repaired.
+        #
+        # So the new copy is built beside the live one and swapped in with a rename, which
+        # either happens or does not. The live folder is only ever MOVED, never rmtree'd, so
+        # there is no point at which a half-copy has replaced a working panel. Directories
+        # are still replaced rather than merged, so a file deleted upstream really goes.
+        def scrub(p: Path) -> None:
+            """Remove a staging name whether it ended up a directory or a file."""
+            shutil.rmtree(p, ignore_errors=True)
+            try:
+                if p.is_file():
+                    p.unlink()
+            except OSError:
+                pass
+
         for part in PANEL_PARTS:
             s = src / part
             if not s.exists():
                 continue
             d = dest / part
-            if s.is_dir():
-                # Replaced rather than merged, so a file deleted upstream really goes.
-                shutil.rmtree(d, ignore_errors=True)
-                shutil.copytree(s, d)
-            else:
-                d.write_bytes(s.read_bytes())
+            staged = dest / (part + ".new")
+            previous = dest / (part + ".old")
+            scrub(staged)
+            scrub(previous)
+            try:
+                if s.is_dir():
+                    shutil.copytree(s, staged)  # may fail; nothing live has been touched
+                else:
+                    staged.write_bytes(s.read_bytes())
+                moved_aside = False
+                if d.exists():
+                    # os.replace refuses to land on a non-empty directory, so the live copy
+                    # goes aside first. The gap between the two renames is two metadata
+                    # operations wide, against a whole copytree before.
+                    os.replace(d, previous)
+                    moved_aside = True
+                try:
+                    os.replace(staged, d)
+                except Exception:
+                    if moved_aside and not d.exists():
+                        os.replace(previous, d)   # put the working panel back
+                    raise
+            except Exception:
+                # A half-copy left in Adobe's folder is dead weight, and the failure this
+                # is most likely recovering from is a disk with no room on it.
+                scrub(staged)
+                raise
+            finally:
+                scrub(previous)
             if progress:
                 progress(f"panel: {part}")
     except Exception as e:
@@ -740,9 +834,31 @@ def _fetch(rel: str) -> bytes:
                 # One byte past the cap, so an oversized body is detected rather than
                 # silently truncated into a file that would then fail to parse.
                 data = r.read(MAX_UPDATE_BYTES + 1)
+                declared = r.headers.get("Content-Length")
             if len(data) > MAX_UPDATE_BYTES:
                 raise RuntimeError(
                     f"{rel} is larger than {MAX_UPDATE_BYTES // (1024 * 1024)} MB")
+            # ⚠️ A SHORT BODY USED TO BE ACCEPTED AS THE WHOLE FILE. `read(amt)` goes
+            # through readinto(), which simply returns fewer bytes when the stream ends
+            # early — http.client only raises IncompleteRead from read() with NO amount,
+            # and the ragged-EOF that a bare FIN produces is suppressed by default. Staged
+            # against a server declaring Content-Length 1000 and sending 500: _fetch
+            # returned 500 bytes, no exception. A truncated panel file then installed with
+            # ok:true. A stalled or reset socket does NOT do this — it times out or raises,
+            # and always did; the shape that gets through is a short body closed cleanly,
+            # which in practice means an intermediary (proxy, captive portal, CDN edge).
+            #
+            # Both release endpoints send Content-Length. When one does not (a chunked
+            # response), there is nothing to compare and the per-file checks in
+            # release_file_complaint() are what stands between this and the disk.
+            if declared is not None:
+                try:
+                    want = int(declared)
+                except ValueError:
+                    want = -1
+                if want >= 0 and len(data) != want:
+                    raise RuntimeError(
+                        f"{rel}: got {len(data)} of {want} bytes — the download was cut off")
             return data
         except Exception as e:      # noqa: BLE001 - any failure just tries the fallback
             last = e
@@ -782,11 +898,50 @@ def fetch_latest() -> "tuple[Optional[dict], Optional[str]]":
     return info, None
 
 
+def panel_repair_pending(here: Optional[Path] = None) -> Optional[str]:
+    """The version whose panel copy did not finish, if the last update left one behind.
+
+    Written beside the running xmlcut.py — which for the copy the panel runs is the
+    extension's own lib/ — so the answer travels with the installation it describes.
+    """
+    try:
+        return ((here or install_dir()) / PANEL_REPAIR_MARKER).read_text().strip() or None
+    except OSError:
+        return None
+
+
+def set_panel_repair(here: Path, version: Optional[str]) -> None:
+    """Record, or clear, that this installation's panel needs the copy step run again."""
+    marker = here / PANEL_REPAIR_MARKER
+    try:
+        if version:
+            marker.write_text(str(version))
+        elif marker.exists():
+            marker.unlink()
+    except OSError:
+        pass          # a marker we cannot write is not worth failing an update over
+
+
 def newer_than_running(info: Optional[dict]) -> Optional[dict]:
-    """`info` if it names a version above this one, else None."""
+    """`info` if it names a version above this one — or the SAME one, after a failed panel.
+
+    ⚠️ A FAILED PANEL COPY USED TO END THE STORY. The engine is written before the panel is
+    copied and a panel failure deliberately does not roll that back (the tool itself is
+    correct), so the running VERSION already equalled latest.json's and every later check
+    — the panel's, the CLI's — answered "up to date" while the panel sat broken. Measured
+    on both staged failures: `next check: engine 3.71 vs channel 3.71 -> nothing offered`.
+    Nothing would ever offer to fix it and nothing told the user to re-run the installer.
+
+    The marker only makes the SAME version offerable again, which re-runs the download and
+    the copy — it does not touch the ruling that the engine stays updated. A version that
+    is genuinely behind is offered exactly as before.
+    """
     if not info:
         return None
-    if version_key(info.get("version", "0")) > version_key(VERSION):
+    v = str(info.get("version", "0"))
+    if version_key(v) > version_key(VERSION):
+        return info
+    if v == VERSION and panel_repair_pending() == VERSION:
         return info
     return None
 
@@ -799,6 +954,97 @@ def check_update() -> Optional[dict]:
     """
     info, _err = fetch_latest()
     return newer_than_running(info)
+
+
+def strip_trailing_comments(data: bytes) -> bytes:
+    """`data` with trailing whitespace and any comments after the last statement removed.
+
+    Only used to ask what a JS/JSX/CSS file's last real character is. Backwards from the
+    end, so a `/*` found by rfind cannot be one quoted inside earlier code that still has
+    live statements after it; each pass has to shorten the string, which is what makes the
+    loop terminate.
+    """
+    tail = data.rstrip()
+    while True:
+        if tail.endswith(b"*/"):
+            cut = tail.rfind(b"/*")
+            if cut < 0:
+                return tail
+            tail = tail[:cut].rstrip()
+            continue
+        line_start = tail.rfind(b"\n") + 1
+        if tail[line_start:].lstrip().startswith(b"//"):
+            tail = tail[:line_start].rstrip()
+            continue
+        return tail
+
+
+def release_file_complaint(rel: str, data: bytes) -> Optional[str]:
+    """Why these bytes are not a whole released file, or None if they look like one.
+
+    ⚠️ ONLY .py FILES WERE EVER CHECKED. apply_update compiled the Python and stored
+    everything else exactly as it arrived, so a half main.js went to disk and into Adobe's
+    extension folder with `ok: true`. Staged with _fetch handing back the first 200000 of
+    434713 bytes: the update reported `updated 3.70 → 3.71 … panel updated`, the installed
+    main.js was 200000 bytes, `node --check` on it failed with `SyntaxError: missing )
+    after argument list` at line 3636, and — because the engine had been written at the
+    same time and now reported the new number — the next check answered "up to date"
+    forever. Only re-running the installer repairs that, and nothing says so.
+
+    So every file is checked, and the whole update is refused rather than one bad file
+    written. The checks are structural and deliberately dull, because a validator that
+    rejects a GOOD release breaks seven machines at once, which is worse than what it is
+    guarding against:
+
+      * a floor no released file can be under (MIN_RELEASE_BYTES)
+      * XML has to parse — the manifest CEP reads, and the .debug port file
+      * HTML has to carry its closing tag
+      * JS / JSX / CSS have to end on `;` or `}` once trailing comments are taken off.
+        Measured on all five shipped files: every one of them does, and the 200000-byte
+        truncation above ends mid-identifier on `s`. Shell launchers are exempt — they
+        legitimately end on `fi` or `echo`.
+
+    The comment stripping is not a nicety: the first cut of this check refused a main.js
+    with `/* 3.71 marker */` appended, which is a perfectly whole file. A validator that
+    can refuse a good release is worse than the truncation it is guarding against, so
+    anything ambiguous is allowed through and left to the length check.
+
+    tests/check_delivery.py runs this over every file in UPDATE_FILES as it stands in the
+    repository, so a release that changes one of those endings fails there — before it is
+    published — rather than on someone's machine.
+    """
+    if len(data) < MIN_RELEASE_BYTES:
+        return f"only {len(data)} bytes — that is not the whole file"
+
+    if rel.endswith(".py"):
+        try:
+            compile(data.decode("utf-8"), rel, "exec")
+        except (SyntaxError, UnicodeDecodeError) as e:
+            return f"did not parse ({e})"
+        return None
+
+    # `.debug` has no .xml suffix but is XML, and it is the file that decides whether the
+    # panel can be debugged at all, so it is sniffed rather than named.
+    if rel.endswith(".xml") or data[:5].lower() == b"<?xml":
+        try:
+            ET.fromstring(data.decode("utf-8"))
+        except (ET.ParseError, UnicodeDecodeError) as e:
+            return f"is not readable XML ({e})"
+        return None
+
+    if rel.endswith(".html"):
+        if b"</html>" not in data.lower():
+            return "has no closing </html> — the download was cut off"
+        return None
+
+    if rel.endswith((".js", ".jsx", ".css")):
+        tail = strip_trailing_comments(data)
+        if tail and not tail.endswith((b";", b"}")):
+            return (f"ends on {tail[-24:]!r} rather than a finished statement — "
+                    f"the download was cut off")
+        return None
+
+    return None
 
 
 def apply_update(info: dict, progress=None, out: Optional[dict] = None) -> tuple[bool, str]:
@@ -855,21 +1101,21 @@ def apply_update(info: dict, progress=None, out: Optional[dict] = None) -> tuple
             return False, f"download failed ({rel}): {e} — nothing was changed"
         if not data:
             return False, f"{rel} came back empty — nothing was changed"
-        if rel.endswith(".py"):
-            try:
-                compile(data.decode("utf-8"), rel, "exec")
-            except (SyntaxError, UnicodeDecodeError) as e:
-                return False, f"{rel} did not parse ({e}) — nothing was changed"
-            # NOTE: this catches a publish whose files and version disagree, but it
-            # cannot catch one version published twice with different bytes — both
-            # copies report the same number. That is why Publish Update.command bumps
-            # rather than reusing a number; see the --same warning there.
-            if rel == "xmlcut.py":
-                m = re.search(r'VERSION\s*=\s*"([^"]+)"', data.decode("utf-8"))
-                if not m or m.group(1) != info.get("version"):
-                    return False, (f"the download says "
-                                   f"{m.group(1) if m else 'no version'}, not "
-                                   f"{info.get('version')} — nothing was changed")
+        # EVERY file, not only the Python. A half main.js used to sail through here and
+        # into Adobe's extension folder; see release_file_complaint() for the measurement.
+        complaint = release_file_complaint(rel, data)
+        if complaint:
+            return False, f"{rel} {complaint} — nothing was changed"
+        # NOTE: this catches a publish whose files and version disagree, but it
+        # cannot catch one version published twice with different bytes — both
+        # copies report the same number. That is why Publish Update.command bumps
+        # rather than reusing a number; see the --same warning there.
+        if rel == "xmlcut.py":
+            m = re.search(r'VERSION\s*=\s*"([^"]+)"', data.decode("utf-8"))
+            if not m or m.group(1) != info.get("version"):
+                return False, (f"the download says "
+                               f"{m.group(1) if m else 'no version'}, not "
+                               f"{info.get('version')} — nothing was changed")
         got[rel] = data
 
     # Which files this update actually CHANGES, as opposed to rewriting identically.
@@ -947,10 +1193,19 @@ def apply_update(info: dict, progress=None, out: Optional[dict] = None) -> tuple
     # above is only half of it. Done last, and a failure here does not roll the update
     # back: the tool itself is already correctly updated.
     tail = ""
+    panel_error = None
     if any(rel.startswith("panel/") for rel in files):
         ok, msg = reinstall_panel(here, progress)
         tail = ("\n" + ("Premiere panel: " + msg if ok
                         else "the tool updated, but the panel did not: " + msg))
+        # ⚠️ A FAILED PANEL COPY HAS TO STAY ASKABLE. The engine is not rolled back — it is
+        # correct, and that ruling stands — but the version number it now reports is what
+        # made every later check answer "up to date" over a panel that never arrived. The
+        # marker is the one thing that keeps the same release offerable until the copy
+        # actually lands; reinstall_panel succeeding is what takes it away again.
+        set_panel_repair(here, None if ok else info.get("version"))
+        if not ok:
+            panel_error = msg
         # For a bundled install, here/panel was only ever a staging area — the copy
         # Premiere loads now sits in the extension root. Leaving it behind meant a second
         # panel/ tree accumulating inside Adobe's folder on every update.
@@ -966,6 +1221,10 @@ def apply_update(info: dict, progress=None, out: Optional[dict] = None) -> tuple
         loaded = tuple(f"panel/{p}" for p in PANEL_PARTS)
         out["changed"] = sorted(changed)
         out["restart_needed"] = any(r.startswith(loaded) for r in changed)
+        # The one fact a caller must not have to parse out of the message: the engine is
+        # new, the panel is not. A front end that reads this can say so where the success
+        # banner is, instead of in a log.
+        out["panel_error"] = panel_error
     return True, (f"updated {VERSION} → {info['version']}. The previous version is in "
                   f".backup." + tail)
 
@@ -1447,6 +1706,16 @@ class Cut:
     output_width: Optional[int] = None
     output_height: Optional[int] = None
     source_fps: float = 0.0
+    # ffprobe's avg_frame_rate, kept only so it can be compared with source_fps (its
+    # r_frame_rate). Equal on constant-rate media; a gap means the file's frames are NOT
+    # evenly spaced, and every frame-count-times-rate sum this tool makes about it is
+    # approximate. MEASURED on a 30 fps source with one frame removed: r 30/1, avg 9000/301
+    # (29.900332), and a 30-frame cut across the gap came back spanning 1.033008 s for a
+    # 1.000 s timeline slot — the gap survives into the OUTPUT timestamps — with the last
+    # picture a frame from past the out-point. Recorded and NAMED rather than compensated:
+    # the cutting path does not resample variable-rate media, and guessing at it on footage
+    # nobody here has is how a half-second error gets introduced.
+    source_avg_fps: float = 0.0
     # Premiere's INTERPRETED rate, only ever set from a panel dump. Recorded rather
     # than used: it is the rate the edit was built against, but ffmpeg seeks the file
     # at the file's own rate, and silently converting between the two — untested, on
@@ -1640,9 +1909,27 @@ class Timeline:
 
     # -- path resolution --------------------------------------------------
     def _resolve(self, path: str) -> str:
+        """Rewrite a source path through --remap OLD=NEW, matching whole folders only.
+
+        ⚠️ A BARE PREFIX MATCH REWRITES THE SIBLING FOLDER TOO. This was
+        `path.startswith(old)`, so `--remap /Volumes/Old=/NEW` turned
+        `/Volumes/Old2/B.mp4` into `/NEW2/B.mp4` and `/Volumes/Oldies/C.mp4` into
+        `/NEWies/C.mp4` — measured, both. The clip is then reported missing at a path that
+        never existed, or, if the mangled path happens to resolve, cut from a different
+        file. It also ate the sibling's OWN pair: once `/Volumes/Old2/…` had been rewritten,
+        a later `--remap /Volumes/Old2=…` found nothing left to match.
+
+        So the match has to end on a path separator, and only the FIRST pair that matches
+        applies — chaining one pair's output into the next pair's input is not what
+        `--remap A=B --remap C=D` means to anyone typing it. The splice itself is unchanged
+        (`new + path[len(old):]`), which keeps every OLD/NEW spelling that works today
+        working, including the trailing slash the panel puts on the OLD half.
+        """
         for old, new in self.remaps:
-            if path.startswith(old):
-                path = new + path[len(old):]
+            if not old:
+                continue
+            if path == old or path.startswith(old if old.endswith("/") else old + "/"):
+                return new + path[len(old):]
         return path
 
     # -- file table -------------------------------------------------------
@@ -2397,6 +2684,10 @@ class Timeline:
         # one track would have discarded the four correct ones along with the two wrong.
         inner_clipitems = 0
         outside_window = 0
+        # Inner clipitems that are themselves nests and came back with nothing. They are
+        # NOT a window question, and every path that returns [] above has already appended
+        # a warning saying which one it was — see the report at the bottom.
+        nested_empty = 0
         for track in section.findall("track"):
             # The nest's OWN tracks have the same eye/mute toggle as the parent
             # sequence's, and an inner layer switched off is just as much material the
@@ -2420,6 +2711,8 @@ class Timeline:
                                                  parent_fps=nest_fps)
                     _mark_track_enabled(_deeper, inner_track_on)
                     _mark_audio_level(_deeper, inner_level, inner_level_kf)
+                    if not _deeper:
+                        nested_empty += 1
                     cands = _deeper
                 else:
                     # The nest's inner cuts report the PARENT's track, both the lane ordinal and
@@ -2477,7 +2770,17 @@ class Timeline:
 
                     # re-express in parent time
                     vis = (hi - lo) / k_nest
-                    p_in = parent_lo_s + (lo - win_lo) / k_nest
+                    # ⚠️ A REVERSED NEST MIRRORS ITS WINDOW, and the offset is the whole of
+                    # it: what sits at the END of the window is what plays FIRST. Without
+                    # this term every inner cut kept its forward position — measured on a
+                    # four-shot nest reversed at 100%, the shot the timeline plays first was
+                    # placed last and the ordinal prefixes ran 01..04 backwards, with no
+                    # warning anywhere. The CONTENTS were already right (the source range is
+                    # untouched and c.reversed is set below), so what this moves is the
+                    # position, the timecodes and the numbering. Rare — 0 reversed nests in
+                    # 91 real exports holding 284 nest clipitems — but silent when it hits.
+                    off = (win_hi - hi) if nest_rev else (lo - win_lo)
+                    p_in = parent_lo_s + off / k_nest
                     c.timeline_in_frames = int(round(p_in * pfps))
                     c.timeline_out_frames = int(round((p_in + vis) * pfps))
                     c.duration_frames = max(1, c.timeline_out_frames - c.timeline_in_frames)
@@ -2516,9 +2819,22 @@ class Timeline:
                 self.warnings.append(
                     f"{name}: the nest holds no clipitems on any {track_type} track "
                     f"— nothing to cut")
+            elif nested_empty >= inner_clipitems:
+                # ⚠️ SILENT ON PURPOSE, AND THIS IS THE ONE PLACE THAT MAY BE. Everything
+                # inside this nest is another nest that gave nothing back and said why
+                # itself, so a window sentence here would be a FALSE second explanation of
+                # a cause already stated. MEASURED on a five-deep nest against a cap of 4:
+                # one true "nested deeper than 4 levels" line followed by four
+                # "fall outside the window" lines contradicting it, in the console, the
+                # panel's notes rail and the manifest — the clipitems were inside their
+                # windows and were lost to the depth cap.
+                pass
             else:
+                _out_of = inner_clipitems - nested_empty
+                _head = (f"all {inner_clipitems}" if not nested_empty
+                         else f"{_out_of} of {inner_clipitems}")
                 self.warnings.append(
-                    f"{name}: all {inner_clipitems} clipitem(s) inside the nest fall "
+                    f"{name}: {_head} clipitem(s) inside the nest fall "
                     f"outside the window this instance shows (in/out "
                     f"{nest_in:g}-{nest_out:g} in nest frames) — no cuts")
         return out
@@ -2891,7 +3207,20 @@ class DumpTimeline:
 
         path = str(pi.get("media_path") or "")
         ext = Path(path).suffix.lower()
-        if ext in UNSUPPORTED_EXT:
+        # ⚠️ NO PATH MEANS NO MEDIA, the same as it does on the XML path (see the `no_media`
+        # branch in the clipitem reader). An adjustment layer, a title, a colour matte and a
+        # graphic all reach here with media_path "", and classifying them as `video` sent
+        # them on as ordinary cuts whose source does not exist: measured on a dump built
+        # from the repo fixture, five such clips came out `media_kind video,
+        # source_exists False` and the run printed "5 cut(s) reference media that isn't at
+        # the recorded path" followed by a BLANK line — the empty path — and advice to fix
+        # it with --remap, which cannot apply to a clip that never had a file. The XML path
+        # has always called these "no media file (an adjustment layer, a graphic or a
+        # title)". This is the dump-only fallback, so it is only reached when the XML export
+        # failed, but that is exactly when the messages need to make sense.
+        if not path:
+            kind = "unsupported"
+        elif ext in UNSUPPORTED_EXT:
             kind = "unsupported"
         elif ext in STILL_EXT:
             kind = "still"
@@ -3319,6 +3648,15 @@ def apply_probe(cut: Cut, cache: dict, timeout: float = PROBE_READ_TIMEOUT) -> N
                     cut.source_fps = round(float(n) / float(d), 6)
             except Exception:
                 pass
+            # Read beside it, never instead of it: r_frame_rate is the grid ffmpeg seeks on
+            # and the only rate the cut arithmetic may use. avg_frame_rate is here purely so
+            # the two can be compared — see Cut.source_avg_fps.
+            try:
+                n, d = s.get("avg_frame_rate", "0/1").split("/")
+                if float(d):
+                    cut.source_avg_fps = round(float(n) / float(d), 6)
+            except Exception:
+                pass
         elif s.get("codec_type") == "audio" and not cut.audio_codec:
             cut.audio_codec = s.get("codec_name", "")
             cut.audio_channels = s.get("channels")
@@ -3469,6 +3807,50 @@ def forced_rate_resamples(cut: Cut, args, seq_fps: float) -> bool:
     return abs(in_fps - out_fps) > FPS_EPS
 
 
+def records_a_rate(cut: Cut) -> bool:
+    """Will a file be written whose frame rate frame_exact can describe?
+
+    ⚠️ SEPARATE FROM forced_rate_resamples ON PURPOSE. That predicate answers what
+    build_command must DO with a cut it is about to encode, and both callers have to get
+    the same answer or the command and the manifest describe different files. This one is
+    about the RECORD, and it only ever loosens it: run_cut refuses an unsupported clip and
+    a missing source before it builds any command, so a rate flag on either is a statement
+    about a file nobody receives.
+
+    MEASURED on two encodable 30 fps cuts beside one offline clip and one Dynamic Link
+    comp, both DECLARED 24 fps, at --fps 30: the console said "RESAMPLED to 30 fps: 2 of 4
+    cut(s) drop or duplicate frames", the encode line said "2 of 4 cut(s) not frame exact",
+    and settings.frame_exact went false — for a folder whose every written file is exact,
+    which is also what makes tests/verify.py refuse to grade it. Both rows are already
+    named as missing and as a comp in the same console block.
+    """
+    if cut.render_path or (cut.render_planned and cut.track_type == "video"):
+        return True                        # the render supplies the pixels
+    return bool(cut.source_exists) and cut.media_kind != "unsupported"
+
+
+def audio_target_seconds(cut: Cut, args, seq_fps: float) -> Optional[float]:
+    """How long this cut's AUDIO delivery has to be, or None when the question doesn't apply.
+
+    ONE definition for the same reason retime_to_timeline() is one: build_command pins the
+    retimed chain to this length and run_cut checks the delivery against it, and two copies
+    of the expression would let the pin and the check disagree about the same cut.
+
+    Only the audio branch, because it is the only branch of build_command that pins no
+    -frames:v — everywhere else the frame count is the receipt, and a second one measured in
+    seconds could only contradict it.
+
+    Two answers, matching the two shapes that branch builds. A retimed cut is resampled to
+    play into its timeline slot, so the slot is its length; everything else delivers exactly
+    the source range it consumed.
+    """
+    if cut.track_type != "audio":
+        return None
+    if retime_to_timeline(cut, args, seq_fps):
+        return (cut.duration_seconds or 0.0) or None
+    return (cut.source_duration_seconds or 0.0) or None
+
+
 def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     # ⚠️ -progress IS THE RECEIPT, and it is on every branch because run_cut had no way to
     # tell a finished encode from a truncated one. `-frames:v N` is a LIMIT, not a promise:
@@ -3493,21 +3875,35 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     # reverse is already reversed. The half-frame -ss nudge has no frame to nudge onto.
     # A still is no longer a still — it is however many frames it occupied on screen.
     #
-    # -frames:v still pins the count, so a render that came back a frame long is
-    # trimmed here rather than quietly lengthening the clip. The one exception is a
-    # --fps override that REALLY resamples: the frame count is deliberately left to
-    # ffmpeg there, because pinning the sequence's own count at a different rate would
-    # change the clip's duration instead of preserving it. A --fps that matches the rate
-    # the render already carries is not that case — it emits no -r and keeps the pin.
+    # -frames:v pins the count on EVERY render command, so a render that came back a
+    # frame long is trimmed here rather than quietly lengthening the clip, and one that
+    # came back a frame short fails the count check in run_cut rather than shipping.
     if cut.render_path:
         cmd += ["-i", cut.render_path]
         # ⚠️ `fps=X`, NOT `-r X` — the same measured mis-mapping the source branch documents
         # below. MEASURED here too: a 30-frame (1 s) render under --render-dir --fps 24 came
         # out 26 frames / 1.083 s, 8% long, and reads 24 frames / 1.000 s with the filter.
-        _vf = ([f"fps={float(args.fps):.6f}"]
-               if forced_rate_resamples(cut, args, seq_fps) else [])
-        if not _vf:
-            cmd += ["-frames:v", str(max(1, cut.duration_frames))]
+        _res = forced_rate_resamples(cut, args, seq_fps)
+        _vf = ([f"fps={float(args.fps):.6f}:round=up"] if _res else [])
+        # ⚠️ CONVERTED, NOT DROPPED. This used to read `if not _vf:`, so a --fps that
+        # REALLY resamples left the render branch with no -frames:v at all — the one
+        # branch in the file with nothing bounding its output length. pinned_frame_count()
+        # then returned None and run_cut's got-vs-want check stood down. MEASURED on a
+        # 29.97 sequence at --fps 30: a render one frame SHORT of its range delivered 59
+        # frames into a 60-frame slot as `status=ok`, and one frame long delivered 61 —
+        # both inside RENDER_FRAME_SLACK (2), so the render check above passes them, and
+        # the same two renders WITHOUT --fps already failed and trimmed respectively.
+        # Under --render-audio the -t below happened to bound it; with the default silent
+        # render nothing did.
+        #
+        # Restated in OUTPUT frames exactly as the source branch does at the -frames:v
+        # below, because -frames:v counts frames AFTER the fps filter has resampled. The
+        # input rate is the RENDER's, not the camera's: Premiere writes the render at the
+        # sequence rate whatever the source was.
+        _in_fps = cut.render_fps or seq_fps or 0.0
+        _pin = (max(1, int(round(cut.duration_frames * float(args.fps) / _in_fps)))
+                if _res and _in_fps > 0 else max(1, cut.duration_frames))
+        cmd += ["-frames:v", str(_pin)]
         sf = scale_filter(args)
         if sf:
             _vf.append(sf)
@@ -3653,6 +4049,24 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
             while rem < 0.5:
                 chain.append("atempo=0.5"); rem /= 0.5
             chain.append(f"atempo={rem:.6f}")
+            # ⚠️ atempo's OUTPUT LENGTH IS NOT input/tempo, and nothing here used to bound
+            # it. Its WSOLA window swallows the tail at EVERY rate, measured on one click
+            # train: k=1.0 loses 1024 samples (21.3 ms), 0.75 loses 1664, 0.5 loses 2944
+            # (61.3 ms), 2.0 loses 576. So a 50% clip in a 2.0 s slot came back 1.938667 s
+            # while its PICTURE was pinned to exactly 60 frames and the manifest asserted
+            # 2.0 — the two drifted apart by 3% of the clip with nothing said. A no-op
+            # atempo=1.0 does it too, and retime_to_timeline() emits one for any audio
+            # clipitem whose file rate merely differs from the sequence's.
+            #
+            # ⚠️ THE PAD IS BOUNDED, and that is the whole design. `apad` alone would fill
+            # ANY shortfall with silence — including a source that ran out mid-range, which
+            # is exactly what the out_time receipt in run_cut exists to refuse. A quarter of
+            # a second covers the widest residue measured (61 ms) with room for a chained
+            # atempo, and leaves anything larger still short enough to fail the check.
+            _tgt = audio_target_seconds(cut, args, seq_fps)
+            if _tgt:
+                chain.append(f"apad=pad_dur={AUDIO_RETIME_PAD:.6f}")
+                chain.append(f"atrim=end={_tgt:.6f}")
         # Seek early, trim the lead off in the graph — see AUDIO_SEEK_LEAD. atrim goes FIRST
         # so areverse/atempo act on exactly the wanted range, and asetpts re-zeroes the
         # timestamps so the container starts at 0 rather than at the lead.
@@ -3703,7 +4117,7 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
             _out = float(getattr(args, "fps", None) or 0.0) or seq_fps
             _pin = (max(1, int(round(cut.duration_frames * _out / seq_fps)))
                     if seq_fps > 0 else max(1, cut.duration_frames))
-            vf.append(f"fps={_out:.6f}")
+            vf.append(f"fps={_out:.6f}:round=up")
         else:
             # A reverse with no retime resampled nothing, so --fps was silently dropped here
             # as well. `select` counts INPUT frames and runs before the resample, so only the
@@ -3711,7 +4125,7 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
             _out = float(getattr(args, "fps", None) or 0.0)
             _src = cut.source_fps or 0.0
             if _out > 0 and _src > 0 and abs(_out - _src) > FPS_EPS:
-                vf.append(f"fps={_out:.6f}")
+                vf.append(f"fps={_out:.6f}:round=up")
                 _pin = max(1, int(round(n_frames * _out / _src)))
             else:
                 _pin = max(1, n_frames)
@@ -3783,7 +4197,7 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     #
     # It goes in the SAME -filter:v as the scale, ahead of it — resampling after a scale
     # would resize frames that are about to be dropped.
-    _vf = ([f"fps={float(args.fps):.6f}"] if resample else [])
+    _vf = ([f"fps={float(args.fps):.6f}:round=up"] if resample else [])
     # Added only when it does something. At 100% this branch had no -filter:v at all and
     # still should not: an identity scale is a full decode-filter-encode pass that changes
     # nothing, and it would silently become the norm for every export.
@@ -4041,8 +4455,27 @@ def vo_contributions(cut: Cut, items: list[Cut], seq_fps: float) -> tuple[list[d
     for a in items:
         a_in = a.timeline_in_frames
         a_out = a.timeline_out_frames or (a_in + max(1, a.duration_frames))
-        start = max(a_in, c_in)
-        end = min(a_out, c_out)
+        # ⚠️ AN ITEM WHOSE MEDIA STARTS AFTER THE ITEM DOES. A clipitem with a NEGATIVE <in>
+        # occupies its whole timeline slot but has no samples for the head of it — Premiere
+        # plays nothing there. src_in used to be clamped to 0 on its own, leaving `at` and
+        # `dur` untouched, so the mix started the media at the item's timeline start instead:
+        # MEASURED with a click train on an item at timeline 0-2.0 s with <in> -12 (source
+        # -0.4..1.6), the first click landed at 0.001 s where the edit played it at 0.4, and
+        # a click at source 1.75 s the timeline never showed was mixed in at 1.75 s. The
+        # per-clip file for the same item was right (1.600000 s, source 0.0..1.6), so the mix
+        # and the clip it pairs with disagreed by the length of the negative head.
+        #
+        # Read TWO ways because this runs on items trim_to_whole_frames may or may not have
+        # reached — the mix is built after the clamp, but an item --tracks dropped from the
+        # cut list (kept here on purpose, see write_timeline_audio) never went through it.
+        # Before the clamp the head is the negative in-point; after it, it is the gap the
+        # clamp left between the slot and the shortened source range.
+        lead = max(0.0, -(a.source_in_seconds or 0.0))
+        if lead <= 0.0 and a.frames_trimmed:
+            lead = max(0.0, (a_out - a_in) / seq_fps - (a.source_duration_seconds or 0.0))
+        media_in = a_in + lead * seq_fps
+        start = max(media_in, float(c_in))
+        end = float(min(a_out, c_out))
         if end <= start:
             continue
         if not a.source_exists:
@@ -4058,8 +4491,11 @@ def vo_contributions(cut: Cut, items: list[Cut], seq_fps: float) -> tuple[list[d
         out.append({
             "path": a.source_path,
             # Where in the SOURCE the overlap begins: the item's own in-point plus however far
-            # into the item the overlap starts.
-            "src_in": max(0.0, a.source_in_seconds + (start - a_in) / seq_fps),
+            # into the item the overlap starts. Measured from where the MEDIA starts, not from
+            # where the item does — the two differ by `lead` above, and at media_in the source
+            # is at frame 0 whether the record still carries the negative in-point or the
+            # clamp has already pulled it up to zero.
+            "src_in": max(0.0, a.source_in_seconds) + (start - media_in) / seq_fps,
             "dur": (end - start) / seq_fps,
             # Where in the OUTPUT it goes. Silence everywhere else, which is the gap.
             "at": (start - c_in) / seq_fps,
@@ -4197,6 +4633,11 @@ PROBE_TIMEOUT = 25
 # added back ONCE to the estimate; multiplying it up with the content rate is what produced
 # the error.
 CONTAINER_FIXED = 512
+
+# What an audio-only delivery costs per second: the bitrate every audio branch of
+# build_command asks ffmpeg for (`-c:a aac -b:a 192k`). A ceiling, not a fit — see
+# estimate_bytes_for.
+AUDIO_ESTIMATE_BPS = 192_000.0
 
 # A still is probed whole rather than sampled (see size_probe). Bounded only so a
 # pathologically long one cannot stall a scan; its frames after the first are nearly
@@ -4764,29 +5205,57 @@ def trim_to_whole_frames(cuts: list[Cut], warnings: Optional[list] = None) -> in
     A tick-derived in-point almost never lands on a frame boundary, and only the END of the
     range is fractional in a way the timeline never used — so only the end moves DOWN.
 
-    ⚠️ THE HEAD FLOORS, AND THAT IS MEASURED AGAINST PREMIERE ITSELF. It used to ceil, on
-    the reasoning that the containing frame starts before the in-point. Premiere does not
-    agree: it DISPLAYS the frame that contains a fractional in-point, and its own render
-    export of frame 0 matched source frame 57 for an in-point of 57.7318 frames — floor,
-    8 times out of 8, where round matched 3 of 8 and ceil none. Ceiling started every
-    fractional-in-point cut one frame LATER than the frame the editor saw, which on the
-    reviewer's timeline was 7 of 20 clips.
+    ⚠️ THE HEAD RULE LIVES AT THE `first = math.ceil(...)` LINE BELOW, AND ONLY THERE. A
+    paragraph here used to argue the opposite — that the head floors — as the rationale of a
+    change that was made and then reverted on 26 Aug; the ceil beneath it has shipped since
+    3.62 and is the owner's ruling. Two statements of one rule is how a reader ends up
+    flipping the head back and silently moving every fractional-in-point cut by a frame,
+    so the dead one is gone rather than reconciled.
 
     ⚠️ APPLIED TO THE CUT, not inside build_command, and that is the whole reason it is a
     separate pass. The manifest reports source_consumed_frames as the file's label and verify.py
     checks the file against it; the filename carries the (in-out) range. Trimming only the ffmpeg
     command would have left all three describing a file that no longer matched.
 
-    Skipped for stills (no source frames to speak of), for audio (no frames at all) and for any
-    cut a trim would leave shorter than one frame — losing a clip entirely to a rounding rule
-    would be a worse answer than keeping its edges.
+    The whole-frame SNAP is skipped for stills (no source frames to speak of), for audio (no
+    frames at all) and for any cut a trim would leave shorter than one frame — losing a clip
+    entirely to a rounding rule would be a worse answer than keeping its edges. The frame-0
+    CLAMP is not skipped for audio: see the branch below.
     """
     e = 1e-4
     n_touched = 0
     clamped: list[str] = []
     for c in cuts:
         fps = c.source_fps or 0.0
-        if fps <= 0 or c.track_type == "audio" or c.media_kind == "still":
+        if c.track_type == "audio":
+            # ⚠️ THE FRAME-0 CLAMP RUNS FOR AUDIO TOO, AND ONLY THAT. Audio has no frames to
+            # snap to, which is why the whole-frame rule below skips it — but a negative
+            # <in> is not a rounding question, it is a range that starts before the media
+            # exists. build_command's audio branch already clamps it implicitly (a negative
+            # `lead` cancels the -ss and shortens the -t), so the FILE was right: 1.600000 s
+            # measured, clicks landing on source 0.0..1.6 exactly. The RECORD was not. It
+            # kept source_in_seconds -0.4 and source_duration_seconds 2.0 for a 1.6 s file,
+            # booked frames_trimmed 0, and named the clip in no warning — so the sheet's
+            # "cut length s" and "frames" columns overstated it by the negative head while
+            # the video cut beside it, with the identical shape, was clamped and reported.
+            #
+            # It is also what makes the out_time receipt in run_cut usable on this branch:
+            # checked against the unclamped 2.0 s, a correct 1.6 s delivery FAILS.
+            head = -c.source_in_seconds
+            if fps <= 0 or head <= e or c.source_duration_seconds - head <= e:
+                continue
+            clamped.append(c.clip_name or Path(c.source_path).name)
+            before = c.source_consumed_frames or consumed_frames(
+                c.source_in_seconds, c.source_duration_seconds, fps)
+            c.source_in_seconds = 0.0
+            c.source_in_frames = 0
+            c.source_duration_seconds = round(c.source_duration_seconds - head, 9)
+            c.source_consumed_frames = consumed_frames(
+                0.0, c.source_duration_seconds, fps)
+            c.frames_trimmed = max(0, before - c.source_consumed_frames)
+            n_touched += 1
+            continue
+        if fps <= 0 or c.media_kind == "still":
             continue
         in_f = c.source_in_seconds * fps
         out_f = (c.source_in_seconds + c.source_duration_seconds) * fps
@@ -4868,6 +5337,34 @@ def index_free(name: str) -> str:
     return m.group(1) if m else name
 
 
+def partial_name(name: str) -> str:
+    """The name an encode wears while it is still being written.
+
+    ⚠️ WRECKAGE MUST NOT WEAR A DELIVERY NAME. ffmpeg wrote straight to the delivered
+    filename, so every way an encode can end badly — a non-zero exit, --timeout, a frame
+    count short of the pin, the run being killed — left a half-written file sitting there
+    under the name the editor is about to hand over. MEASURED: six 1080p cuts at
+    --timeout 3 left six moov-less files of 15-16 MB each, and the folder is
+    indistinguishable from a finished one until something opens them. Now the encode
+    writes here and is os.replace()d onto the delivery name only after the frame check
+    passes, so the delivery name appears complete or not at all.
+
+    `01_(00.00-20.00)_big.mp4` -> `.01_(00.00-20.00)_big.part.mp4`. Three properties, each
+    load-bearing:
+
+    * a LEADING DOT. build_resume_index skips dotfiles on its filename route, the
+      end-of-run stray advisory matches CUT_FILE_RE which needs a leading digit, and the
+      panel's clashCount() skips `.` names too — so a partial left behind by a killed run
+      is invisible to all three rather than adoptable by any of them.
+    * the DELIVERY EXTENSION LAST. ffmpeg picks its muxer from the output suffix, and a
+      name ending `.mp4.part` gets it no muxer at all.
+    * the SAME DIRECTORY as the delivery. os.replace is only atomic within one filesystem,
+      and an output folder is regularly on a different volume from any temp dir.
+    """
+    p = Path(name)
+    return f".{p.stem}.part{p.suffix}"
+
+
 def build_resume_index(out_dir: Path) -> dict:
     """What the output folder ALREADY holds, keyed by something that does not renumber.
 
@@ -4894,13 +5391,27 @@ def build_resume_index(out_dir: Path) -> dict:
     # `ids` and for the same reason: a skip has to be able to adopt the name that satisfied
     # it, and on a folder written before cut_id existed the filename is all there is.
     suffix_name: dict[str, str] = {}
+    # What the folder's OWN manifest recorded as `failed`, held as INDEX-FREE names. Kept
+    # out of both routes below — see the status gate for why — and counted for the console
+    # line so the re-cut is explained rather than just happening.
+    #
+    # ⚠️ INDEX-FREE, NOT THE EXACT NAME, and the difference is a route wreckage still got
+    # through. A `--pick` run publishes a manifest of the PICKED subset only, and its
+    # enumerate() renumbers those rows from 01 — so the panel's per-row Retry of a failed
+    # clip recorded it as `01_(04.00-05.00)_CAM_B.mp4` while the wreckage on disk still wore
+    # `03_(04.00-05.00)_CAM_B.mp4`. Matched on the exact name, nothing in the folder was
+    # recognised and the next full --resume adopted the 03_ file. The index is this run's
+    # accident; everything after it is the deliverable, which is the reason index_free()
+    # exists at all. Being wrong here costs one re-encode; being wrong the other way ships
+    # the file.
+    wrecked: set[str] = set()
     how = "nothing"
     settings: dict = {}
     try:
         names = [p for p in out_dir.iterdir() if p.is_file()]
     except OSError:
         return {"ids": ids, "suffix": {}, "suffix_name": {}, "how": "unreadable",
-                "files": 0, "settings": settings}
+                "files": 0, "failed": 0, "settings": settings}
 
     mf = out_dir / "manifest.json"
     if mf.exists():
@@ -4909,7 +5420,28 @@ def build_resume_index(out_dir: Path) -> dict:
             settings = data.get("settings") or {}
             for c in (data.get("clips") or []):
                 cid, out = str(c.get("cut_id") or ""), str(c.get("output_file") or "")
-                if not cid or not out:
+                if not out:
+                    continue
+                # ⚠️ THE RECORDED STATUS, NOT JUST THE BYTES. Until this, a row was admitted
+                # on `exists() and st_size > 0` and the folder's own verdict on it was never
+                # read — so every way an encode can end badly published itself as finished on
+                # the next run. MEASURED on six 1080p cuts at --timeout 3: all six FAIL, all
+                # six moov-less files left on disk at 15-16 MB (ffprobe: `moov atom not
+                # found`), and `--resume` then reported `6 clip(s) matched by id`, six HAVE,
+                # `Done: 0 written, 0 failed … 6 already there`, a manifest of six
+                # skipped_existing rows and completeness `all 6 cuts on the timeline`. The
+                # same on the frame-count route: a cut that wrote 29 of 30 frames failed,
+                # was left on disk at 404086 bytes, and came back certified.
+                #
+                # `failed` is the only status that can follow an ffmpeg invocation, so it is
+                # the only one whose name can be wearing wreckage; the rest (missing_source,
+                # unsupported, no_render, render_mismatch, no_audio, dry_run) never reached
+                # the encoder. Naming those as wreckage too would make a --dry-run into a
+                # finished folder re-encode all of it.
+                if str(c.get("status") or "") == "failed":
+                    wrecked.add(index_free(out))
+                    continue
+                if not cid or str(c.get("status") or "") not in ("ok", "skipped_existing"):
                     continue
                 # ⚠️ THE NAME, NOT JUST THE ID — because cut_id is a digest of the SOURCE
                 # cut and carries nothing about the deliverable. Change --container (or tick
@@ -4920,24 +5452,55 @@ def build_resume_index(out_dir: Path) -> dict:
                 # naming 19 .mov files that do not exist while orphaning the 19 .mp4 that do.
                 # run_cut compares the recorded name with the one it is about to write.
                 f = out_dir / out
-                if f.exists() and f.stat().st_size > 0 and cid not in ids:
-                    ids[cid] = out
+                if not (f.exists() and f.stat().st_size > 0) or cid in ids:
+                    continue
+                # ⚠️ AND THE FILE HAS TO STILL BE THE ONE THAT ROW DESCRIBES. The status gate
+                # above only knows how the previous run ENDED. It cannot know what happened
+                # to the file afterwards, and the audit measured exactly that gap: a clip
+                # from a finished run, truncated on disk to 20,000 bytes (ffprobe:
+                # `Invalid NAL unit size`, `partial file`, no frame count at all), was still
+                # reported HAVE and republished as skipped_existing with frame_exact true,
+                # because its row said ok and its size was merely non-zero. Truncated
+                # copies, interrupted syncs to a shared drive and half-restored backups all
+                # land here, and this is the folder people re-export into after fixing one.
+                #
+                # The recorded size is free to compare and catches all of them. It is not a
+                # frame count: matching bytes on a file that decodes differently would need
+                # a probe per skipped clip, and the delivered-count check already runs on
+                # everything this route hands back for re-encoding. A row written by a
+                # schema that predates the field has nothing to compare, so it is admitted
+                # as before — the old behaviour, not a re-encode of every old folder.
+                want_bytes = c.get("output_bytes")
+                if (isinstance(want_bytes, (int, float)) and not isinstance(want_bytes, bool)
+                        and int(want_bytes) > 0 and f.stat().st_size != int(want_bytes)):
+                    wrecked.add(index_free(out))
+                    continue
+                ids[cid] = out
             if ids:
                 how = "manifest"
         except (OSError, ValueError):
             pass
 
+    failed_files = 0
     for f in names:
         if f.name.startswith(".") or f.suffix.lower() in (".csv", ".json", ".mp3"):
             continue
         if f.stat().st_size <= 0:
+            continue
+        # ⚠️ THE FILENAME ROUTE NEEDS THE SAME GATE, and a fix that patched only the id route
+        # would close nothing: a folder whose manifest is gone (a killed run writes none)
+        # falls through to here, and so does every clip the id route just refused. Keeping a
+        # wrecked name out of the COUNT as well as out of the index is the point — leaving it
+        # in would also make the one good file sharing its index-free name look ambiguous.
+        if index_free(f.name) in wrecked:
+            failed_files += 1
             continue
         suffix_count[index_free(f.name)] = suffix_count.get(index_free(f.name), 0) + 1
         suffix_name.setdefault(index_free(f.name), f.name)
     if how == "nothing" and suffix_count:
         how = "filename"
     return {"ids": ids, "suffix": suffix_count, "suffix_name": suffix_name, "how": how,
-            "files": len(suffix_count), "settings": settings}
+            "files": len(suffix_count), "failed": failed_files, "settings": settings}
 
 
 # What a run re-encodes rather than skips when the folder was written with them set
@@ -5058,6 +5621,25 @@ def progress_frames(stdout: str) -> Optional[int]:
     return int(m[-1]) if m else None
 
 
+# ⚠️ THE SAME RECEIPT, FOR THE BRANCH WITH NO FRAMES TO COUNT. -progress emits out_time_ms
+# beside frame=, and it was already on stdout and unread: the engine-shaped command for a
+# 2.0 s audio cut whose source ends 1.0 s in prints `out_time_ms=1000000` where the control
+# prints `out_time_ms=2000000`. `N/A` appears in the block ffmpeg writes before the first
+# packet, so the pattern takes digits only and the LAST match wins, exactly as frame= does.
+_PROGRESS_TIME_RE = re.compile(r"^out_time_ms=\s*(\d+)\s*$", re.M)
+
+
+def progress_seconds(stdout: str) -> Optional[float]:
+    """How many seconds of output ffmpeg's own -progress stream ended on, or None.
+
+    None rather than 0.0 when there is no usable out_time_ms at all, for the reason
+    progress_frames() returns None: "no evidence" and "nothing was written" are different
+    answers, and only one of them is a reason to fail a clip.
+    """
+    m = _PROGRESS_TIME_RE.findall(stdout or "")
+    return int(m[-1]) / 1_000_000.0 if m else None
+
+
 def output_stream_count(path: Path) -> int:
     """How many media streams the delivered file actually holds.
 
@@ -5110,8 +5692,17 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
             return cut
     if cut.media_kind == "unsupported" and not cut.render_path:
         cut.status = "unsupported"
-        cut.error = (f"{Path(cut.source_path).suffix} is a project/comp file "
-                     f"(Dynamic Link), not decodable media — render it first")
+        # ⚠️ A CLIP WITH NO PATH IS NOT A DYNAMIC LINK COMP. A title, a graphic, an
+        # adjustment layer or a nest carries no <pathurl>, so Path("").suffix is "" and
+        # this read " is a project/comp file (Dynamic Link), not decodable media" —
+        # a sentence starting with a space, naming the wrong thing. It is not only on
+        # screen: it is the error column in manifest.csv, which the panel's report reads.
+        if cut.source_path:
+            cut.error = (f"{Path(cut.source_path).suffix} is a project/comp file "
+                         f"(Dynamic Link), not decodable media — render it first")
+        else:
+            cut.error = ("no media file (a title, a graphic, an adjustment layer or a "
+                         "nest) — render it first")
         return cut
     if not cut.source_exists and not cut.render_path:
         cut.status = "missing_source"
@@ -5190,9 +5781,9 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
     # is keyed by cut_id, with the index-free filename as a fallback for older folders — and
     # an ambiguous fallback key deliberately skips nothing.
     # ⚠️ recut_all is the settings-drift verdict from main(): the folder's pixels were
-    # made under different encode settings, so NOTHING in it may be skipped — including
-    # by the bare `out_path.exists()` fallback below, which would otherwise keep every
-    # one of the old files under the new settings' manifest.
+    # made under different encode settings, so NOTHING in it may be skipped — and with the
+    # index emptied there is now nothing left that could skip one, which is the point of
+    # the bare-existence fallback being gone (see below).
     if getattr(args, "resume", False) and not (
             getattr(args, "resume_index", None) or {}).get("recut_all"):
         idx = getattr(args, "resume_index", None) or {}
@@ -5212,10 +5803,18 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
         # while still catching a deliverable that moved. Requiring this run's numbered file
         # to exist instead re-breaks renumbering — measured, it fails the suite's own
         # "skips what run 1 already wrote, despite every index shifting" check.
+        #
+        # ⚠️ AND THERE IS NO `out_path.exists()` FALLBACK, WHICH IS THE THIRD SITE OF THE
+        # SAME DEFECT. A bare existence branch used to sit between these two, and because
+        # it ran BEFORE the ambiguity rule it overrode every judgement the index had made:
+        # measured on a run killed mid-encode, `--resume` printed `0 clip(s) matched by id,
+        # 1 file(s) already in the folder, 1 filename(s) ambiguous, re-cut` and then kept
+        # all six part-written files anyway. It also re-admitted a name the manifest had
+        # just recorded as failed. Nothing legitimate needs it: a recorded name that
+        # matches is branch one, an unrecorded unique name is branch two, and anything else
+        # costs seconds to re-encode and cannot cost the editor a wrong file.
         _recorded = (idx.get("ids") or {}).get(cut.cut_id or "")
         if _recorded and index_free(_recorded) == index_free(out_path.name):
-            done = True
-        elif out_path.exists() and out_path.stat().st_size > 0:
             done = True
         elif not _recorded:
             if (idx.get("suffix") or {}).get(index_free(out_path.name)) == 1:
@@ -5257,13 +5856,23 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
                 cut.output_bytes = out_path.stat().st_size
             return cut
 
-    cmd = build_command(cut, out_path, args, seq_fps)
+    # ⚠️ ENCODE TO A HIDDEN NAME, PUBLISH BY RENAME. Everything below writes to `part_path`
+    # and the delivery name is claimed by one os.replace() after the checks pass — see
+    # partial_name() for why the name is shaped the way it is. Unlinked first because a run
+    # killed mid-encode leaves its partial behind, and ffmpeg appending to somebody else's
+    # leftover is the one outcome worse than re-encoding.
+    part_path = out_path.with_name(partial_name(out_path.name))
+    try:
+        part_path.unlink()
+    except OSError:
+        pass
+    cmd = build_command(cut, part_path, args, seq_fps)
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=args.timeout)
         if r.returncode != 0:
             cut.status = "failed"
             cut.error = (r.stderr or "").strip()[:400]
-        elif not out_path.exists() or out_path.stat().st_size == 0:
+        elif not part_path.exists() or part_path.stat().st_size == 0:
             cut.status = "failed"
             cut.error = "ffmpeg produced an empty file"
         else:
@@ -5284,9 +5893,10 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
             #     of 48, `Done: 19 written, 0 failed`.
             #
             # So the count is authoritative wherever a count was pinned, and ffmpeg's own
-            # words are the fallback where none was (the audio branch, the still branch,
-            # and a render under a forced rate, all of which deliberately emit no
-            # -frames:v). Deliberately NOT the other way round: at -loglevel error a full
+            # words are the fallback where none was (the audio branch and the still branch,
+            # which deliberately emit no -frames:v — the render branch under a forced rate
+            # used to be a third and is now pinned like the rest, see build_command).
+            # Deliberately NOT the other way round: at -loglevel error a full
             # --tracks all --audio export was measured at 0 bytes of stderr on 24 of 24
             # invocations, but that is fixture media — a benign error-level line on real
             # media must not be able to reject a clip the frame count says is complete.
@@ -5306,16 +5916,30 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
             got = progress_frames(r.stdout)
             err = (r.stderr or "").strip()
             counted = want is not None and got is not None
+            # An audio cut has no frame to count, so its receipt is measured in seconds off
+            # the SAME -progress stream — see progress_seconds and AUDIO_SHORT_TOLERANCE.
+            # Without it the only audio delivery that could fail was one wholly past the end
+            # of its media (caught as a streamless file); one that merely RAN OUT mid-range
+            # was written short and reported ok, and the mix built from it went silent for
+            # the missing part with nothing said.
+            want_s = audio_target_seconds(cut, args, seq_fps)
+            got_s = progress_seconds(r.stdout)
+            timed = want_s is not None and got_s is not None
             if counted and got != want:
                 cut.status = "failed"
                 cut.error = (f"ffmpeg exited 0 but wrote {got} frame(s) where {want} "
                              f"were asked for ({got - want:+d}) — the source is shorter "
                              f"than the cut, or unreadable")
+            elif timed and got_s < want_s - AUDIO_SHORT_TOLERANCE:
+                cut.status = "failed"
+                cut.error = (f"ffmpeg exited 0 but wrote {got_s:.3f}s of audio where "
+                             f"{want_s:.3f}s were asked for ({got_s - want_s:+.3f}s) — the "
+                             f"source is shorter than the cut, or unreadable")
             elif not counted and err:
                 cut.status = "failed"
                 cut.error = ("ffmpeg exited 0 but reported: "
                              + err.splitlines()[-1][:300])
-            elif not counted and output_stream_count(out_path) == 0:
+            elif not counted and output_stream_count(part_path) == 0:
                 cut.status = "failed"
                 cut.error = ("ffmpeg exited 0 but the file holds no media streams — "
                              "nothing was encoded")
@@ -5323,13 +5947,37 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
                 cut.status = "ok"
                 # The real number, so the report shows what was written rather than what
                 # was predicted. The estimate is for deciding; this is for checking.
-                cut.output_bytes = out_path.stat().st_size
+                cut.output_bytes = part_path.stat().st_size
     except subprocess.TimeoutExpired:
         cut.status = "failed"
         cut.error = f"ffmpeg timed out after {args.timeout}s"
     except Exception as e:
         cut.status = "failed"
         cut.error = str(e)[:400]
+
+    # ⚠️ THE DELIVERY NAME IS CLAIMED HERE AND NOWHERE ELSE. os.replace() is atomic inside
+    # one directory, so the name a later --resume, the panel and the editor all read either
+    # holds a clip that passed every check above or holds nothing at all. Every other exit
+    # — non-zero rc, the frame count short of the pin, --timeout, an exception — deletes the
+    # partial instead, which is what makes the whole run reproducible: the failure the
+    # editor is told about is the state the folder is actually in.
+    #
+    # A rename that itself fails (the volume filled between the encode and here, the folder
+    # went away with the network) FAILS THE CLIP rather than being swallowed. There is no
+    # file under the delivery name in that case, and a row saying `ok` about one would be
+    # the same lie this whole change exists to end.
+    if cut.status == "ok":
+        try:
+            os.replace(str(part_path), str(out_path))
+        except OSError as e:
+            cut.status = "failed"
+            cut.error = f"encoded but could not be put in place: {e}"
+            cut.output_bytes = 0
+    if cut.status != "ok":
+        try:
+            part_path.unlink()
+        except OSError:
+            pass
     return cut
 
 
@@ -5877,6 +6525,39 @@ def sheet_header_rows(tl: Timeline, args) -> list:
     return rows
 
 
+# A cell a spreadsheet would evaluate instead of showing. Sheets, Excel and Numbers all
+# start a formula on a leading =; the other three are the characters those importers have
+# historically also treated as a formula lead-in.
+_SHEET_FORMULA_LEAD = ("=", "+", "-", "@")
+
+
+def sheet_cell(v):
+    """One cell for clips.csv / manifest.csv, with a formula lead-in defused.
+
+    ⚠️ THE CLIP NAME IS WRITTEN STRAIGHT INTO THE SHEET. Measured on a copy of the fixture
+    whose clip was renamed `=1+1 formula, danger`: clips.csv row 20 and manifest.csv row 2
+    both carried it verbatim, so opening the sheet shows `2` where the clip name belongs.
+    The name is the editor's own Premiere clip, not a stranger's, so this is a sheet that
+    lies rather than an attack — but a delivery note nobody can read the names off is still
+    a broken delivery note.
+
+    ONLY the two CSVs are guarded. manifest.json is the machine copy the panel and
+    --resume read, and prefixing there would break the join between the two.
+
+    Numbers are left alone, both the numeric objects the writers pass down and a string
+    that is only a number: `-0.5` is a value, not a formula, and quoting it would stop the
+    sheet treating the column as numeric at all.
+    """
+    if not isinstance(v, str) or not v.startswith(_SHEET_FORMULA_LEAD):
+        return v
+    try:
+        float(v)
+        return v
+    except ValueError:
+        pass
+    return "'" + v
+
+
 def write_sheet(tl: Timeline, outdir: Path, args) -> Path:
     """A short, readable sheet: what this export is, then which file came from where.
 
@@ -5890,25 +6571,50 @@ def write_sheet(tl: Timeline, outdir: Path, args) -> Path:
     one.
     """
     path = outdir / "clips.csv"
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerows(sheet_header_rows(tl, args))
-        w.writerow([label for label, _ in SHEET_COLUMNS])
-        for c in tl.cuts:
-            row = []
-            for label, attr in SHEET_COLUMNS:
-                if attr is None:
-                    row.append(Path(c.source_path).name)
-                    continue
-                v = getattr(c, attr)
-                # Seconds are held at full precision in memory because the ffmpeg seek
-                # needs it; a sheet meant for reading does not.
-                row.append(round(v, 3) if isinstance(v, float) else v)
-            w.writerow(row)
+    try:
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerows([[sheet_cell(v) for v in r] for r in sheet_header_rows(tl, args)])
+            w.writerow([label for label, _ in SHEET_COLUMNS])
+            for c in tl.cuts:
+                row = []
+                for label, attr in SHEET_COLUMNS:
+                    if attr is None:
+                        row.append(sheet_cell(Path(c.source_path).name))
+                        continue
+                    v = getattr(c, attr)
+                    # Seconds are held at full precision in memory because the ffmpeg seek
+                    # needs it; a sheet meant for reading does not.
+                    row.append(sheet_cell(round(v, 3) if isinstance(v, float) else v))
+                w.writerow(row)
+    except OSError:
+        drop_half_written(path)
+        raise
     return path
 
 
+def drop_half_written(path: Path) -> None:
+    """Remove a manifest file a failed write only got part of the way through.
+
+    A destination that fills mid-write leaves a file that opens, parses as far as it goes,
+    and describes a fraction of the export while looking whole. No file at all is the
+    honest outcome, and the run says so on the way out.
+    """
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
 def write_manifest(tl: Timeline, outdir: Path, args) -> tuple[Path, Path, Path]:
+    """The three files that describe the export. Raises OSError if one cannot be written.
+
+    Deliberately still RAISES rather than swallowing: a manifest is a deliverable, not an
+    advisory, which is the opposite of the strays check that catches everything so it
+    cannot fail a completed export. Callers turn it into their own kind of failure —
+    main() into a one-line exit, the browser GUI into a message in its own log.
+    """
     outdir.mkdir(parents=True, exist_ok=True)
     rows = [readable(c) for c in tl.cuts]
     for r in rows:
@@ -5916,18 +6622,55 @@ def write_manifest(tl: Timeline, outdir: Path, args) -> tuple[Path, Path, Path]:
 
     csv_path = outdir / "manifest.csv"
     if rows:
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            w.writeheader()
-            w.writerows(rows)
+        try:
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                w.writeheader()
+                w.writerows([{k: sheet_cell(v) for k, v in r.items()} for r in rows])
+        except OSError:
+            drop_half_written(csv_path)
+            raise
 
     json_path = outdir / "manifest.json"
     doc = export_summary(tl, args)
     doc["markers"] = tl.markers
     doc["clips"] = [readable(c) for c in tl.cuts]
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(doc, f, indent=2)
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2)
+    except OSError:
+        drop_half_written(json_path)
+        raise
     return csv_path, json_path, write_sheet(tl, outdir, args)
+
+
+def write_manifest_or_exit(tl: Timeline, outdir: Path, args) -> tuple[Path, Path, Path]:
+    """write_manifest, with a write that fails said in one line instead of a traceback.
+
+    ⚠️ THIS USED TO END A FINISHED EXPORT IN A RAW TRACEBACK. Measured: a scan whose --out
+    already held a DIRECTORY called manifest.json printed the whole summary, then
+    `IsADirectoryError: [Errno 21] Is a directory: …/manifest.json` out of write_manifest,
+    over a folder holding manifest.csv and no clips.csv. The hand-made directory is only
+    the cheapest way to stage it; the shape that reaches this shop is a destination that
+    fills or unmounts while the clips are being written.
+
+    The exit stays non-zero — the cut list is a deliverable and its absence must be a
+    failure — but the clips are on disk and --resume reclaims them, so the message says so
+    rather than leaving the editor to guess whether the export has to be run again.
+    """
+    try:
+        return write_manifest(tl, outdir, args)
+    except OSError as e:
+        done = sum(1 for c in tl.cuts if getattr(c, "status", "") == "ok")
+        # The three files are written in turn, so an error partway leaves some of them
+        # absent and any earlier run's copies looking current. Naming that is cheaper than
+        # deleting files that may be the only record of anything.
+        raise SystemExit(
+            f"error: the cut list could not be written to {outdir} ({e}). This folder's "
+            f"cut list is incomplete — do not read it as a finished export. "
+            + (f"The {done} clip(s) this run already encoded are still there, so re-run "
+               f"with --resume once the destination is writable and they will not be cut "
+               f"again." if done else "No clips were written either."))
 
 
 # --------------------------------------------------------------------------
@@ -5997,7 +6740,13 @@ def cli_update() -> int:
     if info is None:
         print(f"  You are on the newest release ({VERSION}).")
         return 0
-    print(f"\n  {info['version']} is available.")
+    # The same version being offered back is the repair path, not a new release, and
+    # saying "3.71 is available" to someone already running 3.71 reads as a bug.
+    if str(info.get("version")) == VERSION:
+        print(f"\n  {VERSION} is installed, but its Premiere panel was not finished last "
+              f"time. Running the update again re-copies it.")
+    else:
+        print(f"\n  {info['version']} is available.")
     if info.get("notes"):
         print(f"  {info['notes']}")
     print(f"  Files: {', '.join(info.get('files') or UPDATE_FILES)}")
@@ -6011,6 +6760,11 @@ def cli_update() -> int:
         print("  Restart the tool to run the new code."
               if detail.get("restart_needed", True)
               else "  Nothing to restart — the next run uses the new code.")
+        # ok:true still means the ENGINE is updated. When the panel copy failed it is not,
+        # and that must not be left as a tail on a success line nobody reads to the end.
+        if detail.get("panel_error"):
+            print(f"  !! The Premiere panel was NOT updated: {detail['panel_error']}")
+            print("     This check will keep offering the same version until it lands.")
     return 0 if ok else 1
 
 
@@ -6271,6 +7025,10 @@ def main():
             "panel_dir": str(cep_extensions_dir() / PANEL_ID),
             "bundled": is_bundled_install(),
             "source_checkout": (install_dir() / ".git").exists(),
+            # The version whose panel copy did not finish, if there is one. It is why
+            # `update` can name the version already installed: this is a repair offer, not
+            # a new release, and a front end that says so spares the user the confusion.
+            "panel_repair": panel_repair_pending(),
         }))
         return
 
@@ -6294,7 +7052,11 @@ def main():
                           # True only when a PANEL file actually changed. A cut-logic-only
                           # release is live for the next export with no restart at all.
                           "restart_needed": detail.get("restart_needed", True),
-                          "changed": detail.get("changed", [])}))
+                          "changed": detail.get("changed", []),
+                          # ok true with panel_error set means the ENGINE updated and the
+                          # panel did not — the one case where a success banner would be
+                          # telling the editor to restart into a panel that is not there.
+                          "panel_error": detail.get("panel_error")}))
         return
 
     for tool in ("ffmpeg", "ffprobe"):
@@ -6305,6 +7067,17 @@ def main():
         interactive_setup(args)
     if not args.xml.is_file():
         sys.exit(f"error: {args.xml} not found")
+
+    # ⚠️ --out THAT IS AN EXISTING FILE ENDED IN A TRACEBACK, and only after the whole
+    # scan summary had printed. Measured: `-o <a file>` printed the estimate, the warnings
+    # and the missing-media list, then `FileExistsError: [Errno 17] File exists` out of
+    # `args.out.mkdir(...)`, rc 1. Nothing was written either way, so this costs the user
+    # nothing but a page of Python. Said here, before the read, because the answer does not
+    # depend on anything the read finds out. The panel cannot reach this — it creates the
+    # folder itself before spawning the engine — so this is the hand-typed CLI case.
+    if args.out.exists() and not args.out.is_dir():
+        sys.exit(f"error: --out {args.out} is a file, not a folder. Give a folder name — "
+                 f"it is created if it does not exist.")
 
     remaps = []
     for r in args.remap:
@@ -6539,8 +7312,16 @@ def main():
         n_split = split_transition_overlaps(tl.cuts, tl.sequence_fps)
         args.transitions_split = n_split
         if n_split:
-            print(f"\n  split {n_split} cross-dissolve overlap(s) at the midpoint — no "
-                  f"two cuts hold the same frame")
+            # ⚠️ WHAT IT MOVED, NOT A CLAIM ABOUT THE WHOLE LIST. It used to end "— no two
+            # cuts hold the same frame", which the run itself can contradict six lines
+            # later: the split walks CONSECUTIVE pairs and leaves a boundary alone when
+            # either side would come out shorter than a frame, so a cut contained inside
+            # another survives it. On a fixture holding one contained cut the same console
+            # printed "split 1 ... no two cuts hold the same frame" and then "2 pair(s) of
+            # cuts share 30 frame(s)". (0 residual pairs on 91 real exports — Premiere does
+            # not write that shape — so this is the sentence being wrong, not the split.)
+            print(f"\n  split {n_split} cross-dissolve overlap(s) at the midpoint — "
+                  f"neither side of those boundaries holds the other's frames now")
 
     # ⚠️ MARKED BEFORE --ext, NOT AFTER. This block used to sit ~65 lines below the --ext
     # filter, which reads `render_planned` — so the flag was ALWAYS False when the filter
@@ -6621,6 +7402,10 @@ def main():
         before = len(tl.cuts)
         tl.cuts = [c for c in tl.cuts if pick_matches(c, want_keys)]
         args.picked = len(tl.cuts)
+        # Remembered for the "nothing to cut" exit far below: a pick file written against
+        # an older cut list is the one way a healthy timeline full of clipitems ends the
+        # run with no cuts, and the generic hint sends the reader to --tracks instead.
+        args.pick_emptied = bool(before and not tl.cuts)
         print(f"  --pick: kept {len(tl.cuts)} of {before} cuts")
         missing = unmatched_picks(want_keys, tl.cuts)
         if missing > 0:
@@ -6664,7 +7449,8 @@ def main():
         # against a rate the encode will never see. Interpret Footage ("assume this frame
         # rate") makes Premiere declare a rate that is deliberately not the file's, and
         # VFR media differs routinely. Recomputed after the probe; see below.
-        c.frame_exact = not forced_rate_resamples(c, args, tl.sequence_fps)
+        c.frame_exact = (not records_a_rate(c)
+                         or not forced_rate_resamples(c, args, tl.sequence_fps))
 
     # ⚠️ THE COST OF --transitions ignore, ON THE RECORD AS A NUMBER. Measured on the final
     # cut list, after every filter, so it describes the folder that is about to be written
@@ -6696,10 +7482,50 @@ def main():
             + ". All kept, but they share a render filename and one row in the panel")
     args.overlap_pairs, args.overlap_frames = overlapping_cut_frames(tl.cuts)
     if args.overlap_pairs:
+        # ⚠️ THE ADVICE IS ONLY ADVICE WHEN THE FLAG IS OFF. Counted AFTER the split above,
+        # so with --transitions split these pairs are what SURVIVED it — and telling the
+        # reader to pass a flag they already passed sends them looking for a mistake they
+        # did not make. The split is also gated on render mode (see its call site): in
+        # source mode it never runs, which is where a run with the flag set still reports
+        # every pair. Measured on a four-clip fixture with a contained cut: source mode
+        # printed 3 pair(s) under a flag that had done nothing, render mode printed 2
+        # after splitting 1.
+        if getattr(args, "transitions", "ignore") != "split":
+            _advice = ("--transitions split moves each boundary to the middle of the "
+                       "overlap")
+        elif (getattr(args, "render_planned", False)
+                or getattr(args, "render_dir", None)):
+            # The same predicate the split's own call site uses, not the number of
+            # boundaries it moved: it can legitimately move none and still be the reason
+            # these pairs are here.
+            _advice = ("these are what --transitions split left: it moves the boundary "
+                       "between CONSECUTIVE cuts, and leaves one alone when either side "
+                       "would come out shorter than a frame")
+        else:
+            _advice = ("--transitions split is already set, but it only moves boundaries "
+                       "in render mode — in source mode each cut is the clipitem's own "
+                       "in/out")
         tl.warnings.append(
             f"{args.overlap_pairs} pair(s) of cuts share {args.overlap_frames} frame(s) "
-            f"in total (cross-dissolves). --transitions split moves each boundary to the "
-            f"middle of the overlap")
+            f"in total (cross-dissolves). " + _advice)
+
+    # ⚠️ NAMED, NOT DROPPED, and that is the measured half of this. A clip parked past the
+    # sequence's declared end is normally an outtake pushed off the end of the edit — but
+    # <duration> is not an end-of-edit marker in every context: in one real export a nested
+    # sequence declares 242 frames while its own enabled content runs to 444, so a bound
+    # that DROPPED these would delete finished material wherever that shape is reached.
+    # Nothing compared the two before this, so a 500-560 outtake on a 300-frame sequence
+    # was delivered as a numbered clip of the edit with warnings [].
+    if tl.sequence_duration_frames > 0:
+        _past = [c for c in tl.cuts
+                 if c.timeline_in_frames >= tl.sequence_duration_frames]
+        _parked = sorted({c.clip_name for c in _past})
+        if _past:
+            tl.warnings.append(
+                f"{len(_past)} cut(s) start after the sequence's declared end "
+                f"({frames_to_tc(tl.sequence_duration_frames, tl.sequence_fps)}) — parked "
+                f"past the edit rather than in it, and cut anyway: "
+                + ", ".join(_parked[:4]) + (", …" if len(_parked) > 4 else ""))
 
     print(f"{NAME} {VERSION}")
     print(f"  sequence : {tl.sequence_name}  @ {tl.sequence_fps:g} fps")
@@ -6748,6 +7574,14 @@ def main():
         print(f"  ++ {n}")
 
     if not tl.cuts:
+        # The pick file is checked first because it is the only filter that can empty a
+        # timeline the reader can SEE is full: the run has already printed "--pick: kept 0
+        # of 21 cuts" and named the unmatched selections, and then sent them to --tracks
+        # and to "confirm the XML contains clipitems", neither of which is the problem.
+        if getattr(args, "pick_emptied", False):
+            sys.exit(f"No cuts left: nothing in {Path(args.pick).name} matches a clip on "
+                     f"this timeline. The selections were written against a different cut "
+                     f"list — read the timeline again and re-tick.")
         sys.exit("No cuts found. Check --tracks, or confirm the XML contains clipitems.")
 
     if not args.no_probe:
@@ -6774,7 +7608,8 @@ def main():
         # exported at --fps 30, was recorded frame_exact=true beside source_fps 24.0 while
         # the encode emitted `-r 30` and duplicated 12 of 60 frames.
         for c in tl.cuts:
-            c.frame_exact = not forced_rate_resamples(c, args, tl.sequence_fps)
+            c.frame_exact = (not records_a_rate(c)
+                             or not forced_rate_resamples(c, args, tl.sequence_fps))
         # OPT-IN. Encoding a second of every clip is the accurate way to size an export and
         # it is the slow way: on the fixture a scan goes 0.21s -> 0.99s, and on media behind
         # Google Drive it is far worse. The default is estimate_bps(), which reads metadata,
@@ -6849,6 +7684,38 @@ def main():
                   f"file {c.source_fps:g} fps")
         print("     Ranges are right; lengths are unverified.")
 
+    # ⚠️ VARIABLE-RATE MEDIA, NAMED RATHER THAN CUT IN SILENCE. Every length this tool
+    # promises rests on frames being evenly spaced: -frames:v pins a COUNT, and the count is
+    # turned back into a duration at one rate. On a source whose frames are not evenly
+    # spaced that sum is wrong at both ends. MEASURED on a 30 fps file with one frame
+    # removed (r 30/1, avg 9000/301): a 30-frame cut across the gap delivered its 30 frames
+    # — so the pin was satisfied and the count check passed — but the gap survived into the
+    # output timestamps, the file spans 1.033008 s of a 1.000 s timeline slot, and its last
+    # picture is the frame AFTER the out-point. The control cut, clear of the gap, was
+    # 1.000000. Nothing said so: status ok, frame_exact true, notes empty, warnings [].
+    #
+    # A WARNING, NOT A REFUSAL, and deliberately: refusing would stop cutting a whole class
+    # of real footage (screen captures, phone video) on a threshold nobody here has measured
+    # against a real client's rushes, and the delivery today is a third of a frame out, not
+    # unusable. 0.2% is the same gap the REINTERPRETED check above treats as a real
+    # disagreement rather than float noise.
+    vfr = [c for c in tl.cuts
+           if not c.render_path and c.media_kind == "video"
+           and c.source_fps > 0 and c.source_avg_fps > 0
+           and abs(c.source_fps - c.source_avg_fps) / c.source_fps > 0.002]
+    if vfr:
+        _vfr_names = sorted({c.clip_name or Path(c.source_path).name for c in vfr})
+        print(f"\n  !! {len(vfr)} cut(s) come from VARIABLE frame rate media — their "
+              f"frames are not evenly spaced:")
+        for c in vfr[:8]:
+            print(f"     {c.clip_name}: {c.source_fps:g} fps nominal, "
+                  f"{c.source_avg_fps:g} average")
+        print("     Ranges are right; the delivered length may not fill the timeline slot.")
+        tl.warnings.append(
+            f"{len(vfr)} cut(s) come from variable frame rate media, so the delivered "
+            f"length may not match the timeline slot: " + ", ".join(_vfr_names[:4])
+            + (", …" if len(_vfr_names) > 4 else ""))
+
     # An .aep isn't "missing" — it's a Dynamic Link comp that was never a file ffmpeg
     # could read, and the fix is to render it, not to remap a path. Keep them apart.
     # Everything is encoded 8-bit 4:2:0 so the files play on a Mac. When a source carries
@@ -6862,22 +7729,64 @@ def main():
         print(f"  !! source is {fmt}; output is 8-bit yuv420p — chroma and/or bit depth "
               f"are reduced (needed for playback).")
 
-    missing = [c for c in tl.cuts if not c.source_exists and c.media_kind != "unsupported"]
+    # ⚠️ NOT ASKED OF A CUT WHOSE PIXELS COME FROM A RENDER. attach_renders has already run
+    # by here, so `render_path` is the fact rather than a prediction: that cut is read out
+    # of Premiere's file and its source path is not opened by anything. MEASURED on the
+    # repo fixture under --render-dir with 18 of 19 renders present: the run told the reader
+    # to --remap a path and to render two comps that Premiere had ALREADY rendered — all
+    # three rows carried a render_path and were listed as "ready — from render" in the same
+    # manifest. Gated on the render, not on render mode: audio is cut from its source in
+    # every mode, so a missing .wav still has to be said out loud on a render-mode export.
+    _no_render = [c for c in tl.cuts if not c.render_path]
+    missing = [c for c in _no_render
+               if not c.source_exists and c.media_kind != "unsupported"]
     if missing:
         print(f"\n  !! {len(missing)} cut(s) reference media that isn't at the recorded path:")
         for p in sorted({c.source_path for c in missing})[:8]:
             print(f"     {p}")
         print("     Fix with --remap OLD=NEW.")
-    unsupported = [c for c in tl.cuts if c.media_kind == "unsupported"]
-    if unsupported:
-        print(f"\n  !! {len(unsupported)} cut(s) are project/comp files (Dynamic Link), "
+    # ⚠️ TWO DIFFERENT THINGS UNDER ONE media_kind. A clipitem with no <pathurl> — an
+    # adjustment layer, an Essential Graphics title, a synthetic — is "unsupported" for the
+    # same reason an .aep is (nothing ffmpeg can open) but it is not a Dynamic Link comp,
+    # and it has no path to print: the list used to show a blank indented line for it,
+    # under a sentence that named it a project file. The parser already reports these
+    # by NAME further up; here they get the count and the honest description.
+    unsupported = [c for c in _no_render if c.media_kind == "unsupported"]
+    _comps = [c for c in unsupported if c.source_path]
+    _pathless = [c for c in unsupported if not c.source_path]
+    if _comps:
+        print(f"\n  !! {len(_comps)} cut(s) are project/comp files (Dynamic Link), "
               f"not decodable media — render them first:")
-        for p in sorted({c.source_path for c in unsupported})[:8]:
+        for p in sorted({c.source_path for c in _comps})[:8]:
             print(f"     {p}")
+    if _pathless:
+        _names = sorted({c.clip_name or "(unnamed)" for c in _pathless})
+        print(f"\n  !! {len(_pathless)} cut(s) have no media file (a title, a graphic, an "
+              f"adjustment layer or a nest) — render them first:")
+        for n in _names[:8]:
+            print(f"     {n}")
     if missing or unsupported:
         print()
 
-    args.out.mkdir(parents=True, exist_ok=True)
+    # Made and PROVEN WRITABLE before a single ffmpeg starts. A destination that exists but
+    # refuses writes used to be found out one clip at a time: measured on a `chmod 555`
+    # folder, every cut failed with ffmpeg's own "Permission denied" and the run then ended
+    # in a `PermissionError` traceback out of the manifest write. One probe file answers
+    # the same question in a millisecond, and says it in a sentence.
+    try:
+        args.out.mkdir(parents=True, exist_ok=True)
+        _probe = args.out / ".xmlcut-write-test"
+        try:
+            _probe.write_bytes(b"")
+        finally:
+            try:
+                _probe.unlink()
+            except OSError:
+                pass
+    except OSError as _e:
+        sys.exit(f"error: cannot write to --out {args.out} ({_e}). Pick a folder you can "
+                 f"write to, or fix its permissions.")
+
     if getattr(args, "resume", False):
         args.resume_index = build_resume_index(args.out)
         _ri = args.resume_index
@@ -6901,13 +7810,25 @@ def main():
                 + "; ".join(_drift[:4]) + (", …" if len(_drift) > 4 else "")
                 + ") — re-cutting everything")
         _amb = sum(1 for v in (_ri.get("suffix") or {}).values() if v > 1)
+        # ⚠️ THE RE-CUTS ARE NAMED, NOT JUST OMITTED. A file this folder's own manifest
+        # recorded as `failed` is no longer counted as one that is already there, which is
+        # the fix — but a count that silently shrinks reads as the tick having stopped
+        # working. Saying how many are being re-cut, and why, is the difference between an
+        # editor trusting the number and re-exporting the whole folder to be sure.
+        _bad = int(_ri.get("failed") or 0)
         say(f"  --resume: {len(_ri.get('ids') or {})} clip(s) matched by id, "
             f"{_ri.get('files', 0)} file(s) already in the folder"
+            # "not finished" rather than "recorded as failed": this count now carries two
+            # kinds of file, and naming only the first one made the line wrong for the
+            # second. A row the last run marked failed is one; a row it marked ok whose
+            # file no longer matches the size that row recorded — truncated, half-synced,
+            # part-restored — is the other, and the audit measured that one being adopted.
+            + (f", {_bad} not finished or damaged, re-cut" if _bad else "")
             + (f", {_amb} filename(s) ambiguous, re-cut" if _amb else "")
             + f" (matched by {_ri.get('how')})")
 
     if args.manifest_only:
-        csv_p, json_p, sheet_p = write_manifest(tl, args.out, args)
+        csv_p, json_p, sheet_p = write_manifest_or_exit(tl, args.out, args)
         print(f"\nCut list written:\n  {csv_p}\n  {json_p}\n  {sheet_p}")
         if not getattr(args, "interactive", False):
             return
@@ -6984,7 +7905,7 @@ def main():
         elif args.timeline_audio.get("note"):
             print(f"\n  no whole-timeline audio: {args.timeline_audio['note']}")
 
-    csv_p, json_p, sheet_p = write_manifest(tl, args.out, args)
+    csv_p, json_p, sheet_p = write_manifest_or_exit(tl, args.out, args)
     tally = collections.Counter(c.status for c in tl.cuts)
     extra = "".join(
         f", {tally[k]} {label}" for k, label in
@@ -7037,6 +7958,21 @@ def main():
         print(f"\n  !! {_msg}")
 
     print(f"Manifest: {csv_p}\nSheet   : {sheet_p}")
+
+    # ⚠️ A RUN THAT WROTE NOTHING AT ALL USED TO EXIT 0. Measured with `--pick` on two cuts
+    # and `--timeout 0`: `Done: 0 written, 2 failed, 0 missing source, 0 unsupported.`,
+    # zero mp4 files in the folder, exit code 0 — so a shell script chaining the next step
+    # off `&&` ran it over an empty folder, and the panel, which reads the exit code first,
+    # had nothing to complain about.
+    #
+    # Only the total loss returns 1. A PARTIAL failure still exits 0 on purpose: the
+    # manifest names every clip and its own reason, the run said so on screen, and turning
+    # "19 of 21 written" into a failed process would break every caller that legitimately
+    # ships what came back. Missing sources and undecodable media are not counted here
+    # either — those are a timeline that points at media this machine cannot see, which is
+    # already reported by name and is not the tool failing.
+    if tally["ok"] == 0 and tally["failed"] > 0:
+        return 1
 
 
 if __name__ == "__main__":

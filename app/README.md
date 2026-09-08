@@ -290,7 +290,7 @@ Fix it with `--remap`, repeatable:
 ```bash
 python3 xmlcut.py timeline.xml -o ./clips \
   --remap "/Volumes/OldDrive=/Volumes/SSD_2024" \
-  --remap "/Users/bom/Movies=/Volumes/Archive/Movies"
+  --remap "$HOME/Movies=/Volumes/Archive/Movies"
 ```
 
 ---

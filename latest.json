@@ -1,6 +1,6 @@
 {
-  "version": "3.70",
-  "notes": "3.70 \u2014 Audio tracks hai c\u1ed9t (hear / file), clip Timeline Render c\u00f3 ti\u1ebfng, c\u1eaft \u0111\u00fang frame v\u1edbi file 23/29/59 fps, nest trong nest, UI ph\u00e2n c\u1ea5p l\u1ea1i nh\u00e3n",
+  "version": "3.71",
+  "notes": "S\u1eeda: c\u1eaft l\u1ea1i file h\u1ecfng thay v\u00ec nh\u1eadn l\u00e0 xong; frame \u0111\u1ea7u \u0111\u00fang khi \u0111\u1ed5i fps; track nghe theo timeline \u0111ang m\u1edf; relink kh\u00f4ng l\u00e0m h\u1ecfng clip kh\u00e1c; c\u1eadp nh\u1eadt t\u1eeb ch\u1ed1i file t\u1ea3i thi\u1ebfu.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

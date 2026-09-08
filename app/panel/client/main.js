@@ -133,11 +133,18 @@
          * than the answer: on a 29.97003 timeline they agree to well inside the tolerance,
          * and where they do not it is the engine's that decides frame_exact. */
         seqFps: 0,
-        /* ONE --remap pair, as {old, now, found, total}. Empty until the person picks a
-         * folder for media that has moved. NOT persisted: a remap belongs to a project, not
-         * to the panel, and a stale one silently rewriting the next job's paths is the
-         * failure this is meant to prevent. Cleared by every fresh read. */
-        remap: null,
+        /* THE --remap PAIRS, each {old, now}. Empty until the person picks a folder for
+         * media that has moved. NOT persisted: a remap belongs to a project, not to the
+         * panel, and a stale one silently rewriting the next job's paths is the failure this
+         * is meant to prevent. Cleared by every fresh read.
+         *
+         * ⚠️ A LIST, because one pair could not express the case that actually turns up:
+         * one recorded root whose files are now split across two folders. The engine has
+         * always taken --remap repeatedly (xmlcut.py: action="append"); the panel kept one
+         * and overwrote it, so a second repair replaced the first — and, because the second
+         * pair's OLD is derived from the paths the FIRST repair produced, it then matched
+         * nothing and the cut count went to zero while the rail said "2 of 2 found". */
+        remap: [],
         /* WHERE THE PIXELS COME FROM: "source" cuts the camera originals, "render" cuts
          * ranges Premiere rendered from the timeline, with the effects already in them.
          * Held here as well as on the select because renderVideoTracks() rebuilds the
@@ -634,7 +641,7 @@
     /* "media" sits with the other facts about the material rather than with the settings:
      * it is the answer to "why is this cut not going to work", which is the same class of
      * row as "audionum" and "ramps". */
-    var RAIL_KEYS = ["seq", "err", "failures", "audionum", "audio", "fps", "media",
+    var RAIL_KEYS = ["seq", "err", "failures", "audionum", "audio", "hear", "fps", "media",
                      "readmode",
                      "ramps", "types", "preset", "dest", "stall", "sizes", "rendermode",
                      "complete", "renders", "exportwait", "scan", "saved"];
@@ -807,7 +814,20 @@
             "Bỏ dấu ? lẻ trên nút Export khi chưa Read."
     ].concat(CL_369);
 
+    var CL_371 = [
+            "Bỏ qua clip đã có: file bị cắt cụt hoặc hỏng nay được cắt lại, không nhận là xong.",
+            "Cắt hỏng không còn để lại file mang tên thật — ghi tên tạm rồi mới đổi tên.",
+            "--fps: frame đầu nay đúng frame tại điểm in (nguồn 60p/120p về 24/25/30 từng bị trễ 1 frame).",
+            "Chọn track nghe: track không có trên timeline này bị bỏ qua, nghe tất cả, có báo trên rail.",
+            "Relink: không còn làm hỏng đường dẫn của clip đang bình thường; giữ được nhiều lần relink.",
+            "Cập nhật: tải thiếu file nay bị từ chối; panel hỏng thì báo và mời cập nhật lại.",
+            "Cài lại bản cũ không còn đẩy panel lùi trong khi engine vẫn mới.",
+            "Dung lượng ước tính của dòng audio nay tính theo audio, không theo video.",
+            "Đọc timeline khi chưa tìm thấy engine: báo lỗi thay vì treo panel."
+    ].concat(CL_370);
+
     var CHANGELOG = {
+        "3.71": CL_371,
         "3.70": CL_370,
         "3.69": CL_369,
         "3.68": CL_368,
@@ -984,6 +1004,26 @@
 
     function exists(p) {
         try { return !!p && fs.existsSync(p); } catch (e) { return false; }
+    }
+
+    /* COULD THIS FOLDER BE CREATED? Climbs to the nearest ancestor that exists — the root
+     * always terminates the walk, since "/" exists and dirname("/") is "/" — and asks
+     * whether this process may write there. mode 2 is W_OK spelled as the number, because
+     * fs.constants is not something to depend on in a CEP runtime.
+     *
+     * Answering "yes" for a folder that is merely absent is the point: mkdir(parents) makes
+     * it, and every first export does exactly that. */
+    function canCreate(p) {
+        try {
+            var at = String(p || ""), prev = "";
+            while (at && at !== prev && !fs.existsSync(at)) {
+                prev = at;
+                at = path.dirname(at);
+            }
+            if (!at) return false;
+            fs.accessSync(at, 2);
+            return true;
+        } catch (e) { return false; }
     }
 
     /* Where the panel's own working files go: the scan's manifest and the selection file.
@@ -1305,7 +1345,7 @@
          * over every source path, so one left standing from the last project would silently
          * rewrite this one's — and the paths it rewrote would still resolve to files, so
          * nothing downstream could tell. Same reasoning as state.dump three lines up. */
-        state.remap = null;
+        state.remap = [];
         // This timeline's overlap accounting, not the last one's: the count beside the
         // cross-dissolve tick must go blank until a scan of THIS sequence supplies it.
         state.overlapPairs = 0;
@@ -1341,6 +1381,9 @@
         say("saved", "info", "");
         say("types", "warn", "");
         say("audio", "info", "");
+        // The HEAR reconciliation is a fact about the timeline that was read, so it dies with
+        // that read: a scan that fails never reaches pruneAudioHearWant() to clear it itself.
+        say("hear", "warn", "");
         say("complete", "info", "");
         say("sizes", "warn", "");
         say("renders", "info", "");
@@ -1374,6 +1417,26 @@
                 show(el.seqbox, false);
                 show(el.opts, false);
                 show(el.step3, false);
+                return;
+            }
+            /* ⚠️ ok:true IS NOT THE SAME AS "there is a file", and the two lines below assume
+             * it is. state.folder falls back to path.dirname(r.path) a few lines on, and
+             * node's dirname THROWS on undefined — measured, `TypeError: The "path" argument
+             * must be of type string. Received undefined` — from inside this callback, so
+             * the throw escapes past the setBusy(false) that ends the read and the panel sits
+             * on "Reading the timeline…" with Read greyed out, an empty rail and no button
+             * that recovers: reloading the extension is the only way out.
+             *
+             * No shipped or historical host.jsx can send this shape — the file is written and
+             * closed immediately before ok and path are set, and a truncated reply is already
+             * caught by hostReply()'s JSON guard — so this is a guard on the one field the
+             * whole read is built from, not a repair of a reachable failure. */
+            if (!r.path || typeof r.path !== "string") {
+                setBusy(false);
+                readStage(-1);
+                fail("Premiere reported a read but did not name the file it wrote."
+                     + "\nTry Read again; if it keeps happening, reload the panel from"
+                     + " Window › Extensions.");
                 return;
             }
             state.info = r;
@@ -1463,6 +1526,23 @@
                 } else {
                     readStage(-1);
                     log("skipping the cut list: xmlcut.py not located yet");
+                    /* ⚠️ AND THE READ IS OVER, WHICH THIS BRANCH USED NOT TO SAY.
+                     *
+                     * scanClips() is what calls setBusy(false) on the other side of this
+                     * `if`, so taking the branch that skips it left state.busy true with the
+                     * watchdog already disarmed — permanently: measured at 219,900 ms, with
+                     * Read greyed out, a second Read a no-op, and no control on screen that
+                     * clears it. The route that makes it matter is not the offline install
+                     * (which cannot cut anyway) but a Read pressed INSIDE the boot download
+                     * window: the engine arrives seconds later, and downloadEngine's own
+                     * repair — `if (state.dump && !state.busy) scanClips()` — is gated on the
+                     * flag this branch never cleared, so a fully repaired panel sat dead and
+                     * silent behind a green "downloaded and linked" chip.
+                     *
+                     * With the flag cleared the read ends where it got to — the sequence is
+                     * read, the XML exported, no cut list — and renderNext() takes over with
+                     * "Cut script missing — open ⚙ and press Re-check." */
+                    setBusy(false);
                 }
             });
     }
@@ -1939,6 +2019,21 @@
                 + "Nothing is written until Export.";
         } else if (!state.out) {
             msg = "Choose a folder to save into.";
+        } else if (!state.clips.length) {
+            /* ⚠️ AN EMPTY LIST IS NOT AN UNTICKED ONE, and this branch is the difference.
+             *
+             * Without it a read that came back with no cuts fell into the sentence below and
+             * told the reader to "pick at least one clip or file type" — with nothing on
+             * screen to pick. MEASURED on a real audio-only timeline: 0 clips, the table
+             * hidden, the list note empty, and that instruction under a rail error that had
+             * already named the cause. Blaming the reader for the one thing they cannot do
+             * is worse than saying nothing, so this states what happened and leaves the WHY
+             * to the rail, which sorts errors to the top and is where the cause already is.
+             * Deliberately not "the message above says why": a scan that exits 0 with an
+             * empty cut list would leave that pointing at no row at all. */
+            msg = "That read found no cuts on this sequence — nothing to tick, and nothing "
+                + "to export yet.";
+            cls += " warn";
         } else if (!n) {
             // There is no file type to pick in render mode — the chips are not on screen.
             msg = state.cutFrom === "render"
@@ -2217,6 +2312,34 @@
             say("dest", "info", "");
             return;
         }
+        /* ⚠️ IS THE ROOT STILL THERE, AND CAN IT COME BACK BY ITSELF? Nothing ever stat'ed
+         * the saved root, so a destination on a share that is not mounted sat on screen with
+         * Export enabled and the rail silent — measured: exists=false, button "Export 19
+         * clips", no dest row at all.
+         *
+         * NOT "the files land somewhere else". Measured: /Volumes is 0755 root:wheel, so the
+         * engine's mkdir raises PermissionError before it encodes anything, the run exits 1
+         * and the panel prints the Python traceback. Nothing is written to the boot disk.
+         * What this row buys is WHEN and in WHAT WORDS that arrives — at the button, in a
+         * sentence, instead of after the scan as a stack trace.
+         *
+         * ⚠️ A MISSING FOLDER IS NOT BY ITSELF A PROBLEM, and warning about one would fire on
+         * every fresh install: defaultOutputFolder() hands back "~/Desktop/xmlcut clips",
+         * which does not exist until the first export creates it. The question is whether it
+         * CAN be created, so this walks up to the nearest folder that does exist and asks
+         * whether we may write there. Measured on this machine: ~/Desktop yes,
+         * /Volumes/<unmounted>/… no (EACCES on /Volumes), which is exactly the population
+         * the report is about.
+         *
+         * Not a refusal either. The answer is true for one process at one instant, a share
+         * can come back before Export, and this panel does not disable a control over a
+         * stat. Re-checked on every folder pick and every read. */
+        if (!exists(state.out) && !canCreate(state.out)) {
+            say("dest", "warn", "Save to " + shortPath(state.out, 44) + " isn’t there, and "
+                + "the export cannot create it. Reconnect the drive or share it lives on, "
+                + "or choose another folder.", state.out);
+            return;
+        }
         if (!state.info) {
             /* SILENT UNTIL THERE IS A FOLDER TO TALK ABOUT. This used to state the raw/edited
              * rule here, which put a row on the rail before anything had happened — and the
@@ -2383,6 +2506,28 @@
             if (answered) return;
             answered = true;
             clearTimeout(bail);
+            /* ⚠️ THE READ THIS CHECK WAS MADE FOR IS GONE — a check with no subject, not a
+             * mismatch. A Read pressed while the stamp is in flight tears state.info down at
+             * the top of the read, so readSeqName() answers "" and everything below here
+             * compares the open sequence against nothing. MEASURED: the row came out as
+             * `Read “?” · “PROMO_MASTER_v7” is open now. Export would cut “?”…` — qn("")
+             * prints the empty name as “?” — and the Premiere modal was worse, a bare gap
+             * where the name belongs. It then outlived the read that caused it, because the
+             * new read had cleared this key BEFORE the stamp answered and nothing clears it
+             * again: a permanent red error about a sequence nobody has ever seen, on a panel
+             * that had gone on to read 21 clips perfectly well.
+             *
+             * cb(false), NOT cb(true) like the unanswered-stamp branch above: that one has a
+             * cut list and merely could not check it, and this one has no cut list at all —
+             * it died with the read. doExport() reads state.info the same way to tell this
+             * apart from a real mismatch, and says so instead of opening a modal. */
+            if (!state.info) {
+                say("seq", "error", "");
+                log("sequence check (" + when + "): the read was torn down while the check "
+                    + "was in flight — nothing to compare");
+                if (cb) cb(false);
+                return;
+            }
             var r = null;
             try { r = JSON.parse(raw); } catch (e) {}
             if (!r || typeof r !== "object") {
@@ -2592,6 +2737,10 @@
             log("export ignored: one is already starting");
             return;
         }
+        /* Why the LAST press produced no export is about the last press. Cleared here rather
+         * than left for something else to notice, so this row can never be a stale reason
+         * sitting over a run that is starting — the failure the "?" mismatch row was. */
+        say("export", "warn", "");
         state.exportPending = true;
         /* THE AUTHORITATIVE CHECK, and the reason the rail row is not enough on its own: the
          * row can be up to SEQ_CHECK_MS old and he may never have looked at it. This one runs
@@ -2608,6 +2757,24 @@
                     // cleared correctly instead of one.
                     state.exportPending = false;
                     startExport();
+                    return;
+                }
+                /* ⚠️ NOT EVERY "unsafe" IS A MISMATCH TO ASK ABOUT. A Read pressed inside
+                 * the stamp window leaves this callback with no read at all — no dump, no
+                 * clips, no identity — and confirmMismatch() then asked Premiere a question
+                 * with a hole in it where the sequence name belongs ("Read:  \nOpen:
+                 * PROMO_MASTER_v7"). There is nothing to confirm: the cut list this export
+                 * was for no longer exists.
+                 *
+                 * SAID ON THE RAIL, not only in the log. This is a press that produced no
+                 * export, and the one place it was reported was Advanced — measured, the
+                 * whole outcome of the click was three log lines. */
+                if (!state.info) {
+                    state.exportPending = false;
+                    log("export dropped: the read was torn down while the sequence check "
+                        + "was in flight — nothing was exported");
+                    say("export", "warn", "A read started before that export could, so "
+                        + "nothing was exported. Press Export again when the read finishes.");
                     return;
                 }
                 confirmMismatch(startExport);
@@ -2957,6 +3124,13 @@
                 if (r.tracks_hidden) {
                     log("render: hid " + r.tracks_hidden + " other video track(s)");
                 }
+                /* The sound half of the same sentence. The host has always reported what it
+                 * muted; nothing here read it, so a render that silenced three audio tracks
+                 * said so nowhere at all while the video half got a line. The audit found
+                 * the three fields set on every reply and read by nobody. */
+                if (r.audio_muted) {
+                    log("render: muted " + r.audio_muted + " audio track(s) the ticks left out");
+                }
                 if (r.written && r.total_ms) {
                     var rsecs = r.total_ms / 1000;
                     notes.push("Premiere rendered " + r.written + " cut(s) in "
@@ -3158,11 +3332,24 @@
             setBusy(false);
             setRunning(false);
             show(el.prog, false);
-            /* ⚠️ SAY THAT IT WAS STOPPED. A killed run exits non-zero with a partial manifest,
-             * and the report built from it reads exactly like a run that failed halfway — so
-             * without this the panel answers "stop" with what looks like a fault. The row also
-             * names the way forward, because the folder now holds an incomplete set and the
-             * next export has to be told what to do about it. */
+            /* ⚠️ SAY THAT IT WAS STOPPED, BECAUSE NOTHING ELSE WILL.
+             *
+             * This used to claim "a killed run exits non-zero with a partial manifest, and the
+             * report built from it reads exactly like a run that failed halfway". Both halves
+             * are wrong, and a maintainer who believed them could remove the guard that is
+             * doing the real work. MEASURED, killing the engine 6 s into a six-cut run the way
+             * Cancel does: the group SIGTERM leaves NO manifest at all — the engine installs no
+             * signal handler and writes the manifest only when a whole run finishes — so the
+             * folder holds six delivery-named files and nothing that describes them. And the
+             * panel never sees a non-zero code either: a signal kill closes with code `null`
+             * (measured; `rc=143` is what a SHELL reports), which is why the branch at the foot
+             * of this handler treats null as the quiet cancelled case rather than a failure.
+             *
+             * So there is no report to read after a cancel: buildReport() finds the manifest's
+             * mtime unchanged and returns false, and `if (built)` keeps the table off screen.
+             * This row is the ONLY account of what happened, which is why it is unconditional
+             * on any of that. It also names the way forward, because the folder now holds an
+             * incomplete set and the next export has to be told what to do about it. */
             if (state.cancelled) {
                 /* ⚠️ WHICH SENTENCE DEPENDS ON THE TICK, because only one of them is true.
                  *
@@ -3346,11 +3533,19 @@
             if (code !== 0) {
                 setBusy(false);
                 readStage(-1);
+                /* ⚠️ ONLY OFFER AN EXPORT WHERE THERE IS ONE TO OFFER, which is exactly
+                 * `rescan` — it was read as state.clips.length > 0 at the top of this scan,
+                 * and a failed scan leaves the list untouched. The second sentence used to
+                 * say "You can still export; the list just isn't shown" in BOTH cases, so a
+                 * first read that failed put an offer on the rail while the button under it
+                 * was disabled and read "Nothing selected" — measured on two real failures,
+                 * an unknown sequence name and a missing ffmpeg. The line above it is the
+                 * actionable one; this one contradicted it. */
                 fail("Reading the cut list failed (exit " + code + ")."
                      + (errbuf ? "\n" + errbuf.split("\n").slice(-4).join("\n") : "")
                      + (rescan
                         ? "\nThe list shown is the one read before; you can still export."
-                        : "\nYou can still export; the list just isn't shown."));
+                        : "\nNothing was read, so there is nothing to export yet."));
                 return;
             }
             if (loadClips(scanDir)) {
@@ -3429,6 +3624,10 @@
         state.audioTracks = (pset.audio_tracks_available || []).map(function (t) {
             return { index: Number(t.index || 0), items: Number(t.items || 0) };
         }).filter(function (t) { return t.index > 0; });
+        /* The remembered HEAR ticks are about a timeline; this is the moment the timeline
+         * they are about becomes known, so this is where a choice that names only tracks
+         * this one does not have is dropped and said. See pruneAudioHearWant(). */
+        pruneAudioHearWant();
         /* WHOSE NUMBERS THESE ARE. "premiere" means the engine numbered the tracks the way
          * Premiere does; absent means an older engine, whose numbers are the old per-channel
          * ones. The panel gates its migration notice on this so it cannot tell someone their
@@ -4494,12 +4693,23 @@
         /* Only when it differs from the engine's own default, same rule as --vcodec above.
          * The panel defaults this ON, so "split" is the flag an ordinary export carries. */
         if (s.transitions === "split") a.push("--transitions", "split");
-        /* ONE PREFIX PAIR, and only the one the person confirmed by picking a folder. The
-         * engine's _resolve() is a startswith/replace over each source path, so this covers
-         * exactly the case it can: every missing file under one shared root that has moved
-         * to one other root. See pickRelinkFolder() for what it does NOT cover. */
-        if (state.remap && state.remap.old && state.remap.now) {
-            a.push("--remap", state.remap.old + "=" + state.remap.now);
+        /* THE PATH REPAIRS THE PERSON CONFIRMED BY PICKING A FOLDER, one --remap each.
+         *
+         * ⚠️ LONGEST OLD FIRST, AND THAT ORDER IS LOAD-BEARING. The engine's _resolve() runs
+         * every pair over every path IN ORDER and does not stop at the first match:
+         *
+         *     for old, new in self.remaps:
+         *         if path.startswith(old): path = new + path[len(old):]
+         *
+         * so a folder pair listed before an exact-file pair would rewrite the path out from
+         * under it and the specific repair would never fire. Sorted here rather than at the
+         * point the pairs are made, because that is the only place the whole set is known. */
+        var pairs = (state.remap || []).slice();
+        pairs.sort(function (x, y) { return String(y.old).length - String(x.old).length; });
+        for (var pi = 0; pi < pairs.length; pi++) {
+            if (pairs[pi].old && pairs[pi].now) {
+                a.push("--remap", pairs[pi].old + "=" + pairs[pi].now);
+            }
         }
         return a;
     }
@@ -4578,6 +4788,12 @@
     // as this many frames' worth of picture whatever its length.
     var STILL_FRAMES = 1.5;
     var CONTAINER_FIXED = 512;   // measured: 458-byte intercept, and it does NOT scale
+    /* WHAT AN AUDIO CUT COSTS, and it is not a picture. The engine writes every audio-track
+     * cut with `-c:a aac -b:a 192k` and nothing else — no crf, no encoder choice, no scale —
+     * so this is a constant rather than a table. It is the rate ASKED FOR, which is the
+     * ceiling: ffmpeg's native aac delivered 123-140 kbps on the fixture's mono voice-over
+     * and 159-195 kbps on stereo, so the estimate errs over, never under. */
+    var AUDIO_BPS = 192000;
 
     function lerp(tbl, x) {
         if (x <= tbl[0][0]) return tbl[0][1];
@@ -4597,6 +4813,26 @@
         // MEASURED, if Re-measure was pressed. Nothing to compute — the probe ran at these
         // settings with the resolution filter applied, so the number is already right.
         if (c.probeBps > 0) return c.probeBps * c.secs / 8 + CONTAINER_FIXED;
+        /* ⚠️ AN AUDIO ROW IS NOT PRICED BY THE PICTURE MODEL, and it fell through into it.
+         *
+         * An audio clipitem is cut from its own source in EVERY mode — Premiere renders
+         * picture ranges, so attach_renders skips track_type "audio" and the engine writes
+         * the .m4a itself — which is why no branch below applies to one. Two ways it went
+         * wrong, both measured on the fixture's four audio cuts:
+         *
+         *   an audio cut taken from a CAMERA file still carries that file's w/h/fps/bitrate,
+         *   so it took the video branch and was priced at the camera's rate: 751 KB shown
+         *   against 37 KB written, 20.1x, for two seconds of sound.
+         *
+         *   an audio cut from an audio-only source has no dimensions at all and fell to the
+         *   last resort, which multiplies the source bitrate by a video CRF curve and by the
+         *   square of the video scale. So every audio number MOVED with the quality slider —
+         *   9.7x between crf 1 and crf 23 — while the four .m4a files came out byte-identical
+         *   at both ends of it (same four md5s, 166,967 B in total either way).
+         *
+         * Placed under the probe and above everything else: a measured size still wins, and
+         * nothing below this line has anything true to say about sound. */
+        if (c.trackType === "audio") return AUDIO_BPS * c.secs / 8 + CONTAINER_FIXED;
 
         var crf = s.crf || 1, pct = s.scale || 100;
         var d = scaledDims(c.w, c.h, pct);
@@ -4880,16 +5116,71 @@
             else window.localStorage.setItem(AUDIOHEAR_KEY, state.audioHearWant);
         } catch (e) {}
     }
+    /* The remembered choice, reconciled against the timeline that was just read.
+     *
+     * Called from loadClips(), the one place state.audioTracks is rebuilt — before that, the
+     * panel has nothing to reconcile against. hearList() below makes the ARGUMENT safe on
+     * its own; this is what makes the STORAGE stop lying and says so out loud, because a
+     * choice that cannot be honoured is news the moment it is discovered rather than
+     * something to find in the export's sound.
+     *
+     * ⚠️ ONLY WHEN NOTHING SURVIVES. A remembered "2,3" met by a two-track timeline still
+     * keeps A2 audible and mutes A1, which is what the two ticks show and what the editor
+     * asked for; rewriting it would also throw A3 away for the timeline they came from. */
+    function pruneAudioHearWant() {
+        var have = state.audioTracks || [];
+        if (state.audioHearWant === null || !have.length) { say("hear", "warn", ""); return; }
+        var parts = String(state.audioHearWant).split(","), named = [], kept = 0, i, j;
+        for (i = 0; i < parts.length; i++) {
+            var n = parseInt(parts[i], 10);
+            if (!(n > 0)) continue;
+            named.push(n);
+            for (j = 0; j < have.length; j++) if (have[j].index === n) { kept++; break; }
+        }
+        // No number at all is the deliberate untick-all, which is a choice this timeline can
+        // honour perfectly well: every track muted, no --render-audio, no sound in the clips.
+        if (!named.length || kept) { say("hear", "warn", ""); return; }
+        state.audioHearWant = null;
+        rememberAudioHearWant();
+        say("hear", "warn", "The saved “hear” choice named A" + named.join(", A")
+            + ", which this timeline does not have — every audio track will be heard"
+            + " instead. Untick the ones you do not want.");
+    }
     function hearList() {
-        var have = state.audioTracks || [], out = [], i;
+        var have = state.audioTracks || [], out = [], i, j;
         if (state.audioHearWant === null) {
             for (i = 0; i < have.length; i++) out.push(have[i].index);
             return out;
         }
-        var parts = String(state.audioHearWant).split(",");
+        /* ⚠️ INTERSECTED WITH THE TRACKS THIS TIMELINE HAS, and that is the whole job of
+         * this function rather than a tidy-up.
+         *
+         * The list is remembered flat, with no per-timeline signature, so last project's
+         * ticks meet this project's tracks — and it is handed to Premiere as renderCuts'
+         * solo set, where soloAudioTrack MUTES every track that is not in it. A remembered
+         * "3" met by a two-track timeline therefore kept NOTHING and muted both, while
+         * settings().renderAudio read the same non-empty list as "sound was asked for" and
+         * still sent --render-audio: measured, every clip in the export came out carrying a
+         * silent AAC stream instead of the timeline's mix, exit 0, nothing said anywhere.
+         * Two readings of one variable, three lines apart, disagreeing. */
+        var parts = String(state.audioHearWant).split(","), named = 0;
         for (i = 0; i < parts.length; i++) {
             var n = parseInt(parts[i], 10);
-            if (n > 0) out.push(n);
+            // 0 and below are dropped in silence, as before: Premiere's audio tracks are
+            // 1-based, so there is no A0 for anyone to have meant.
+            if (!(n > 0)) continue;
+            named++;
+            for (j = 0; j < have.length; j++) {
+                if (have[j].index === n) { out.push(n); break; }
+            }
+        }
+        /* NAMED SOMETHING AND GOT NOTHING: hear every track, which is Premiere's own default
+         * and what this panel does when nobody has touched the ticks. Keyed on having named
+         * a track rather than on the result being empty, because an EMPTY remembered value
+         * is the opposite case — a deliberate untick-all, whose empty list is exactly what
+         * turns --render-audio off and strips the sound with -an. */
+        if (named && !out.length) {
+            for (i = 0; i < have.length; i++) out.push(have[i].index);
         }
         return out;
     }
@@ -4919,8 +5210,18 @@
         var head = document.createElement("div");
         head.className = "atrow";
         head.appendChild(atCap("", ""));
-        if (render) head.appendChild(atCap("hear", "Heard inside each rendered clip"));
-        head.appendChild(atCap("file", "This track's clips cut to their own files"));
+        /* "in clip" / "own file" rather than "hear" / "file". Two people in a row could not
+         * tell from the old captions that these are unrelated switches — one decides what a
+         * video clip SOUNDS like, the other whether loose audio files appear beside it — and
+         * "file" read as "put this in a file", which is what the other column does. The
+         * captions size the grid column to their own text (auto), so the track name beside
+         * them just ellipsises; nothing else moves. */
+        if (render) head.appendChild(atCap("in clip", "Tick: this track is audible inside "
+            + "each exported video clip. Untick: it is silent in the clips. Your timeline is "
+            + "put back exactly as it was afterwards."));
+        head.appendChild(atCap("own file", "Tick: this track's clips ALSO come out as "
+            + "separate audio files, one per clip. Untick: no separate audio files. This is "
+            + "not about the sound inside the video clips."));
         el.atracks.appendChild(head);
         for (var i = 0; i < have.length; i++) atRow(have[i]);
 
@@ -5109,11 +5410,28 @@
      * rewrites every path in the manifest and makes the next report harder to read, not
      * easier. Nested folders below the shared root are covered, because the rewrite keeps
      * everything after the prefix. */
+    /* What the XML RECORDS for a path the panel is now showing.
+     *
+     * A rescan reports the paths AFTER the repairs already in force, so a second relink
+     * derives its pair from the first repair's output — and a pair built that way chains
+     * against the first one in the engine's _resolve() loop, sending everything the first
+     * repair fixed on to the second folder. Undoing the panel's own pairs puts the new one
+     * back in the space the engine actually matches against: what the XML says. */
+    function recordedPath(p) {
+        var out = String(p), i, r;
+        for (i = (state.remap || []).length - 1; i >= 0; i--) {
+            r = state.remap[i];
+            if (r.now && out.indexOf(r.now) === 0) out = r.old + out.substring(r.now.length);
+        }
+        return out;
+    }
+
     function applyRelink(folder) {
         var miss = missingClips();
         if (!miss.length || !folder) return;
-        var paths = [];
-        for (var i = 0; i < miss.length; i++) paths.push(miss[i].source);
+        /* ⚠️ IN RECORDED SPACE, NOT IN WHAT THE LIST SHOWS. See recordedPath(). */
+        var paths = [], i;
+        for (i = 0; i < miss.length; i++) paths.push(recordedPath(miss[i].source));
         var oldPrefix = commonDir(paths);
         if (!oldPrefix) {
             say("media", "warn", "Those " + miss.length + " cuts have no folder in common, "
@@ -5124,24 +5442,88 @@
         // "/a/b/c.mp4" into "/xc.mp4".
         var now = String(folder);
         if (now.charAt(now.length - 1) !== "/") now += "/";
-        var found = 0;
-        for (var k = 0; k < paths.length; k++) {
-            if (exists(now + paths[k].substring(oldPrefix.length))) found++;
+        /* Every missing file, rewritten and TESTED — the pair is never assumed. Each hit is
+         * kept as its own exact-path pair as well as counted, because that is what the
+         * narrowed form below is built from. */
+        var hits = [], k, target;
+        for (k = 0; k < paths.length; k++) {
+            target = now + paths[k].substring(oldPrefix.length);
+            if (exists(target)) hits.push({ old: paths[k], now: target });
         }
-        if (!found) {
-            state.remap = null;
+        if (!hits.length) {
+            /* ⚠️ THE PAIRS ALREADY IN FORCE ARE LEFT ALONE. This used to clear them, so
+             * picking one wrong folder threw away a repair that was working. */
             say("media", "warn", "None of the " + miss.length
                 + " files are in that folder. Pick the folder that holds "
                 + baseName(paths[0]) + ".");
             renderSettings();
             return;
         }
-        state.remap = { old: oldPrefix, now: now, found: found, total: paths.length };
-        log("remap " + oldPrefix + " = " + now + " (" + found + " of " + paths.length
-            + " found)");
-        say("media", found === paths.length ? "info" : "warn",
-            found + " of " + paths.length + " found in " + now
-            + (found === paths.length ? "" : " — the rest are somewhere else."));
+        /* ⚠️ WHO ELSE THAT PREFIX WOULD MOVE, asked before the pair is kept.
+         *
+         * The prefix is derived from the MISSING files alone, and the engine applies it to
+         * every source path there is — so a folder that also holds healthy media redirects
+         * all of it to a folder that does not. Measured on a fixture where one lost file
+         * shared its folder with four healthy ones: "find the media for 1 cut", "1 of 1
+         * found", and the Export button dropped from 19 clips to 15. Top-level cuts are
+         * repaired again from Premiere's live paths on the next read, but a nested
+         * sequence's interior is handed over as one clip and cannot be, so those cuts are
+         * simply lost — 19 to 17 on a nested timeline, measured. */
+        var collateral = 0;
+        for (i = 0; i < state.clips.length; i++) {
+            var c = state.clips[i];
+            if (!c.source || !c.srcExists) continue;
+            var rec = recordedPath(c.source);
+            if (rec.indexOf(oldPrefix) !== 0) continue;
+            if (!exists(now + rec.substring(oldPrefix.length))) collateral++;
+        }
+        var pairs, j;
+        if (collateral) {
+            /* NARROWED TO THE FILES THAT WERE ACTUALLY MISSING. An exact path cannot match
+             * any other clip — a healthy cut never shares its source path with a lost one,
+             * or it would be lost too — so this repairs what was asked and moves nothing
+             * else, nest interiors included. It is also what makes a second relink possible
+             * at all: two exact pairs are disjoint where two folder pairs chain. */
+            /* One pair per FILE, not per cut. Six cuts off one camera file are six entries in
+             * `hits` and one thing to repair, and the counts above stay per-cut because that
+             * is what the sentence on the rail is about. */
+            pairs = [];
+            for (k = 0; k < hits.length; k++) {
+                var dup = false;
+                for (j = 0; j < pairs.length; j++) if (pairs[j].old === hits[k].old) dup = true;
+                if (!dup) pairs.push(hits[k]);
+            }
+        } else {
+            pairs = [{ old: oldPrefix, now: now }];
+        }
+        /* A pair for the same OLD is a re-answer to the same question, not a second repair. */
+        var keep = [];
+        for (i = 0; i < state.remap.length; i++) {
+            var drop = false;
+            for (j = 0; j < pairs.length; j++) {
+                if (state.remap[i].old === pairs[j].old
+                    || (pairs[j].old.charAt(pairs[j].old.length - 1) === "/"
+                        && state.remap[i].old.indexOf(pairs[j].old) === 0)) drop = true;
+            }
+            if (!drop) keep.push(state.remap[i]);
+        }
+        state.remap = keep.concat(pairs);
+        for (i = 0; i < pairs.length; i++) log("remap " + pairs[i].old + " = " + pairs[i].now);
+        log("relink: " + hits.length + " of " + paths.length + " found in " + now
+            + (collateral ? " (narrowed — " + collateral
+                            + " healthy cut(s) share that folder)" : ""));
+        /* Still INFO when every missing file was found: the narrowing is not a problem, it is
+         * the repair being precise. The extra sentence is there because the scope is
+         * genuinely narrower than the folder that was picked, and someone whose whole folder
+         * moved should not have to infer that from a clip count. */
+        say("media", hits.length === paths.length ? "info" : "warn",
+            hits.length + " of " + paths.length + " found in " + now
+            + (hits.length === paths.length ? "" : " — the rest are somewhere else.")
+            + (collateral ? " Only the file" + (hits.length === 1 ? "" : "s")
+                            + " that " + (hits.length === 1 ? "was" : "were")
+                            + " missing " + (hits.length === 1 ? "was" : "were")
+                            + " repointed — the cuts that already resolve are untouched."
+                          : ""));
         renderSettings();
         rescanForSetting("Re-reading…");
     }
@@ -6360,6 +6742,23 @@
                 // immediately. Saying "quit and reopen" every time trains people to ignore
                 // it on the one occasion it matters.
                 var restart = (r.restart_needed !== false);
+                /* ⚠️ THE ENGINE CAN SUCCEED WHILE THE PANEL DOES NOT LAND, and until the
+                 * 6 Sep audit this branch told that user to restart into a panel that was
+                 * not there. The engine updates itself first and Adobe's extension folder
+                 * second; a full disk or a locked folder fails the second half only. The
+                 * engine now reports it as `panel_error` and re-offers the same version
+                 * instead of answering "up to date", so the honest instruction is to press
+                 * Update again, not to quit Premiere. */
+                if (r.panel_error) {
+                    setUpd("error", "The cut engine updated to " + r.version
+                        + ", but the Premiere panel did not: " + r.panel_error
+                        + " Press Update again once there is room — the panel you have now"
+                        + " still works.", "");
+                    log("update: panel step failed: " + r.panel_error);
+                    log("update changed: " + ((r.changed || []).join(", ") || "nothing"));
+                    readVersion();
+                    return;
+                }
                 setUpd("done", restart
                     ? ("Updated to " + r.version
                        + ". Quit Premiere (Cmd-Q) and reopen it.")
