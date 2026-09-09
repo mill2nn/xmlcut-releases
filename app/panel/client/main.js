@@ -838,7 +838,41 @@
             "Cảnh báo VFR nói đúng thứ đo được: header của file tự mâu thuẫn."
     ].concat(CL_372);
 
+    var CL_374 = [
+            "Render bị lệch 1 frame so với timeline nay được nêu đích danh clip, không còn im lặng.",
+            "Panel đặt in/out bằng tick và bắt buộc khớp đúng frame; lệch nửa frame là nguyên nhân 2 clip sai hình.",
+            "Cảnh báo tìm thấy sau khi quét nay hiện ra ở console, trước đây chỉ nằm trong manifest.",
+            "Lỗi dài không còn bị cắt ngang câu — phần nói cách sửa nay hiện đủ."
+    ].concat(CL_373);
+
+    var CL_375 = [
+            "Render dài hơn cut 1 frame: tool so ảnh với clip kề để biết frame thừa nằm ở đầu hay cuối, rồi cắt đúng chỗ.",
+            "Không xác định được thì clip bị từ chối kèm tên range cần render lại — thay vì giao file có thể lệch 1 frame.",
+            "Render ngắn hơn cut: lỗi nay nói đúng là do render, không còn đổ cho file gốc.",
+            "Cảnh báo tách 3 loại: clip đã sửa, clip bị từ chối, clip cần kiểm tra."
+    ].concat(CL_374);
+
+    var CL_376 = [
+            "Chỉ sửa frame thừa khi CẢ HAI clip kề đều xác nhận — một bên im lặng không còn được tính là đồng ý.",
+            "Bật tiếng render: âm thanh nay cắt cùng 1 frame với hình, không còn lệch tiếng.",
+            "Chọn lẻ vài clip (hoặc bấm Retry) không còn làm mất bằng chứng: đọc thẳng từ thư mục render.",
+            "Render .mkv không còn bị từ chối oan vì số frame chỉ là ước lượng.",
+            "--resume không còn bỏ qua đúng clip đang được sửa."
+    ].concat(CL_375);
+
+    var CL_377 = [
+            "Render cũ còn sót trong thư mục không còn bị dùng làm mốc so sánh — trước đây có thể gây sửa sai.",
+            "Render không đọc được độ dài nay bị từ chối, thay vì cắt mù.",
+            "Clip bị từ chối mà thư mục còn file của lần chạy trước: nay báo đích danh.",
+            "Số frame chỉ là ước lượng không còn làm clip mất dấu \"frame exact\" hay bị nhắc kiểm tra oan.",
+            "Lỗi render ngắn nói rõ ffmpeg đọc được bao nhiêu frame."
+    ].concat(CL_376);
+
     var CHANGELOG = {
+        "3.77": CL_377,
+        "3.76": CL_376,
+        "3.75": CL_375,
+        "3.74": CL_374,
         "3.73": CL_373,
         "3.72": CL_372,
         "3.71": CL_371,
@@ -7699,21 +7733,36 @@
             + " range(s) — " + (ok[0].method || "?"));
         L.push("Preset: " + (r.preset_name || r.preset || "?"));
 
-        /* Frame accuracy. The in/out is set in seconds and read back in ticks, so this
-         * is the round-trip error measured rather than assumed. Anything but zero here
-         * would mean every cut lands off by a fraction of a frame. */
-        var off = 0, howRead = "";
+        /* Frame accuracy. The in/out is set in ticks and read back in ticks, so this
+         * is the round-trip error measured rather than assumed.
+         *
+         * ⚠️ NAMED, NOT MAXIMISED. This used to print one number for the whole run —
+         * "off by up to 0.4 frame(s)" — which is true, unactionable, and reads like a
+         * rounding note. On 8 Sep two of forty-eight ranges missed, and those two were
+         * the two clips that came out holding the wrong frames. The rest were exact.
+         * A maximum cannot tell you that, so the ranges that missed are listed. */
+        var off = 0, howRead = "", missed = [];
         for (i = 0; i < rs.length; i++) {
             var a = Math.abs(Number(rs[i].in_off_frames || 0));
             var b = Math.abs(Number(rs[i].out_off_frames || 0));
             if (a > off) off = a;
             if (b > off) off = b;
+            if (rs[i].ok && (a > 0 || b > 0)) {
+                missed.push(rs[i].label + " (" + (a > b ? a : b).toFixed(3) + "f)");
+            }
             if (!howRead && rs[i].read_how) howRead = rs[i].read_how;
         }
-        L.push(off === 0
-            ? "🎯 In/out landed exactly on the frames asked for (" + howRead + ")."
-            : "⚠️ In/out was off by up to " + off.toFixed(3) + " frame(s) ("
-                + howRead + ").");
+        if (!missed.length) {
+            L.push("🎯 All " + rs.length + " range(s) landed exactly on the frames asked"
+                + " for (" + howRead + ").");
+        } else {
+            L.push("⚠️ " + missed.length + " of " + rs.length + " range(s) did NOT land"
+                + " exactly (" + howRead + "), off by up to " + off.toFixed(3)
+                + " frame(s): " + missed.slice(0, 6).join(", ")
+                + (missed.length > 6 ? ", …" : ""));
+            L.push("   Those clips may hold one frame more or fewer than the timeline —"
+                + " check them in Premiere before you send them.");
+        }
         L.push("");
 
         for (i = 0; i < rs.length; i++) {

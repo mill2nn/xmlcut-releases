@@ -30,6 +30,7 @@ import os
 import re
 import shutil
 import subprocess
+import textwrap
 import tempfile
 import sys
 import threading
@@ -40,7 +41,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.73"
+VERSION = "3.77"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -1042,6 +1043,31 @@ def release_file_complaint(rel: str, data: bytes) -> Optional[str]:
         if tail and not tail.endswith((b";", b"}")):
             return (f"ends on {tail[-24:]!r} rather than a finished statement — "
                     f"the download was cut off")
+        # ⚠️ THE LAST CHARACTER IS NOT ENOUGH, AND THE SUITE FOUND THAT OUT BY ACCIDENT.
+        # The ending test only asks what the file stops ON, so a cut that happens to land
+        # just after a `}` — in the indentation of the next line, say — reads as finished.
+        # Measured on this very file: the 200000-byte truncation this check was written for
+        # used to end mid-identifier and was caught; after some lines were added upstream
+        # the same cut landed in whitespace after a closing brace and sailed through. The
+        # truncation had not become safer; the fixture had become lucky.
+        #
+        # Bracket balance is the structural fact a truncation cannot fake. Measured across
+        # every shipped .js/.jsx/.css: all four are exactly balanced, and every truncation
+        # of main.js at 50k, 100k, 200k, 300k and 400k is not — including the two the
+        # ending test missed. Counted naively, braces in strings and comments included,
+        # which is the risk: a future file could carry an unbalanced brace in a string and
+        # be refused while whole. That is why tests/check_delivery.py runs this over every
+        # file in UPDATE_FILES as it stands in the repository — an edit that unbalances one
+        # fails there, before it is published, rather than on seven machines at once.
+        text = data.decode("utf-8", "replace")
+        for opener, closer, what in (("{", "}", "brace"), ("(", ")", "bracket"),
+                                     ("[", "]", "square bracket")):
+            delta = text.count(opener) - text.count(closer)
+            if delta:
+                return (f"has {abs(delta)} unclosed {what}(s) — the download was cut off"
+                        if delta > 0 else
+                        f"has {abs(delta)} more closing than opening {what}(s) — "
+                        f"the file is damaged")
         return None
 
     return None
@@ -1626,6 +1652,22 @@ class Cut:
     render_fps: float = 0.0
     render_codec: str = ""
     render_bitrate: Optional[int] = None
+    # A render that came back LONGER than its cut, and what the pixels said about it.
+    # render_overshoot is "" (no disagreement), "head", "tail" or "unclear"; head_trim is
+    # how many frames the encode must drop off the front. Decided by resolve_render_
+    # overshoot(), which measures rather than assumes — see its docstring.
+    render_overshoot: str = ""
+    render_head_trim: int = 0
+    # False when render_frames came from the container's nb_frames; True when it had to be
+    # guessed as duration x rate. The guess is fine for reporting a gross mismatch and is
+    # not fit to decide an encode — see resolve_render_overshoot.
+    render_frames_derived: bool = False
+    # Why the overshoot could not be placed, when it could not. Empty unless the answer was
+    # "unclear", and carried into the refusal so it names the real obstacle.
+    render_overshoot_why: str = ""
+    # True when this cut was refused but a file from an earlier run is still sitting at the
+    # delivery name. Nothing deletes it — deliberately — so it has to be said out loud.
+    stale_delivery: bool = False
     # A render is COMING but does not exist yet — set on a scan that ran with
     # --render-planned. Kept apart from render_path, which is a file that is there: the
     # scan has to say what will be cuttable so the panel can offer it, while run_cut must
@@ -3941,11 +3983,24 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     # came back a frame short fails the count check in run_cut rather than shipping.
     if cut.render_path:
         cmd += ["-i", cut.render_path]
+        # ⚠️ THE SURPLUS FRAME IS DROPPED HERE, AND ONLY ON EVIDENCE. -frames:v below keeps
+        # the FIRST N frames, which is right when a too-long render overshot at the tail and
+        # wrong at every frame when it overshot at the head. resolve_render_overshoot() has
+        # already compared this render's first two frames against the previous render's last
+        # one; render_head_trim is non-zero only when that comparison was unambiguous, and an
+        # unclear one refuses the cut in run_cut rather than reaching this line.
+        #
+        # `trim=start_frame=`, NOT -ss. trim counts FRAMES; -ss counts seconds and would put
+        # back the fraction-of-a-frame rounding this mechanism exists to remove. It goes
+        # FIRST in the chain so any fps filter resamples the corrected frames, and setpts
+        # rebases the timestamps so the output does not start at frame one's PTS.
+        _trim = ([f"trim=start_frame={cut.render_head_trim}", "setpts=PTS-STARTPTS"]
+                 if cut.render_head_trim > 0 else [])
         # ⚠️ `fps=X`, NOT `-r X` — the same measured mis-mapping the source branch documents
         # below. MEASURED here too: a 30-frame (1 s) render under --render-dir --fps 24 came
         # out 26 frames / 1.083 s, 8% long, and reads 24 frames / 1.000 s with the filter.
         _res = forced_rate_resamples(cut, args, seq_fps)
-        _vf = ([f"fps={float(args.fps):.6f}:round=up"] if _res else [])
+        _vf = _trim + ([f"fps={float(args.fps):.6f}:round=up"] if _res else [])
         # ⚠️ CONVERTED, NOT DROPPED. This used to read `if not _vf:`, so a --fps that
         # REALLY resamples left the render branch with no -frames:v at all — the one
         # branch in the file with nothing bounding its output length. pinned_frame_count()
@@ -3982,7 +4037,20 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
             # -t at the cut's own length, NOT -shortest: a render's AAC can end a hair before
             # its last picture frame, and -shortest would then clip the VIDEO and fail the
             # frame-count check. -t bounds the sound; -frames:v still pins the picture.
-            _dur = max(1, cut.duration_frames) / (cut.render_fps or seq_fps or 30.0)
+            _rfps = cut.render_fps or seq_fps or 30.0
+            _dur = max(1, cut.duration_frames) / _rfps
+            # ⚠️ AND THE SOUND LOSES THE SAME FRAME THE PICTURE DID. _trim above is a VIDEO
+            # filter, so on a head-repaired clip the picture started at render frame 1 while
+            # the sound still started at render frame 0: the audio led the picture by one
+            # frame, the surplus frame's sound shipped, and the cut's own last frame's sound
+            # was dropped — reproduced end to end by review, on exactly the clips the run
+            # reports as REPAIRED. atrim, not an input -ss: -ss moves both streams and would
+            # shift the already-trimmed picture a second time. asetpts rebases the audio to
+            # zero, which is what keeps -t correct.
+            if cut.render_head_trim > 0:
+                cmd += ["-filter:a",
+                        f"atrim=start={cut.render_head_trim / _rfps:.6f},"
+                        f"asetpts=PTS-STARTPTS"]
             cmd += [*codec_flags(cut, args), "-movflags", "+faststart",
                     "-c:a", "aac", "-b:a", "192k", "-t", f"{_dur:.6f}", str(out_path)]
         else:
@@ -5001,6 +5069,8 @@ ADVISORY_WARNING_MARKS = (
     "were merged into it",           # Premiere's extra channel lanes of a clip already listed
     "nested sequence(s) skipped",    # --nest one-cut, which is a choice the caller made
     "reach the last frame of their media",   # Premiere counting a file longer than it is
+    "correct as delivered",          # a tail overshoot, measured against the next render
+    "Nothing is decided on an estimate",   # a container that does not report its length
 )
 
 
@@ -5091,13 +5161,358 @@ def attach_renders(cuts: list[Cut], render_dir: Path) -> tuple[int, list[Cut]]:
             # nb_frames is missing from some containers. Duration x rate lands within a
             # frame, which is all this figure is used for — reporting a GROSS mismatch,
             # not deciding an encode. build_command pins the exact count regardless.
+            #
+            # ⚠️ AND IT IS FLAGGED, because 3.75 gave a one-frame disagreement teeth. The
+            # duration here is the FORMAT's, i.e. the longest stream: a Matroska render
+            # carrying AAC runs about 21 ms past its last picture, which at 30 fps is over
+            # the half-frame rounding boundary, so an exact render reads as one frame long.
+            # Measured by review: every cut in an .mkv export refused, in a folder where
+            # nothing was wrong. A guessed count now says so and buys no refusals.
             dur = data.get("format", {}).get("duration")
             if dur and c.render_fps:
                 try:
                     c.render_frames = int(round(float(dur) * c.render_fps))
+                    c.render_frames_derived = True
                 except ValueError:
                     pass
     return matched, missing
+
+
+# ⚠️ THE ONLY PLACE THIS TOOL EVER LOOKS AT A PIXEL. Everything else it believes about a
+# file comes from ffprobe metadata. Two frames are compared at 160x90, the size
+# tests/verify.py has always used against real footage, so the numbers below sit against
+# measurements that already exist rather than ones invented here.
+#
+# ⚠️ IN COLOUR, THOUGH, WHERE verify.py USES GRAY — and that is not a preference. Gray
+# throws away chroma, and two DIFFERENT pictures can share a luma: measured on the first
+# fixture built for this, a red frame (192,32,32) and a blue one (32,80,160) come out at
+# luma 79.8 and 74.8, a distance of 5.0, under the "definitely different" threshold. The
+# head overshoot was real and the test called it unclear. In rgb24 the same pair is 112.
+# Colour can only ever move two different frames further apart and leaves two identical
+# ones where they were, so the thresholds carry over unchanged.
+HEADTRIM_SAME_MAE = 1.5      # at or under this, two frames are the same picture
+HEADTRIM_APART_MAE = 6.0     # at or over this, they are definitely different pictures
+# Between the two the answer is "cannot tell", and a cut that cannot tell is refused.
+# The 8 Sep investigation measured a matching frame at 0.26 and a non-matching one at 9.56
+# on real delivered clips, so the gap the thresholds sit in is wide. They are deliberately
+# strict at both ends: being too strict costs a refusal, which is the outcome already
+# chosen for the unclear case, while being too loose ships a clip trimmed at the wrong end
+# — the exact failure this whole mechanism exists to prevent.
+
+
+def render_frames_rgb(path: str, indexes: list[int],
+                      timeout: float = 120.0) -> dict[int, bytes]:
+    """Decode the named frames of one file as 160x90 rgb24, in one pass.
+
+    ⚠️ ONE PASS, BECAUSE `select` DOES NOT SEEK. `select='eq(n,N)'` is a filter: ffmpeg
+    decodes every frame from zero and discards the ones that do not match, so asking for
+    frame 0 and frame 900 separately costs two full decodes of the same file. Asking for
+    both in one expression costs one. Nothing else in the repo combines -ss with a
+    single-frame read, and -ss on a render would reintroduce the second-vs-frame rounding
+    this whole mechanism exists to remove — so the filter is the right tool and batching
+    is how it is paid for.
+
+    Returns {index: bytes}; an index whose frame did not come back is simply absent, and
+    every caller treats a missing frame as "cannot tell" rather than as a match.
+    """
+    want = sorted({i for i in indexes if i >= 0})
+    if not want:
+        return {}
+    expr = "+".join(f"eq(n\\,{i})" for i in want)
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(path),
+             "-vf", f"select='{expr}',scale=160:90,format=rgb24",
+             "-fps_mode", "passthrough", "-frames:v", str(len(want)),
+             "-f", "rawvideo", "-"],
+            capture_output=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return {}
+    size = 160 * 90 * 3
+    data = r.stdout or b""
+    out: dict[int, bytes] = {}
+    for slot, idx in enumerate(want):
+        chunk = data[slot * size:(slot + 1) * size]
+        if len(chunk) == size:
+            out[idx] = chunk
+    return out
+
+
+def frame_mae(a: bytes, b: bytes) -> Optional[float]:
+    """Mean absolute difference between two equal-length rgb frames, or None."""
+    if not a or not b or len(a) != len(b):
+        return None
+    return sum(abs(x - y) for x, y in zip(a, b)) / float(len(a))
+
+
+class _FolderNeighbour:
+    """A neighbour that exists on disk but not in this run's cut list.
+
+    ⚠️ --pick IS WHY THIS EXISTS. The panel's subset tick — and the Retry button on a failed
+    row, which is the only affordance offered there — narrows tl.cuts before renders are ever
+    attached, so the adjacent cut's ROW is gone while its render is still sitting in the
+    folder. The neighbour test then found nothing, the cut was refused, and pressing Retry
+    reproduced the refusal by construction: the more you narrowed the selection, the less
+    evidence the engine would look at. Reproduced by review — the same bytes repaired in a
+    full run and refused in a picked one.
+
+    The folder is the better source anyway. render_name() spells every file
+    `{track_type}-{track_index}-{in}-{out}`, so the filenames ARE the timeline, independent
+    of which rows this run happens to be carrying.
+    """
+
+    __slots__ = ("render_path", "render_frames")
+
+    def __init__(self, path: str, frames: int):
+        self.render_path = path
+        self.render_frames = frames
+
+
+def _neighbour_on_disk(cut: Cut, side: str, render_dir: Optional[Path],
+                       known: Optional[set] = None) -> Optional[_FolderNeighbour]:
+    """The render abutting this cut on the given side, read off the folder's filenames.
+
+    `known` is every (track_type, track_index, in, out) the TIMELINE holds, captured before
+    --ext and --pick narrowed the cut list. A file whose range is not in there is a leftover
+    from an earlier edit; see the note at the capture site for why accepting one is not a
+    harmless miss but a systematic push toward a wrong repair.
+    """
+    if render_dir is None:
+        return None
+    edge = cut.timeline_in_frames if side == "prev" else cut.timeline_out_frames
+    prefix = f"{cut.track_type}-{int(cut.track_index)}-"
+    hits = []
+    for ext in RENDER_EXTS:
+        pattern = (f"{prefix}*-{edge}{ext}" if side == "prev"
+                   else f"{prefix}{edge}-*{ext}")
+        for f in render_dir.glob(pattern):
+            bits = f.stem[len(prefix):].split("-")
+            if len(bits) != 2:
+                continue
+            try:
+                a, b = int(bits[0]), int(bits[1])
+            except ValueError:
+                continue
+            if b <= a:
+                continue
+            if known is not None and (cut.track_type, int(cut.track_index), a, b) not in known:
+                continue
+            hits.append((f, b - a))
+    # Exactly one candidate, exactly as the in-memory rule requires. Two files claiming the
+    # same boundary is a timeline this test has no business guessing about.
+    if len(hits) != 1:
+        return None
+    path, want = hits[0]
+    data = probe(str(path))
+    frames = 0
+    for st in data.get("streams", []):
+        if st.get("codec_type") != "video":
+            continue
+        try:
+            frames = int(st.get("nb_frames") or 0)
+        except (TypeError, ValueError):
+            frames = 0
+        break
+    # nb_frames only — never the duration x rate guess. A ruler whose own length was
+    # estimated cannot measure a one-frame error, and the neighbour's render has to be
+    # EXACT to be a ruler at all.
+    if frames <= 0 or frames != want:
+        return None
+    return _FolderNeighbour(str(path), frames)
+
+
+def resolve_render_overshoot(cuts: list[Cut], render_dir: Optional[Path] = None,
+                             known_ranges: Optional[set] = None) -> None:
+    """Decide, from the pixels, WHICH END a too-long render overshot at.
+
+    ⚠️ THE DEFECT THIS EXISTS FOR. Premiere sometimes hands back a render one frame longer
+    than the range it was asked for. The encode pins -frames:v to the cut's own length with
+    no seek, so ffmpeg keeps the FIRST N frames — which is right if the extra frame is at
+    the tail and wrong at every single frame if it is at the head. Measured on 12 real
+    exports: 1 render-mode clip in 140, delivered `status ok`, `frame_exact true`, notes
+    empty, holding timeline 972..1049 under a label that says 973..1050.
+
+    ⚠️ AND THE RULE IS EVIDENCE, NOT ARITHMETIC. There is nothing in the numbers that says
+    which end overshot; the answer is in the pixels, and the reference is the NEIGHBOURING
+    RENDER. In render mode the picture carries Premiere's colour, titles, Motion and ramps,
+    so the raw source cannot be a reference — but the cut before this one was exported by
+    the same encoder from the same timeline, and if this render overshot at the head then
+    its first frame IS the frame that render ends on.
+
+        head  <=>  C[0] is the same picture as PREV[last]  AND  C[1] is not
+        tail  <=>  C[last] is the same picture as NEXT[0]   AND  C[last-1] is not
+
+    The second half of each test is what makes it evidence rather than a coincidence. On a
+    locked-off shot every frame matches every other frame, so both halves fire, the test is
+    inconclusive by construction, and the clip is refused. That is the intended outcome and
+    not a gap: refusing costs a re-render of one range, while guessing ships a clip trimmed
+    at the wrong end, which is indistinguishable from the bug.
+
+    Anything less than unambiguous is "unclear": no neighbour, a neighbour that is not
+    exactly adjacent (a cross-dissolve makes the ranges OVERLAP, so "the frame before" is
+    not a single frame), a neighbour whose own render is not exact, or a frame that would
+    not decode. Every one of those refuses the cut in run_cut rather than delivering
+    something unverified.
+
+    ⚠️ A CROSS-DISSOLVE BOUNDARY CAN NEVER BE RESOLVED, and that is a consequence rather
+    than an oversight. Under the default --transitions ignore the two clips OVERLAP, so
+    nothing abuts this cut and there is no neighbour to find; under --transitions split they
+    abut at the midpoint, but the frames either side are both the blended program, so the
+    "and the frame beside it is different" half measures how much a dissolve moves in one
+    frame rather than whether the shot changed, and it does not clear the threshold. Either
+    way the answer is "cannot tell", and a +1 render on a dissolve-adjacent clip is refused.
+    That is the right answer — under a dissolve "the frame before" is genuinely not a single
+    frame — but it means those clips need a re-render rather than a repair.
+
+    ⚠️ ONLY +1 IS EXAMINED, AND THE LIMIT IS DELIBERATE. A render two frames long could be
+    one at each end, two at the head or two at the tail, and the two-frame test above cannot
+    separate those — so it would report "unclear" on every one of them, turning
+    RENDER_FRAME_SLACK from a documented tolerance into a refusal without anyone deciding
+    that. Those still ship with the warning they have always had. Whether they should is a
+    real question and a separate one: it changes a policy that predates this mechanism, has
+    its own rationale and its own tests, and the answer is not implied by the answer here.
+    """
+    todo = [c for c in cuts
+            if c.render_path and c.render_frames and c.duration_frames
+            and not c.render_frames_derived
+            and c.render_frames - c.duration_frames == 1]
+    if not todo:
+        return
+    # Grouped exactly as split_transition_overlaps and overlapping_cut_frames group, so
+    # "the same track" means the same thing here as everywhere else in the file.
+    by_track: dict[tuple, list[Cut]] = {}
+    for c in cuts:
+        by_track.setdefault((c.track_type, int(c.track_index)), []).append(c)
+
+    def _lone_neighbour(cut: Cut, side: str) -> Optional[Cut]:
+        peers = by_track.get((cut.track_type, int(cut.track_index)), [])
+        if side == "prev":
+            hits = [p for p in peers if p is not cut
+                    and p.timeline_out_frames == cut.timeline_in_frames]
+        else:
+            hits = [p for p in peers if p is not cut
+                    and p.timeline_in_frames == cut.timeline_out_frames]
+        # Exactly one, and its own render has to be trustworthy before its frames can be
+        # used as a ruler. A neighbour that is itself mis-sized proves nothing.
+        #
+        # ⚠️ THIS GUARD IS NOT PINNED BY A TEST, and that is stated rather than hidden.
+        # Removing it leaves tests/check_render_mode.py entirely green — measured. The
+        # fixtures there build every render as one flat colour, so a mis-sized neighbour's
+        # last frame is still the right COLOUR and the ruler still reads true; every
+        # scenario that would separate the two comes out "unclear" either way. It is kept
+        # because using a ruler known to be the wrong length to measure a one-frame error
+        # is unsound on its face, not because a red check demanded it.
+        hits = [h for h in hits if h.render_path and h.render_frames
+                and h.render_frames == h.duration_frames]
+        return hits[0] if len(hits) == 1 else None
+
+    def _side(edge: Optional[bytes], inner: Optional[bytes],
+              ref: Optional[bytes]) -> Optional[bool]:
+        """Did THIS end overshoot? True yes, False no, None cannot tell.
+
+        ⚠️ THREE ANSWERS, NOT TWO, AND THAT IS THE WHOLE POINT. The first version of this
+        returned a bool, so "the neighbour's render contradicts an overshoot at this end"
+        and "there is no neighbour, so this end was never examined" were the same value —
+        False. The verdict below then read `head and not tail`, and an unexamined side
+        counted as a side that had DISAGREED. One unopposed match therefore decided the
+        case, which is exactly the guessing this mechanism exists to replace.
+
+        Reproduced by an adversarial review, twice, in both directions: a genuine TAIL
+        overshoot on the last clip of a track — no next neighbour, so the tail test could
+        not run — whose first frame repeated the previous shot's last frame (a one-frame
+        black hold at a scene change, a held graphic, a duplicated frame from a 24-into-30
+        conform) was declared a HEAD overshoot, trimmed at the wrong end, and delivered
+        `status ok`, `frame_exact true`, under a warning saying it had been verified.
+
+        So: `edge` is the frame at this end, `inner` the one beside it, `ref` the
+        neighbour's frame across the boundary. An overshoot needs the edge frame to BE the
+        neighbour's and the inner frame not to be. A denial needs the edge frame to be
+        plainly not the neighbour's. Anything else — a missing frame, a missing neighbour,
+        two distances in the band between the thresholds — is None, and None on either
+        side refuses the cut.
+        """
+        if edge is None or inner is None or ref is None:
+            return None
+        d_edge, d_inner = frame_mae(edge, ref), frame_mae(inner, ref)
+        if d_edge is None or d_inner is None:
+            return None
+        if d_edge <= HEADTRIM_SAME_MAE and d_inner >= HEADTRIM_APART_MAE:
+            return True
+        if d_edge >= HEADTRIM_APART_MAE:
+            return False
+        return None
+
+    for c in todo:
+        prev = (_lone_neighbour(c, "prev")
+                or _neighbour_on_disk(c, "prev", render_dir, known_ranges))
+        nxt = (_lone_neighbour(c, "next")
+               or _neighbour_on_disk(c, "next", render_dir, known_ranges))
+        last = c.render_frames - 1
+        # ⚠️ NOT DECODED UNTIL BOTH NEIGHBOURS ARE THERE. Reading the subject render costs a
+        # full decode of the file, because `select` does not seek — and with a neighbour
+        # missing on either side the verdict is "unclear" whatever the pixels say, so every
+        # one of those frames would be decoded to reach a conclusion already known. Measured
+        # by review on a 200-clip export: the wasted decode is the whole file, per clip.
+        head = tail = None
+        # ⚠️ WHY A SIDE IS MISSING IS TWO DIFFERENT FACTS, and the first version told the
+        # editor the same sentence for both. "There is no clip there" — the cut opens or
+        # closes the track, or a gap or a dissolve sits at that boundary — is a property of
+        # the EDIT and means re-rendering will not help. "The clip is there but its render
+        # cannot be used as a ruler" — it is missing, or itself the wrong length — is a
+        # property of the FOLDER and often means re-rendering the neighbour fixes this cut
+        # too. Review reproduced the refusal naming a clip that does not exist.
+        def _absent(side: str) -> str:
+            peers = by_track.get((c.track_type, int(c.track_index)), [])
+            if side == "prev":
+                touching = [p for p in peers if p is not c
+                            and p.timeline_out_frames == c.timeline_in_frames]
+            else:
+                touching = [p for p in peers if p is not c
+                            and p.timeline_in_frames == c.timeline_out_frames]
+            where = "before" if side == "prev" else "after"
+            if not touching:
+                return (f"nothing on this track abuts it {where} — it is at the edge of the "
+                        f"track, or a gap or a dissolve sits at that join")
+            if len(touching) > 1:
+                return f"more than one clip claims the join {where} it"
+            return (f"the clip {where} it has no usable render — missing, or not the length "
+                    f"of its own cut")
+
+        why = ""
+        if prev is None or nxt is None:
+            _bits = ([_absent("prev")] if prev is None else []) + \
+                    ([_absent("next")] if nxt is None else [])
+            why = "; ".join(_bits)
+        if prev is not None and nxt is not None:
+            mine = render_frames_rgb(c.render_path, [0, 1, last - 1, last])
+            pr = render_frames_rgb(prev.render_path, [prev.render_frames - 1])
+            nx = render_frames_rgb(nxt.render_path, [0])
+            head = _side(mine.get(0), mine.get(1), pr.get(prev.render_frames - 1))
+            tail = _side(mine.get(last), mine.get(last - 1), nx.get(0))
+            # ⚠️ "ffmpeg NEVER ANSWERED" IS NOT "THE PICTURE SAYS NOTHING". render_frames_rgb
+            # returns what it managed to decode, so a timeout, a half-downloaded render or a
+            # non-zero exit arrives here as an empty dict — indistinguishable, until now,
+            # from two frames that genuinely look alike. The refusal then told the editor
+            # the surplus frame "could not be placed from the picture", about a picture
+            # nothing had read. Flagged by review; the outcome is the same refusal, but the
+            # sentence now names the real obstacle.
+            if not mine or not pr or not nx:
+                why = ("its render, or a neighbouring one, could not be decoded — the file "
+                       "may still be downloading")
+            elif head is None or tail is None:
+                why = ("the shots on either side of it look too alike to tell the surplus "
+                       "frame from a real one")
+            else:
+                why = "both ends of the render match their neighbour equally well"
+        # BOTH sides must have answered, and they must disagree. One end saying "the
+        # surplus frame is mine" while the other has not been asked is not evidence.
+        if head is True and tail is False:
+            c.render_overshoot, c.render_head_trim = "head", 1
+        elif tail is True and head is False:
+            c.render_overshoot, c.render_head_trim = "tail", 0
+        else:
+            c.render_overshoot, c.render_head_trim = "unclear", 0
+            c.render_overshoot_why = why
 
 
 def collapse_exploded_audio_lanes(cuts: list[Cut]) -> tuple[list[Cut], list[dict]]:
@@ -5760,6 +6175,22 @@ def output_stream_count(path: Path) -> int:
     return len([ln for ln in (r.stdout or "").splitlines() if ln.strip()])
 
 
+def _delivery_exists(cut: Cut, outdir: Path) -> bool:
+    """Is a file from an earlier run still sitting at this cut's delivery name?
+
+    ⚠️ REFUSING A CUT DOES NOT EMPTY THE FOLDER, and on the upgrade path that is the whole
+    problem. A run of 3.73 wrote the one-frame-shifted clip this refusal now exists to
+    prevent; 3.76 refuses to write a replacement, the old file stays under the same name,
+    and the new manifest publishes that name. Nothing deletes it — never deleting is
+    deliberate, because a refusal must not destroy work — so it has to be SAID. Found by
+    review, which reproduced the run naming a file it had just declined to produce.
+    """
+    try:
+        return bool(cut.output_file) and (outdir / cut.output_file).is_file()
+    except OSError:
+        return False
+
+
 def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
     # A render is Premiere's output, so neither of the next two disqualifications
     # applies to it. An After Effects comp has no decodable file on disk and is refused
@@ -5783,14 +6214,53 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
     # A render's frame count is the one thing that cannot lie about this. Two frames of
     # slack, because a real range can land a frame either side of the arithmetic; beyond
     # that the file is not the range it claims to be and the cut fails.
+    # ⚠️ AND A LENGTH THAT COULD NOT BE READ IS NOT A LENGTH THAT PASSED. Every defence
+    # below is gated on `cut.render_frames` being truthy, so a render whose count ffprobe
+    # could not report — the probe failed or timed out, or the container carries neither
+    # nb_frames nor a usable duration — walked past all of them: no gross check, no
+    # overshoot resolution, no warning, no note, delivered `status ok, frame_exact true`.
+    # The whole reason this check exists is that a render of the WRONG RANGE is otherwise
+    # undetectable, and an unreadable length is exactly the case where it is most likely.
+    # Found by review; before it, that cut was the one shape with no defence at all.
+    if cut.render_path and cut.duration_frames and not cut.render_frames:
+        cut.status = "render_mismatch"
+        cut.stale_delivery = _delivery_exists(cut, outdir)
+        cut.error = ("the render's length could not be read, so there is no way to tell "
+                     "whether it is the range this cut asked for — the file may be damaged "
+                     "or still downloading. Re-render this range in Premiere")
+        return cut
     if cut.render_path and cut.render_frames and cut.duration_frames:
         off = cut.render_frames - cut.duration_frames
         if abs(off) > RENDER_FRAME_SLACK:
             cut.status = "render_mismatch"
+            cut.stale_delivery = _delivery_exists(cut, outdir)
             cut.error = (f"the render holds {cut.render_frames} frames but this cut is "
                          f"{cut.duration_frames} ({off:+d}) — not the range it should "
                          f"be, so it was not encoded")
             return cut
+        # ⚠️ INSIDE THE SLACK AND STILL REFUSED, ON PURPOSE. A render one frame longer than
+        # its cut is delivered by keeping the FIRST N frames, which is only correct if the
+        # surplus frame is at the tail. resolve_render_overshoot() compares the pixels
+        # against the neighbouring renders to find out; when it cannot tell, the choice is
+        # between shipping a clip that may be shifted by a frame at every frame and not
+        # shipping one at all, and not shipping is the one that can be noticed.
+        if cut.render_overshoot == "unclear":
+            cut.status = "render_mismatch"
+            cut.stale_delivery = _delivery_exists(cut, outdir)
+            cut.error = (f"the render holds {cut.render_frames} frames where this cut is "
+                         f"{cut.duration_frames}, and the surplus frame could not be placed "
+                         f"at either end: "
+                         + (cut.render_overshoot_why or "the picture was inconclusive")
+                         + ". Re-render this range in Premiere, or the clip would be "
+                           "delivered possibly one frame out of step with the timeline")
+            return cut
+        # ⚠️ A RENDER SHORTER THAN ITS CUT IS NOT REFUSED HERE, and a first draft of this
+        # got that wrong. It looks unshippable and often is — but under a resampling --fps
+        # it is not: 59 input frames map onto all 48 output slots, the pin is satisfied and
+        # the clip is correct, which is documented policy measured on 6 Sep. Refusing it up
+        # front broke that. Where the frames really are missing the post-encode count check
+        # catches it a few lines below; all that was wrong there was the SENTENCE, which
+        # blamed the source media for a short render.
     if cut.media_kind == "unsupported" and not cut.render_path:
         cut.status = "unsupported"
         # ⚠️ A CLIP WITH NO PATH IS NOT A DYNAMIC LINK COMP. A title, a graphic, an
@@ -5887,7 +6357,15 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
     # made under different encode settings, so NOTHING in it may be skipped — and with the
     # index emptied there is now nothing left that could skip one, which is the point of
     # the bare-existence fallback being gone (see below).
-    if getattr(args, "resume", False) and not (
+    # ⚠️ A CUT THIS RUN IS REPAIRING IS NEVER "ALREADY THERE". The file in the folder was
+    # written before the repair existed — it is the one-frame-shifted clip this mechanism
+    # was built to replace — and --resume would skip it and then let the run report it as
+    # repaired, which is the worst of the three possible outcomes. RESUME_DRIFT_FIELDS
+    # cannot see this: it compares encode SETTINGS, and nothing about the settings changed.
+    # Found by an adversarial review, which reproduced the run certifying an unrepaired file.
+    if getattr(args, "resume", False) and cut.render_head_trim > 0:
+        pass
+    elif getattr(args, "resume", False) and not (
             getattr(args, "resume_index", None) or {}).get("recut_all"):
         idx = getattr(args, "resume_index", None) or {}
         done = False
@@ -6034,11 +6512,31 @@ def run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
             # real answer — Premiere thinks this file is longer than it is — was not in the
             # sentence. apply_probe measured the overhang; say it, and say the fix.
             _over = _overhang_note(cut)
+            # ⚠️ AND WHEN THE SHORT THING IS THE RENDER, SAY SO. Measured: a 59-frame
+            # render into a 60-frame slot failed with "the source is shorter than the cut,
+            # or unreadable" — about a source file that was perfectly fine and that this
+            # branch never even opened. In render mode the source is not what ffmpeg read.
+            # ⚠️ GATED ON WHAT FFMPEG READ, NOT ON WHAT THE METADATA SAID. The first
+            # version required cut.render_frames to already admit the shortfall — so when
+            # the container over-reported its length, or reported nothing, a render-mode
+            # clip that came up short still blamed "the source", a file this branch never
+            # opens. In render mode the source is not what ffmpeg read, ever.
+            _short_render = ""
+            if cut.render_path and counted and got < want:
+                _known = (f"the render reports {cut.render_frames} frames"
+                          if cut.render_frames else
+                          "the render does not report its own length")
+                _short_render = (
+                    f"the RENDER came up short — ffmpeg read {got} frame(s) out of it where "
+                    f"this cut is {cut.duration_frames} ({_known}). The missing frames are "
+                    f"not in the file, so re-render this range in Premiere. The source "
+                    f"media is not the problem")
             if counted and got != want:
                 cut.status = "failed"
                 cut.error = (f"ffmpeg exited 0 but wrote {got} frame(s) where {want} "
                              f"were asked for ({got - want:+d}) — "
-                             + (_over or "the source is shorter than the cut, or unreadable"))
+                             + (_short_render or _over
+                                or "the source is shorter than the cut, or unreadable"))
             elif timed and got_s < want_s - AUDIO_SHORT_TOLERANCE:
                 cut.status = "failed"
                 cut.error = (f"ffmpeg exited 0 but wrote {got_s:.3f}s of audio where "
@@ -6271,10 +6769,21 @@ def describe(cut: Cut) -> dict:
     if cut.transition_split:
         notes.append(f"{cut.transition_split}f to a dissolve"
                      + (f" ({cut.transition_split_end})" if cut.transition_split_end else ""))
-        if cut.render_frames and cut.duration_frames:
-            d = cut.render_frames - cut.duration_frames
-            if abs(d) > 1:
-                notes.append(f"render {d:+d} frame(s) vs the timeline")
+    # ⚠️ NOT GATED ON A DISSOLVE, AND NOT ON `> 1`. This note lived inside the branch
+    # above, so it could only ever appear on a cut that a transition had already split —
+    # and it needed a TWO-frame disagreement to say anything. The disagreement that
+    # actually ships wrong pixels is ONE frame on an ordinary cut, which is the exact
+    # shape both conditions excluded. See resolve_render_overshoot().
+    if cut.render_frames and cut.duration_frames:
+        d = cut.render_frames - cut.duration_frames
+        if d and cut.render_frames_derived:
+            # The container never said how long it is; the figure being compared here is
+            # one the engine worked out from the file's duration, which on a Matroska
+            # carrying AAC runs past the picture. Saying "render +1 frame(s) vs the
+            # timeline" about that is reporting the estimate's error as the render's.
+            notes.append(f"render length estimated ({d:+d}f vs the timeline)")
+        elif d:
+            notes.append(f"render {d:+d} frame(s) vs the timeline")
     if cut.reversed:
         notes.append("reversed")
     if cut.speed_varies:
@@ -7475,6 +7984,24 @@ def main():
         # measured at 49 rows on one real timeline, all of them reported cuttable. The
         # filter re-checks the RESULT of this loop and refuses to run without it.
 
+    # ⚠️ THE TIMELINE'S OWN RANGES, CAPTURED BEFORE ANYTHING NARROWS THE LIST. --ext and
+    # --pick both rewrite tl.cuts in place with no copy kept, and _neighbour_on_disk exists
+    # precisely because of that: it reads the render folder so a picked subset can still see
+    # its neighbours. But a folder is not a timeline. A render left behind by an earlier edit
+    # — a clip since moved, lifted or trimmed — still carries a filename that abuts this
+    # cut's boundary, and its pixels are unrelated to the join, so the comparison returns a
+    # hard "no" and a hard "no" is exactly the value the verdict needs to fire. Review
+    # reproduced it twice: the same +1 render refused with a clean folder and REPAIRED, one
+    # frame wrong at every frame, with one stale file present. The panel makes this easy to
+    # hit — cleanRenders keeps _renders/ after a dirty run and asks the editor to delete it
+    # by hand, and the next export renders into the same folder.
+    #
+    # So a disk neighbour must name a range the timeline actually has. Captured here because
+    # this is the last point at which the full list still exists.
+    args.timeline_ranges = {(c.track_type, int(c.track_index),
+                             int(c.timeline_in_frames), int(c.timeline_out_frames))
+                            for c in tl.cuts}
+
     if args.ext:
         # ⚠️ THE GUARD, AND IT CHECKS THE FACT RATHER THAN A FLAG. An earlier version of
         # this stamped a boolean in the marking loop and tested that; moving the loop below
@@ -7692,6 +8219,14 @@ def main():
     # marker is how the CONSOLE ranks them, not a second class of record.
     for w in tl.warnings:
         print(f"  {'++' if is_advisory_warning(w) else '!!'} {w}")
+    # ⚠️ THIS IS NOT THE LAST WARNING THAT WILL EXIST. Five places append to tl.warnings
+    # AFTER this loop has run — the probe pass, the shifted-render pass, the interpreted
+    # rate, the VFR gap, the --resume settings drift — and every one of them was landing
+    # in manifest.json and NOWHERE ELSE. Measured: a sentinel appended after this point
+    # reached the manifest 1/1 and the console 0/1. Two of those five are about the
+    # pixels being wrong, which makes the console the one place they had to appear.
+    # The tail is flushed below, once, before either path writes its manifest.
+    _warned_upto = len(tl.warnings)
     if getattr(args, "fps", None):
         # Loud, and not buried among the other warnings: this is the one setting that
         # changes what the files CONTAIN rather than how big they are.
@@ -7818,6 +8353,155 @@ def main():
             + ", ".join(_names[:4]) + (", …" if len(_names) > 4 else ""))
 
     assign_output_names(tl.cuts, args.container, tl.sequence_fps, cut_from_of(args))
+
+    # ⚠️ A RENDER THAT IS NOT THE LENGTH OF ITS CUT IS NOT THAT CUT'S FRAMES.
+    #
+    # The encode pins -frames:v to the cut's own length with no seek, so ffmpeg keeps the
+    # FIRST N frames of the render. That is right when a too-long render overshot at the
+    # tail and wrong at every single frame when it overshot at the head. Measured across 12
+    # real exports: 1 render-mode clip in 140, delivered `status ok`, `frame_exact true`,
+    # notes empty, holding timeline 972..1049 under a label reading 973..1050.
+    #
+    # resolve_render_overshoot reads the pixels and says which end it was, or says it cannot
+    # tell — and run_cut refuses the ones it cannot tell. Nothing is guessed here.
+    #
+    # ⚠️ NOT INSIDE `if not args.no_probe`, WHICH IS WHERE THIS FIRST LANDED. attach_renders
+    # measures the RENDERS, not the sources, so none of this depends on the source probe —
+    # and under --no-probe the whole pass simply did not run. It is also before the
+    # manifest-only return, so a panel SCAN reports the disagreement rather than only an
+    # export discovering it. The one thing that must stay after this point is nothing: it is
+    # the last statement in main() that changes a cut.
+    if getattr(args, "render_dir", None):
+        resolve_render_overshoot(tl.cuts, Path(args.render_dir),
+                                 getattr(args, "timeline_ranges", None))
+    # ⚠️ A GUESSED COUNT IS EXCLUDED HERE TOO, NOT JUST FROM THE REPAIR. The first pass at
+    # this put `not render_frames_derived` in resolve_render_overshoot's filter and nowhere
+    # else, which stopped the false REFUSALS and left everything downstream still treating
+    # the guess as a measurement: the clip lost frame_exact, picked up a "render +1 frame(s)
+    # vs the timeline" note, and was named in "check these in Premiere before delivering" —
+    # about a folder in which every render was exact. Worse, one guessed row clears
+    # settings.frame_exact for the WHOLE run, and tests/verify.py then refuses to grade the
+    # export and prints "This export was RESAMPLED to None fps", on a run with no --fps at
+    # all. Found by review. A guess is reported as a guess, below, and decides nothing.
+    _shifted = [c for c in tl.cuts
+                if c.render_path and c.render_frames and c.duration_frames
+                and not c.render_frames_derived
+                and c.render_frames != c.duration_frames]
+    _guessed = [c for c in tl.cuts
+                if c.render_path and c.render_frames and c.duration_frames
+                and c.render_frames_derived
+                and c.render_frames != c.duration_frames]
+    for c in _shifted:
+        # The pixels are the timeline's, but the FILE is not the length the timeline says,
+        # and until the surplus frame is PLACED this cut cannot claim to be frame exact.
+        # ⚠️ BOTH RESOLVED OUTCOMES ARE EXACT, not just the head one. A head overshoot is
+        # exact once the surplus frame is dropped in the encode; a TAIL overshoot is exact
+        # already — keeping the first N frames was the right thing to do all along, and the
+        # only new fact is that it has now been checked against the next render rather than
+        # assumed. A first draft marked the tail case not-exact and then warned that it
+        # might be shifted, which is the engine reporting doubt about something it had just
+        # verified. Only "unclear" and the short renders keep the flag off.
+        # ⚠️ AND ONLY FOR A CLIP THAT WILL ACTUALLY SHIP. A refused cut writes no file, so
+        # calling it "not frame exact" is a claim about pixels that do not exist — and it
+        # drags settings.frame_exact down with it, which is the flag verify.py reads to
+        # decide whether the export can be graded at all. The useful meaning of the run-level
+        # flag is "every file that WAS delivered holds exactly the frames the timeline used",
+        # and a refusal does not contradict that; the refusal itself is the report. Both
+        # resolved outcomes are exact — a head overshoot once the surplus frame is dropped,
+        # a tail overshoot already — so what is left is the disagreements that ship
+        # unresolved.
+        if (c.render_overshoot not in ("head", "tail")
+                and abs(c.render_frames - c.duration_frames) <= RENDER_FRAME_SLACK
+                and c.render_overshoot != "unclear"):
+            c.frame_exact = False
+    # ⚠️ THREE OUTCOMES, THREE SENTENCES, because the first draft gave all of them one and
+    # it was wrong for two. It said "check these in Premiere before delivering" about every
+    # render inside RENDER_FRAME_SLACK — including the SHORT ones, which was measured to be
+    # false: a 59-frame render into a 60-frame slot produces no file at all, so the warning
+    # named a clip that did not exist and asked him to inspect it. A clip that ships, a clip
+    # that is refused, and a clip that was repaired are three different pieces of news.
+    _fixed = [c for c in _shifted if c.render_overshoot == "head"]
+    _checked = [c for c in _shifted if c.render_overshoot == "tail"]
+    # ⚠️ SHORT RENDERS ARE THEIR OWN CASE, and lumping them in with the refusals was wrong
+    # twice over. run_cut refuses an "unclear" render deterministically; it does NOT refuse a
+    # short one — under a downward --fps the resampler maps the surviving frames onto every
+    # output slot and the clip is delivered, correct, status ok (documented policy, measured
+    # 6 Sep). So the sentence "these clips are REFUSED, re-render these ranges" was being
+    # said about clips the same run then wrote to disk. Found by review, and it is the third
+    # time today one warning has been made to speak for outcomes that differ.
+    _stuck = [c for c in _shifted if c.render_overshoot == "unclear"]
+    _short = [c for c in _shifted
+              if c not in _stuck and c.render_frames < c.duration_frames
+              and abs(c.render_frames - c.duration_frames) <= RENDER_FRAME_SLACK]
+    _ship = [c for c in _shifted
+             if c not in _fixed and c not in _checked and c not in _stuck
+             and c not in _short
+             and abs(c.render_frames - c.duration_frames) <= RENDER_FRAME_SLACK]
+
+    def _named(rows):
+        return (", ".join(f"{c.clip_name} [{render_name(c)}] "
+                          f"({c.render_frames - c.duration_frames:+d}f)"
+                          for c in rows[:6])
+                + (", …" if len(rows) > 6 else ""))
+
+    if _fixed:
+        tl.warnings.append(
+            f"{len(_fixed)} render(s) came back a frame long at the HEAD — the surplus "
+            f"frame is the previous clip's last one, measured against that render, and it "
+            f"is dropped so these cuts still start where the timeline says: "
+            + _named(_fixed))
+    if _checked:
+        # Advisory on purpose: nothing is wrong with these clips and nothing was done to
+        # them. It is said at all because a render that is not its cut's length is worth
+        # knowing about even when it turns out to be harmless — the alternative is silence
+        # that looks identical to the case nobody checked.
+        tl.warnings.append(
+            f"{len(_checked)} render(s) came back a frame long at the TAIL — the surplus "
+            f"frame is the next clip's first one, measured against that render, and it "
+            f"falls outside the cut anyway, so these clips are correct as delivered: "
+            + _named(_checked))
+    if _stuck:
+        tl.warnings.append(
+            f"{len(_stuck)} render(s) are not the length of the cut they belong to and "
+            f"cannot be repaired from the picture — these clips are REFUSED rather than "
+            f"delivered possibly a frame out of step. Re-render these ranges in Premiere: "
+            + _named(_stuck))
+    if _short:
+        # Deliberately does not predict the outcome, because main() cannot know it: whether
+        # the missing frames can be made up depends on the --fps arithmetic that run_cut has
+        # not done yet. Both possibilities are stated, and both are true.
+        tl.warnings.append(
+            f"{len(_short)} render(s) are SHORTER than the cut they belong to. Where the "
+            f"missing frames cannot be made up the clip fails with the render named; "
+            f"otherwise it is delivered at the right length. Re-render these ranges in "
+            f"Premiere to be sure: " + _named(_short))
+    # ⚠️ AND THE WORST ONES WERE THE ONLY ONES WITH NOTHING SAID ABOUT THEM. Every bucket
+    # above is gated on the disagreement being inside RENDER_FRAME_SLACK, so a render off by
+    # hundreds of frames — the whole-timeline export that started all of this — produced no
+    # sentence at all, while a +1 tail overshoot that needed no action produced a paragraph.
+    # run_cut does refuse them individually, by name, with both numbers; this is the line
+    # that says how many, in the same place as the others.
+    _gross = [c for c in _shifted
+              if abs(c.render_frames - c.duration_frames) > RENDER_FRAME_SLACK]
+    if _gross:
+        tl.warnings.append(
+            f"{len(_gross)} render(s) are nowhere near the length of the cut they belong "
+            f"to — not the range they should be, so nothing is encoded from them. "
+            f"Re-render these ranges in Premiere: " + _named(_gross))
+    if _guessed:
+        # Advisory: nothing is known to be wrong, and the number that looked wrong is one
+        # the engine computed rather than read. Said anyway, because silence here would be
+        # indistinguishable from a folder nobody checked.
+        tl.warnings.append(
+            f"{len(_guessed)} render(s) do not report their own length, so the engine had "
+            f"to estimate it from the file's duration and the estimate disagrees with the "
+            f"cut by a frame. Nothing is decided on an estimate, and these clips are cut "
+            f"normally: " + _named(_guessed))
+    if _ship:
+        tl.warnings.append(
+            f"{len(_ship)} render(s) are not the length of their cut, so their frames may "
+            f"be shifted against the timeline — check these in Premiere before delivering: "
+            + _named(_ship))
 
     # Only a panel dump carries Premiere's interpreted rate, and only after probing can
     # it be compared with the file's own. A disagreement means the edit was built on a
@@ -7995,6 +8679,12 @@ def main():
             + (f", {_amb} filename(s) ambiguous, re-cut" if _amb else "")
             + f" (matched by {_ri.get('how')})")
 
+    # The tail of tl.warnings: everything the probe and resume passes found after the
+    # header was printed. Same markers, same list — this is a second flush, not a second
+    # class of warning. See _warned_upto above.
+    for w in tl.warnings[_warned_upto:]:
+        print(f"  {'++' if is_advisory_warning(w) else '!!'} {w}")
+
     if args.manifest_only:
         csv_p, json_p, sheet_p = write_manifest_or_exit(tl, args.out, args)
         print(f"\nCut list written:\n  {csv_p}\n  {json_p}\n  {sheet_p}")
@@ -8049,12 +8739,30 @@ def main():
             # above and the manifest carries every error in full, so the repeat bought
             # nothing and buried the lines that differ.
             if c.error:
-                _first = c.error.splitlines()[0][:160]
-                if _first in _said_errors:
-                    _said_errors[_first] += 1
+                # ⚠️ WRAPPED, NOT CUT OFF. This truncated at 160 characters, which was fine
+                # while every reason was one short clause and silently useless the moment one
+                # was not: the overhang message added on 8 Sep runs to 244 characters and the
+                # console printed it up to "…Premiere believes the file", dropping the half
+                # that says what to do — "is longer than it is; trim the clip to the end of
+                # the footage, or replace the media". The whole point of that sentence is the
+                # instruction, and only the manifest ever carried it. De-duplication still
+                # keys on the first 160 characters, which is what made repeats collapse.
+                _line = c.error.splitlines()[0]
+                _key = _line[:160]
+                if _key in _said_errors:
+                    _said_errors[_key] += 1
                 else:
-                    _said_errors[_first] = 1
-                    print(f"        {_first}")
+                    _said_errors[_key] = 1
+                    # ⚠️ NEITHER HYPHENS NOR LONG WORDS ARE BREAK POINTS. textwrap's
+                    # defaults split on both, and every one of these reasons carries a
+                    # file path. A scratch path with hyphens in its folder names came out
+                    # broken across three lines at those hyphens: a path nobody can copy
+                    # and a string nothing can match. A path longer than the width now
+                    # overflows its line intact, which is the right trade.
+                    _parts = textwrap.wrap(_line, 96, break_on_hyphens=False,
+                                           break_long_words=False) or [_line]
+                    for _i, _part in enumerate(_parts):
+                        print(f"        {_part}" if _i == 0 else f"          {_part}")
 
     # Said once each above; here is what that spared, so a collapsed count is never a
     # silent one. The manifest holds every clip's error in full either way.
@@ -8062,6 +8770,24 @@ def main():
     if _repeats:
         print(f"  ({_repeats} repeat(s) of a reason already given above — see the manifest "
               f"for every clip's own line)")
+
+    # ⚠️ A REFUSAL DOES NOT EMPTY THE FOLDER, AND ON THE UPGRADE PATH THAT IS THE DANGER.
+    # An earlier run wrote the one-frame-shifted clip these refusals now exist to prevent.
+    # This run declines to write a replacement — and the old file is still sitting there
+    # under the very name this run's manifest publishes, so a downstream job, or an editor
+    # opening the folder, finds a file that looks delivered and is the thing that was
+    # refused. Nothing deletes it: never destroying earlier work is deliberate. Saying so
+    # is the whole remedy, and until review pointed it out nothing did.
+    _stale = [c for c in tl.cuts if getattr(c, "stale_delivery", False)]
+    if _stale:
+        tl.warnings.append(
+            f"{len(_stale)} refused clip(s) still have a file from an EARLIER run sitting "
+            f"under the name this run's manifest gives them. It was not written by this "
+            f"run and was not checked by it — delete it, or re-render the range and cut "
+            f"again: "
+            + ", ".join(f"{c.clip_name} [{c.output_file}]" for c in _stale[:6])
+            + (", …" if len(_stale) > 6 else ""))
+        print(f"\n  !! {tl.warnings[-1]}")
 
     # The single whole-timeline mp3, after the cuts and before the manifest that records it.
     if getattr(args, "audio", False):

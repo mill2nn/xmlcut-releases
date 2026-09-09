@@ -1063,9 +1063,23 @@ function rangeTicks(seq) {
  * If the points cannot be read back, that is also a failure. Rendering a range we cannot
  * confirm is precisely what produced seventeen wrong files.
  *
- * Returns {ok, how, tried[], got}. Tolerance is half a frame, because getInPoint() may
- * only be able to answer in seconds and a tick count derived from a float will not land
- * exactly. */
+ * ⚠️ AND THIS IS THE ONE THAT BIT AGAIN, QUIETLY. The half-frame tolerance below was
+ * written so a seconds round-trip could pass, and "seconds (number)" was tried FIRST
+ * because it was the form known to work. It does work — to within half a frame. On the
+ * 8 Sep investigation 46 of 48 ranges read back exactly and 2 did not, and those 2 were
+ * exactly the 2 clips that came out holding the wrong frames: an in-point that lands a
+ * fraction early makes Premiere export one extra frame at the head, `-frames:v` keeps
+ * the FIRST N, and every pixel in the clip is shifted by a frame. The number that
+ * predicted it was already being measured here, compared against a tolerance that
+ * forgave it, and reported to nobody.
+ *
+ * So an EXACT read-back now wins outright, and the tick forms are tried first because
+ * those are the ones that can deliver one. A form that only lands within half a frame is
+ * held back, and used only if nothing lands on the frame — nothing that renders today
+ * stops rendering — and it comes back marked `exact: false` so the caller can say so
+ * instead of the range being silently approximate.
+ *
+ * Returns {ok, exact, how, tried[], got}. */
 function setRange(seq, inTicks, outTicks, timebase) {
     var tried = [];
     var inSec = inTicks / TICKS_PER_SECOND;
@@ -1078,7 +1092,18 @@ function setRange(seq, inTicks, outTicks, timebase) {
         return t;
     }
 
+    /* Tick forms first: a range is asked for in whole ticks, and only a tick form can
+     * carry one back without a float rounding it. The seconds forms stay because on
+     * some builds they are the only ones that move the points at all. */
     var forms = [
+        ["ticks (string)", function () {
+            seq.setInPoint(String(inTicks));
+            seq.setOutPoint(String(outTicks));
+        }],
+        ["Time object", function () {
+            seq.setInPoint(timeAt(inTicks));
+            seq.setOutPoint(timeAt(outTicks));
+        }],
         ["seconds (number)", function () {
             seq.setInPoint(inSec);
             seq.setOutPoint(outSec);
@@ -1086,16 +1111,22 @@ function setRange(seq, inTicks, outTicks, timebase) {
         ["seconds (string)", function () {
             seq.setInPoint(String(inSec));
             seq.setOutPoint(String(outSec));
-        }],
-        ["Time object", function () {
-            seq.setInPoint(timeAt(inTicks));
-            seq.setOutPoint(timeAt(outTicks));
-        }],
-        ["ticks (string)", function () {
-            seq.setInPoint(String(inTicks));
-            seq.setOutPoint(String(outTicks));
         }]
     ];
+
+    /* ⚠️ ONE PASS, NOT TWO — and the reason is a bug the stub caught before Premiere did.
+     * The first version of this ran the whole list twice, exact then tolerant. In the
+     * second lap a form that does NOTHING reads back the points the PREVIOUS form left
+     * behind, finds them within half a frame, and is credited with a success it had no
+     * part in: a seconds-only Premiere was reported as having taken "ticks (string)".
+     * The range was still right; the log named the wrong form, which is the one thing
+     * this log exists to get right.
+     *
+     * So the list is walked once. An exact landing returns immediately. A near landing is
+     * only REMEMBERED — because by the end of the walk a later form may have moved the
+     * points again — and the winner is then re-applied and re-confirmed before it is
+     * believed. */
+    var near = -1;
 
     for (var i = 0; i < forms.length; i++) {
         try {
@@ -1106,24 +1137,53 @@ function setRange(seq, inTicks, outTicks, timebase) {
         }
         var got = rangeTicks(seq);
         if (got.in_ticks === null || got.out_ticks === null) {
-            tried.push(forms[i][0] + ": accepted, but the points could not be read back"
-                + " — refusing to render a range that cannot be confirmed");
+            tried.push(forms[i][0] + ": accepted, but the points could not be read"
+                + " back — refusing to render a range that cannot be confirmed");
             continue;
         }
         var dIn = Math.abs(Number(got.in_ticks) - inTicks);
         var dOut = Math.abs(Number(got.out_ticks) - outTicks);
+        if (dIn === 0 && dOut === 0) {
+            tried.push(forms[i][0] + ": took, exactly");
+            return { ok: true, exact: true, how: forms[i][0], tried: tried, got: got };
+        }
         if (dIn <= tol && dOut <= tol) {
-            tried.push(forms[i][0] + ": took (in off by "
+            if (near < 0) near = i;
+            tried.push(forms[i][0] + ": landed close but NOT exactly — in off by "
                 + (dIn / timebase).toFixed(3) + " frame(s), out by "
-                + (dOut / timebase).toFixed(3) + ")");
-            return { ok: true, how: forms[i][0], tried: tried, got: got };
+                + (dOut / timebase).toFixed(3) + "; held back in case a later form"
+                + " lands on the frame");
+            continue;
         }
         tried.push(forms[i][0] + ": accepted but did not move the points — asked for "
             + inTicks + ".." + outTicks + ", got " + got.in_ticks + ".."
-            + got.out_ticks + " (" + (dIn / timebase).toFixed(1) + " and "
-            + (dOut / timebase).toFixed(1) + " frames out)");
+            + got.out_ticks + " (" + (dIn / timebase).toFixed(3) + " and "
+            + (dOut / timebase).toFixed(3) + " frames out)");
     }
-    return { ok: false, how: "", tried: tried, got: null };
+
+    /* Nothing landed on the frame. Re-apply the closest form that did land inside half a
+     * frame — the points have been moved since — and confirm it a second time. */
+    if (near >= 0) {
+        try {
+            forms[near][1]();
+        } catch (e2) {
+            tried.push(forms[near][0] + ": failed on the second attempt: " + String(e2));
+            return { ok: false, exact: false, how: "", tried: tried, got: null };
+        }
+        var re = rangeTicks(seq);
+        if (re.in_ticks !== null && re.out_ticks !== null
+                && Math.abs(Number(re.in_ticks) - inTicks) <= tol
+                && Math.abs(Number(re.out_ticks) - outTicks) <= tol) {
+            tried.push(forms[near][0] + ": re-applied and confirmed, within half a frame"
+                + " — this range is NOT frame exact");
+            return {
+                ok: true, exact: false, how: forms[near][0], tried: tried, got: re
+            };
+        }
+        tried.push(forms[near][0] + ": would not repeat itself on the second attempt —"
+            + " refusing to render a range that cannot be confirmed twice");
+    }
+    return { ok: false, exact: false, how: "", tried: tried, got: null };
 }
 
 /* What actually landed on disk. The preset decides the container, so the extension
@@ -1160,6 +1220,7 @@ function renderOneRange(seq, label, inFrames, outFrames, destDir, preset, timeba
      * it for every remaining cut. */
     var set = setRange(seq, inTicks, outTicks, timebase);
     r.set_how = set.how;
+    r.range_exact = !!set.exact;
     for (t = 0; t < set.tried.length; t++) r.tried.push("set in/out: " + set.tried[t]);
     if (!set.ok) {
         r.no_range = true;
@@ -1175,6 +1236,15 @@ function renderOneRange(seq, label, inFrames, outFrames, destDir, preset, timeba
     r.read_how = got.how;
     r.in_off_frames = (Number(got.in_ticks) - inTicks) / timebase;
     r.out_off_frames = (Number(got.out_ticks) - outTicks) / timebase;
+    /* Said out loud per range, not folded into a maximum. A fraction of a frame here is
+     * how a clip ends up holding the wrong pixels, and "which one do I recheck" is the
+     * only useful answer — see setRange's second warning. */
+    if (!r.range_exact) {
+        r.tried.push("⚠️ this range did NOT land exactly: in off by "
+            + r.in_off_frames.toFixed(3) + " frame(s), out by "
+            + r.out_off_frames.toFixed(3)
+            + " — the export may hold one frame more or fewer than the cut");
+    }
 
     /* Clear anything an earlier probe left at this name. Without this, a render
      * that fails finds the PREVIOUS run's file and reports it as a success — the
