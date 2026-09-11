@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.78"
+VERSION = "3.80"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -1665,6 +1665,10 @@ class Cut:
     # Why the overshoot could not be placed, when it could not. Empty unless the answer was
     # "unclear", and carried into the refusal so it names the real obstacle.
     render_overshoot_why: str = ""
+    # This clip's position in the WHOLE timeline, fixed at parse time and never renumbered.
+    # `index` is the position in THIS RUN's list, which --pick changes; the two differ only
+    # on a picked run, and the difference is the whole point of --pick-keeps-numbers.
+    timeline_index: int = 0
     # True when this cut was refused but a file from an earlier run is still sitting at the
     # delivery name. Nothing deletes it — deliberately — so it has to be said out loud.
     stale_delivery: bool = False
@@ -4350,7 +4354,46 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
     return cmd
 
 
-def write_timeline_audio(tl, args) -> dict:
+def write_track_audio(tl, args) -> list:
+    """ONE audio file per chosen TRACK, each as long as the sequence.
+
+    "e chỉ cần để lựa chọn tích vào từng track A1,2,3,... để render toàn bộ track đấy ra
+    thành file audio riêng thôi" — 8 Sep. The reason he gives is the one that matters: "vốn
+    là ngta chỉ cần file VO từ đầu tới cuối thôi". A voice-over spread across ninety clipitems
+    is one performance, and what anyone downstream wants is the performance, not ninety
+    fragments they have to reassemble.
+
+    This is NOT the per-cut audio (one file per clip, paired with its video) and NOT the
+    single mixed timeline mp3 (every chosen track summed into one). It is the middle thing
+    that was missing: A2 alone, whole, at its timeline positions, with the gaps as silence.
+
+    Same mixer as both of those, so the gain staging, the mono up-mix correction and the
+    keyframed-fader warning are the one implementation they have always been.
+    """
+    items = getattr(tl, "audio_items", None) or []
+    if not items:
+        return []
+    # ⚠️ NO RE-FILTERING HERE. tl.audio_items has ALREADY been narrowed by --audio-tracks in
+    # main() — re-applying the filter would be a second implementation of the same rule, and
+    # the one in main() is where the "you named a track this timeline does not have" warning
+    # lives.
+    #
+    # ⚠️ AND premiere_track, NOT track_index. The XML's lane ordinal is a per-CHANNEL index:
+    # nine lanes for four tracks on the real export, so grouping by track_index would write
+    # A2 and A3 for the two halves of one stereo pair. premiere_track is the number the
+    # editor and the panel menu both speak in, which is what has to appear in the filename.
+    tracks = sorted({int(a.premiere_track) for a in items})
+    out = []
+    for t in tracks:
+        mine = [a for a in items if int(a.premiere_track) == t]
+        res = write_timeline_audio(tl, args, items=mine, out_name=f"_track_A{t}.mp3")
+        if res:
+            res["track"] = t
+            out.append(res)
+    return out
+
+
+def write_timeline_audio(tl, args, items=None, out_name="_timeline_audio.mp3") -> dict:
     """ONE mp3 for the whole timeline: every selected audio item at its timeline position, over
     silence, for the sequence's full length.
 
@@ -4362,7 +4405,11 @@ def write_timeline_audio(tl, args) -> dict:
     of the sequence — so the overlap arithmetic, the silence base and the level handling are one
     implementation with one set of tests, not two that can drift.
     """
-    items = getattr(tl, "audio_items", None) or []
+    # ⚠️ THE ITEM LIST AND THE FILENAME ARE ARGUMENTS NOW, and nothing else moved. The whole
+    # point of this function's docstring is that the per-cut mix and the whole-timeline mix
+    # are ONE implementation with one set of tests; writing a second mixer for per-track
+    # files would have been the third. Called with no arguments it is exactly what it was.
+    items = list(items) if items is not None else (getattr(tl, "audio_items", None) or [])
     frames = int(getattr(tl, "sequence_duration_frames", 0) or 0)
     fps = tl.sequence_fps or 25.0
     if not items or frames <= 0:
@@ -4389,7 +4436,7 @@ def write_timeline_audio(tl, args) -> dict:
         return {"note": note or "no audio items to mix",
                 "outside_sequence": len(outside)}
     total = frames / fps
-    out_path = args.out / "_timeline_audio.mp3"
+    out_path = args.out / out_name
 
     # ⚠️ THE CHANNEL COUNT OF EACH PART, because the mono up-mix penalty cannot be fixed
     # blind. A mono part fed to a stereo mix loses 3 dB to libswresample's power-preserving
@@ -6110,7 +6157,10 @@ def assign_output_names(cuts: list[Cut], container: str, seq_fps: float,
     other and re-encode a folder that was already complete. Both call sites read it from
     cut_from_of(args).
     """
-    pad = max(2, len(str(len(cuts))))
+    # ⚠️ FROM THE BIGGEST NUMBER PRESENT, not from how many clips are in the list. On a
+    # picked run the two are different — three clips can be numbered 07, 42 and 105 — and
+    # padding to len("3") would print 105 beside 07 and sort them wrongly.
+    pad = max(2, len(str(max((c.index for c in cuts), default=len(cuts)))))
     for c in cuts:
         ext = ".m4a" if c.track_type == "audio" else f".{container}"
         stem = Path(c.source_path).stem or c.clip_name or "clip"
@@ -7036,6 +7086,7 @@ def export_summary(tl: Timeline, args) -> dict:
             "audio_tracks_available": getattr(args, "audio_tracks_available", []),
             "audio_tracks": getattr(args, "audio_tracks_used", []),
             "audio_tracks_requested": getattr(args, "audio_tracks_requested", []),
+            "track_audio": getattr(args, "track_audio", []),
             # The single whole-timeline mp3: its name, size, length and how many items it holds.
             "timeline_audio": getattr(args, "timeline_audio", {}) or {},
             "crf": (None if parse_bitrate(getattr(args, "bitrate", None) or "")
@@ -7517,6 +7568,15 @@ def main():
                          "at their timeline positions, gaps as silence, as long as the "
                          "sequence. Lands as _timeline_audio.mp3. Narrow it with "
                          "--audio-tracks.")
+    ap.add_argument("--pick-renumber", dest="pick_renumber", action="store_true",
+                    help="number a --pick run 01..N instead of keeping each clip's number "
+                         "from the whole timeline. The default keeps them, so a re-export "
+                         "of a few clips replaces the files it meant to replace.")
+    ap.add_argument("--audio-per-track", dest="audio_per_track", action="store_true",
+                    help="write ONE audio file per chosen track instead of one mixed file: "
+                         "_track_A2.mp3 and so on, each as long as the sequence with the "
+                         "gaps as silence. Use it when what you want is the voice-over "
+                         "whole, not ninety fragments. Narrow it with --audio-tracks.")
     ap.add_argument("--audio-tracks", dest="audio_tracks", metavar="LIST",
                     help="which audio tracks the mix reads, as timeline track numbers: "
                          "\"2\" for A2 alone, \"1,2\" for both, omitted for all. Only "
@@ -8045,6 +8105,13 @@ def main():
     args.timeline_ranges = {(c.track_type, int(c.track_index),
                              int(c.timeline_in_frames), int(c.timeline_out_frames))
                             for c in tl.cuts}
+    # ⚠️ AND THE NUMBER EACH CLIP WOULD CARRY IN A FULL RUN, captured at the same point and
+    # for a related reason. Not at parse time: the list there still holds every track and
+    # every cut --tracks and --video-track are about to remove, so a clip the full export
+    # calls 04 is 06 in it — measured. Here the list is exactly what an unpicked run would
+    # number, which is the number a picked run has to reproduce.
+    for _i, _c in enumerate(tl.cuts, start=1):
+        _c.timeline_index = _i
 
     if args.ext:
         # ⚠️ THE GUARD, AND IT CHECKS THE FACT RATHER THAN A FLAG. An earlier version of
@@ -8141,8 +8208,25 @@ def main():
             if len(missing) > 10:
                 print(f"       ... and {len(missing) - 10} more")
 
+    # ⚠️ A PICKED RUN KEEPS THE NUMBERS THE FULL TIMELINE GAVE IT. Renumbering 01..N was a
+    # deliberate choice once — "a run limited to a handful of clips should number them 01..N,
+    # not leave gaps" — and the team lead has since given the case it gets wrong, which is the
+    # commoner one: "a bỏ tick hết các file khác, chỉ tick 1 vài files, thì a muốn mấy file đó
+    # phải giữ nguyên được số thứ tự. Như hiện tại a chỉ tick 1 file thì nó nhảy số thứ tự về
+    # 1, tính ra lại thành sai nếu như a chỉ muốn export lại file đó" (9 Sep).
+    #
+    # He is right, and the reason is that --pick is what the panel sends when you tick a
+    # subset — which you do to RE-EXPORT clips that already exist. A re-export that renumbers
+    # cannot replace the file it was meant to replace: clip 07 comes back as 01 and now there
+    # are two of it. Numbering fresh is right for a first export of a subset and wrong for a
+    # repair, and a repair is what the tick is for.
+    #
+    # --ext is NOT included. It selects by file TYPE rather than naming clips, so it has no
+    # "these specific ones again" meaning to preserve, and its own 01..N is left alone.
+    _keep_numbers = bool(getattr(args, "pick", None)) and not getattr(
+        args, "pick_renumber", False)
     for i, c in enumerate(tl.cuts, start=1):
-        c.index = i
+        c.index = (c.timeline_index or i) if _keep_numbers else i
         # PER CUT, and it compares rates rather than reading the flag. --fps 30 on a
         # 30 fps source emits no -r and keeps every frame.
         # ⚠️ PROVISIONAL. cut.source_fps is still the XML's DECLARED <rate> here, and
@@ -8834,6 +8918,20 @@ def main():
         print(f"\n  !! {tl.warnings[-1]}")
 
     # The single whole-timeline mp3, after the cuts and before the manifest that records it.
+    if getattr(args, "audio_per_track", False):
+        # ⚠️ ONE FILE PER TRACK, and it is a different answer from both of its neighbours.
+        # The per-cut files pair with the clips; the single mixed mp3 sums every chosen
+        # track into one. Neither is "A2, whole" — which is what a voice-over actually is,
+        # and what was asked for on 8 Sep: "ngta chỉ cần file VO từ đầu tới cuối thôi".
+        args.track_audio = write_track_audio(tl, args)
+        for _ta in args.track_audio:
+            if _ta.get("file"):
+                print(f"\n  A{_ta['track']} as one file: {_ta['file']} "
+                      f"({_ta['seconds']:.2f}s, {_ta['parts']} item(s))")
+            elif _ta.get("note"):
+                print(f"\n  A{_ta.get('track')}: {_ta['note']}")
+        if not args.track_audio:
+            print("\n  no per-track audio: this timeline has no audio items")
     if getattr(args, "audio", False):
         args.timeline_audio = write_timeline_audio(tl, args)
         if args.timeline_audio.get("file"):

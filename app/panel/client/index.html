@@ -302,6 +302,24 @@
         <details id="setdet" class="setdet">
             <summary class="setsum"><span id="setsum" class="setsumval">—</span></summary>
             <div class="fields">
+                <!-- ⚠️ THE TWO PREFERENCES MOVED IN HERE, and the reason is nine messages
+                     long: "các thông tin không cần thiết hiển thị ra ngoài thì cho vào 1 nút
+                     Info" (8 Sep), "hiện giờ nó đang rối quá / nhiều thông tin bị thừa"
+                     (8 Sep), "mọi người đang kêu gào vì UI rối quá" (28 Aug). Both are set
+                     once and never touched again — a chime preference and a resume tick are
+                     not decisions anyone makes per export.
+                     "split cross-dissolves" deliberately did NOT come with them: it changes
+                     which frames land on disk and it carries a per-timeline count, so it
+                     stays where it can be seen. -->
+                <div class="field f-prefs">
+                    <div class="flbl">Preferences</div>
+                    <label class="tick"><input type="checkbox" id="chime" checked>sound when done
+                        <span class="q" data-tip="Plays a short macOS system sound when an export finishes — one tone if every clip wrote, a different one if anything failed or you cancelled. An export takes minutes and you are usually somewhere else; nothing pops up and nothing steals focus.">?</span>
+                    </label>
+                    <label class="tick"><input type="checkbox" id="resume">skip clips already there
+                        <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. ⚠️ A file left half-written by a cancelled or crashed run counts as one that already exists, so it is kept too.">?</span>
+                    </label>
+                </div>
                 <div class="field f-preset">
                     <div class="flbl">Render preset <span class="q" data-tip="A named set of the settings below, kept in a file the engine owns so the same preset works from a terminal. Choosing one fills in everything below it; a change by hand sets this back to Custom.">?</span></div>
                     <select id="preset" class="sel"></select>
@@ -392,12 +410,6 @@
                  now. It had one correct setting — a fractional in-point sits in a frame the
                  previous shot also occupies, and keeping it shows the neighbour at the head —
                  so offering the other one was a trap nobody could evaluate. -->
-            <label class="tick"><input type="checkbox" id="chime" checked>sound when done
-                <span class="q" data-tip="Plays a short macOS system sound when an export finishes — one tone if every clip wrote, a different one if anything failed or you cancelled. An export takes minutes and you are usually somewhere else; nothing pops up and nothing steals focus.">?</span>
-            </label>
-            <label class="tick"><input type="checkbox" id="resume">skip clips already there
-                <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. ⚠️ A file left half-written by a cancelled or crashed run counts as one that already exists, so it is kept too.">?</span>
-            </label>
             <!-- ON BY DEFAULT, and it changes the frames on disk for anyone upgrading — so it
                  is a tick you can see rather than a rule, and the changelog says so.
 

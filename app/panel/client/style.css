@@ -205,21 +205,27 @@ body {
     flex: 1 1 0;
     min-width: 0;
     display: block;
-    padding: 6px 8px;
+    /* ⚠️ THE BIGGEST THING ON THE PANEL, and it is the one piece of feedback asked for nine
+     * separate times between 28 Aug and 10 Sep: "2 nút to nhất, bên trái là Source Render,
+     * bên phải là Timeline Render… nổi khối nổi bật màu khác hẳn xung quanh". Read carefully,
+     * that is "different from their SURROUNDINGS" — not two different colours from each
+     * other. Colour still means SELECTED here, and giving each mode a fixed hue of its own
+     * would leave nothing to say which one is live. So both lift away from the panel; the
+     * chosen one keeps the accent. */
+    padding: 13px 10px;
     text-align: left;
-    /* SUNKEN, not raised, while unselected: two raised buttons side by side both read as
-     * "the live one" and there would be nothing to say which is chosen. The selected one
-     * lifts instead — mark the state by ADDING. */
-    background: #14171d;
-    border: 1px solid var(--line);
-    border-radius: 4px;
+    /* On the documented ladder: card at rest so the pair lifts clear of the page ground,
+     * raised when selected, hover above that. Off-ladder greys are refused by check_panel. */
+    background: #1d222c;
+    border: 1px solid #39424f;
+    border-radius: 7px;
 }
-.modebtn:hover:not(:disabled) { background: #1d222c; border-color: #39424f; }
+.modebtn:hover:not(:disabled) { background: #2f3845; border-color: #4a5464; }
 .modename {
     display: block;
-    font-size: var(--fs-base);
+    font-size: var(--fs-big, 14px);
     font-weight: 600;
-    color: var(--dim);
+    color: var(--fg, #d6dae2);
     white-space: nowrap;
 }
 /* What it PRODUCES, in three words. Not a sentence, and not a justification of the control —
@@ -234,7 +240,7 @@ body {
 /* THE SELECTED ONE, and it is unmistakable: accent border, accent name, and the same --glow
  * every other lit thing in this panel uses. No new colour and no new token. */
 .modebtn.on {
-    background: #1d222c;
+    background: #262e39;
     border-color: var(--accent);
     box-shadow: var(--glow) rgba(0, 180, 255, .30);
 }
@@ -1839,8 +1845,8 @@ body { position: relative; }
 }
 
 /* the two jobs, biggest thing on the panel after Read */
-.modebtn { padding: 6px 10px 6px; border-radius: 6px; }
-.modename { font-size: 12.5px; letter-spacing: .01em; }
+.modebtn { padding: 11px 9px; border-radius: 7px; }
+.modename { font-size: 13.5px; letter-spacing: .01em; }
 .modenote { font-size: 10px; }
 .modebtn.on { background: rgba(0, 180, 255, .08); }
 

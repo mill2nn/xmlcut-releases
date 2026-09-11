@@ -1,6 +1,6 @@
 {
-  "version": "3.78",
-  "notes": "C\u1eaft theo dissolve ch\u1ec9 c\u00f2n \u00e1p d\u1ee5ng \u1edf n\u01a1i Premiere th\u1eadt s\u1ef1 c\u00f3 transition: layer ch\u1ed3ng l\u00ean nhau (t\u1eeb nest resolve) kh\u00f4ng c\u00f2n b\u1ecb c\u1eaft nh\u1ea7m nh\u01b0 dissolve \u2014 tr\u01b0\u1edbc \u0111\u00e2y c\u1eaft c\u1ee5t c\u1ea3 hai clip t\u1ea1i m\u1ed9t ranh gi\u1edbi kh\u00f4ng h\u1ec1 t\u1ed3n t\u1ea1i trong edit. S\u1ed1 c\u1eb7p b\u1ecb b\u1ecf qua nay \u0111\u01b0\u1ee3c b\u00e1o r\u00f5 thay v\u00ec im l\u1eb7ng. Kh\u00f4ng \u0111\u1ed5i g\u00ec v\u1edbi dissolve th\u1eadt: export th\u1eadt v\u1eabn split \u0111\u1ee7 13 ch\u1ed7 nh\u01b0 c\u0169.",
+  "version": "3.80",
+  "notes": "2 n\u00fat Source/Timeline Render nay to v\u00e0 n\u1ed5i h\u1eb3n, \u0111\u00fang th\u1ee9 c\u1ea7n b\u1ea5m \u0111\u1ea7u ti\u00ean; 'sound when done' v\u00e0 'skip clips already there' chuy\u1ec3n v\u00e0o Render settings cho b\u1edbt r\u1ed1i. Audio: th\u00eam l\u1ef1a ch\u1ecdn xu\u1ea5t M\u1ed6I TRACK th\u00e0nh 1 file ri\u00eang nguy\u00ean track (VO t\u1eeb \u0111\u1ea7u t\u1edbi cu\u1ed1i), \u0111\u1eb7t t\u00ean theo track anh th\u1ea5y (A1, A2). Tick l\u1ea1i v\u00e0i clip \u0111\u1ec3 export l\u1ea1i: s\u1ed1 th\u1ee9 t\u1ef1 nay gi\u1eef nguy\u00ean nh\u01b0 l\u1ea7n ch\u1ea1y \u0111\u1ee7, n\u00ean file m\u1edbi \u0111\u00e8 \u0111\u00fang file c\u0169 thay v\u00ec sinh file tr\u00f9ng \u2014 n\u00fat Retry t\u1eebng d\u00f2ng c\u0169ng v\u1eady. C\u1eaft theo dissolve ch\u1ec9 \u00e1p d\u1ee5ng \u1edf ch\u1ed7 Premiere th\u1eadt s\u1ef1 c\u00f3 transition, layer ch\u1ed3ng nhau kh\u00f4ng c\u00f2n b\u1ecb c\u1eaft nh\u1ea7m.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

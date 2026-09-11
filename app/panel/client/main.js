@@ -874,7 +874,23 @@
             "Số cặp bị bỏ qua nay được báo rõ, không im lặng."
     ].concat(CL_377);
 
+    var CL_379 = [
+            "2 nút Source/Timeline Render nay to và nổi hẳn — đúng thứ cần bấm đầu tiên.",
+            "Bớt rối: 'sound when done' và 'skip clips already there' chuyển vào phần Render settings.",
+            "Audio: thêm lựa chọn xuất MỖI TRACK thành 1 file riêng, nguyên track (VO từ đầu tới cuối).",
+            "File đặt tên theo track anh thấy (A1, A2), không theo lane của XML."
+    ].concat(CL_378);
+
+    var CL_380 = [
+            "Tick lại vài clip để export lại: SỐ THỨ TỰ nay giữ nguyên như lần chạy đủ — file mới đè đúng file cũ.",
+            "Trước đây tick 1 file thì nó nhảy về 01, thành ra sinh file trùng thay vì thay thế.",
+            "Nút Retry từng dòng cũng ghi đúng số cũ, không còn đổi tên.",
+            "Muốn đánh số lại 01..N như cũ thì dùng --pick-renumber."
+    ].concat(CL_379);
+
     var CHANGELOG = {
+        "3.80": CL_380,
+        "3.79": CL_379,
         "3.78": CL_378,
         "3.77": CL_377,
         "3.76": CL_376,
@@ -4730,7 +4746,10 @@
         /* The voice-over, and which tracks it reads. One control, two flags: --audio is the
          * switch and --audio-tracks narrows it, so "every track" needs no second argument and
          * the ordinary case stays a short command line. */
-        if (s.audio) {
+        if (s.audio === "pertrack") {
+            /* One file per track, not a mixdown — so --audio (the mixer) is NOT sent. */
+            a.push("--audio-per-track");
+        } else if (s.audio) {
             a.push("--audio");
             if (s.audio !== "all") a.push("--audio-tracks", s.audio);
         }
@@ -5087,7 +5106,16 @@
         sel.disabled = false;
         opt("all", have.length === 1
             ? "The audio track"
-            : "All " + have.length + " audio tracks");
+            : "All " + have.length + " audio tracks, mixed into one");
+        /* ⚠️ THE THIRD ANSWER, and it is the one that was actually asked for. "e chỉ cần để
+         * lựa chọn tích vào từng track A1,2,3,... để render toàn bộ track đấy ra thành file
+         * audio riêng thôi" — 8 Sep — with the reason attached: "vốn là ngta chỉ cần file VO
+         * từ đầu tới cuối thôi". The two options above it are a mixdown of everything and a
+         * mixdown of one track; neither is "each track, whole, as its own file", which is
+         * what a voice-over spread across ninety clipitems has to become to be useful. */
+        opt("pertrack", have.length === 1
+            ? "The audio track, as its own whole file"
+            : "Each track as its own whole file (" + have.length + " files)");
         for (var i = 0; i < have.length; i++) {
             var t = have[i];
             opt(String(t.index), "A" + t.index + " only · " + t.items
@@ -5099,7 +5127,7 @@
             for (var k = 0; k < have.length; k++) {
                 if (String(have[k].index) === want) known = true;
             }
-            if (!known) want = "all";
+            if (!known && want !== "pertrack") want = "all";
         }
         sel.value = want;
         state.audioWant = want;
