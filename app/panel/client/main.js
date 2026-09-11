@@ -868,7 +868,14 @@
             "Lỗi render ngắn nói rõ ffmpeg đọc được bao nhiêu frame."
     ].concat(CL_376);
 
+    var CL_378 = [
+            "Cắt theo dissolve chỉ còn áp dụng ở chỗ Premiere thật sự có transition.",
+            "Layer chồng lên nhau (từ nest) không còn bị cắt nhầm như dissolve — trước đây cắt cụt cả 2 clip.",
+            "Số cặp bị bỏ qua nay được báo rõ, không im lặng."
+    ].concat(CL_377);
+
     var CHANGELOG = {
+        "3.78": CL_378,
         "3.77": CL_377,
         "3.76": CL_376,
         "3.75": CL_375,

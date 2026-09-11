@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.77"
+VERSION = "3.78"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -5070,6 +5070,7 @@ ADVISORY_WARNING_MARKS = (
     "nested sequence(s) skipped",    # --nest one-cut, which is a choice the caller made
     "reach the last frame of their media",   # Premiere counting a file longer than it is
     "correct as delivered",          # a tail overshoot, measured against the next render
+    "stacked layers, not dissolves",  # an overlap with no transition: the edit's own doing
     "Nothing is decided on an estimate",   # a container that does not report its length
 )
 
@@ -5668,7 +5669,9 @@ def split_transition_overlaps(cuts: list[Cut], seq_fps: float) -> int:
     exactly, because the render's FILENAME is built from these numbers on one side and
     looked up by them on the other.
 
-    Returns the number of boundaries moved.
+    Returns the number of boundaries moved. Overlaps with no transition at the boundary are
+    left alone and counted into `split_skipped_stacked` on the module-level record below, so
+    a run can say how many it declined to touch.
     """
     groups: dict = {}
     for c in cuts:
@@ -5677,11 +5680,35 @@ def split_transition_overlaps(cuts: list[Cut], seq_fps: float) -> int:
         groups.setdefault((c.track_type, int(c.track_index)), []).append(c)
 
     moved = 0
+    skipped_no_transition = 0
     for key in sorted(groups):
         row = sorted(groups[key], key=lambda c: (c.timeline_in_frames, c.timeline_out_frames))
         for a, b in zip(row, row[1:]):
             if b.timeline_in_frames >= a.timeline_out_frames:
                 continue                            # no overlap: an ordinary cut
+            # ⚠️ EVIDENCE THAT IT IS A TRANSITION, NOT JUST THAT IT OVERLAPS. Two cuts on one
+            # track can overlap for two unrelated reasons, and this function used to treat
+            # them as one. A cross-dissolve overlaps because Premiere writes it that way.
+            # STACKED LAYERS overlap because they are on top of each other — and _parse_nested
+            # puts every inner track of a resolved nest onto the PARENT's single track index
+            # (see its note), so a nest holding two stacked layers arrives here looking exactly
+            # like a dissolve. Splitting those moves a boundary that was never a boundary, and
+            # _parse_nested's own comment records the measurement: on one real nest, 2 of its
+            # 6 overlapping pairs were not dissolves.
+            #
+            # ⚠️ transition_in / transition_out, NOT edge_in_transition. The first cut of
+            # this gate used the latter and broke three suites, correctly: edge_in_transition
+            # records that an edge was RECONSTRUCTED from a `-1`, which happens only when
+            # Premiere left the boundary open. A dissolve whose two clipitems both carry
+            # explicit boundaries has a <transitionitem> and no reconstructed edge at all, so
+            # that test called a real dissolve a stacked layer. transition_in/out are set from
+            # the <transitionitem> itself (see _parse_clipitem), which is the actual question.
+            #
+            # One side is enough: Premiere writes only one facing edge as -1 on some
+            # dissolves, and the名 of the transition lands on whichever side it touched.
+            if not (a.transition_out or b.transition_in):
+                skipped_no_transition += 1
+                continue
             # floor, so the result is the same on every run and on both sides
             mid = (b.timeline_in_frames + a.timeline_out_frames) // 2
             # A boundary that would leave either side shorter than a frame is left alone:
@@ -5707,6 +5734,7 @@ def split_transition_overlaps(cuts: list[Cut], seq_fps: float) -> int:
             c.duration_seconds = round(frames_to_seconds(c.duration_frames, seq_fps), 6)
             c.timeline_in_tc = frames_to_tc(c.timeline_in_frames, seq_fps)
             c.timeline_out_tc = frames_to_tc(c.timeline_out_frames, seq_fps)
+    split_transition_overlaps.skipped_stacked = skipped_no_transition
     return moved
 
 
@@ -6987,6 +7015,8 @@ def export_summary(tl: Timeline, args) -> dict:
             "exploded_audio_lane_merges": list(
                 getattr(args, "exploded_lane_merges", []) or []),
             "overlapping_pairs": int(getattr(args, "overlap_pairs", 0) or 0),
+            "transitions_skipped_stacked":
+                int(getattr(args, "transitions_skipped_stacked", 0) or 0),
             "overlapping_frames": int(getattr(args, "overlap_frames", 0) or 0),
             "render_dir": str(getattr(args, "render_dir", "") or ""),
             "video_track": int(getattr(args, "video_track", 0) or 0),
@@ -7950,6 +7980,20 @@ def main():
                  or getattr(args, "render_dir", None))):
         n_split = split_transition_overlaps(tl.cuts, tl.sequence_fps)
         args.transitions_split = n_split
+        # ⚠️ SAID OUT LOUD, because "we looked at this and chose not to touch it" is a
+        # different fact from "there was nothing here", and the editor is the only one who
+        # can tell whether a stacked layer was meant to be stacked. These are overlaps with
+        # no <transitionitem> at the boundary — a resolved nest's layers flattened onto one
+        # track index, most often — and splitting them would have cut both clips short at a
+        # point the edit never had. Until now the splitter did exactly that, silently, and a
+        # test asserted it: see check_nested's "1-4 are STACKING" block.
+        _skipped = int(getattr(split_transition_overlaps, "skipped_stacked", 0) or 0)
+        args.transitions_skipped_stacked = _skipped
+        if _skipped:
+            tl.warnings.append(
+                f"{_skipped} overlapping pair(s) were left alone because Premiere put no "
+                f"transition at the boundary — stacked layers, not dissolves. Those clips "
+                f"still share frames with each other, which is what the edit asked for")
         if n_split:
             # ⚠️ WHAT IT MOVED, NOT A CLAIM ABOUT THE WHOLE LIST. It used to end "— no two
             # cuts hold the same frame", which the run itself can contradict six lines
