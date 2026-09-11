@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.80"
+VERSION = "3.81"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -7568,10 +7568,12 @@ def main():
                          "at their timeline positions, gaps as silence, as long as the "
                          "sequence. Lands as _timeline_audio.mp3. Narrow it with "
                          "--audio-tracks.")
-    ap.add_argument("--pick-renumber", dest="pick_renumber", action="store_true",
-                    help="number a --pick run 01..N instead of keeping each clip's number "
+    ap.add_argument("--renumber", "--pick-renumber", dest="renumber", action="store_true",
+                    help="number a narrowed run 01..N instead of keeping each clip's number "
                          "from the whole timeline. The default keeps them, so a re-export "
-                         "of a few clips replaces the files it meant to replace.")
+                         "of a few clips — or of one file type — replaces the files it meant "
+                         "to replace instead of duplicating them under new numbers. "
+                         "--pick-renumber is the old name and still works.")
     ap.add_argument("--audio-per-track", dest="audio_per_track", action="store_true",
                     help="write ONE audio file per chosen track instead of one mixed file: "
                          "_track_A2.mp3 and so on, each as long as the sequence with the "
@@ -8221,10 +8223,17 @@ def main():
     # are two of it. Numbering fresh is right for a first export of a subset and wrong for a
     # repair, and a repair is what the tick is for.
     #
-    # --ext is NOT included. It selects by file TYPE rather than naming clips, so it has no
-    # "these specific ones again" meaning to preserve, and its own 01..N is left alone.
-    _keep_numbers = bool(getattr(args, "pick", None)) and not getattr(
-        args, "pick_renumber", False)
+    # ⚠️ --ext IS INCLUDED, and excluding it was wrong. The first cut of this reasoned that
+    # --ext "selects by file TYPE rather than naming clips, so it has no 'these specific ones
+    # again' meaning to preserve". That is true of the flag and false of the workflow: the
+    # panel's file-type chips ARE --ext, so unticking .png and .aegraphic is how an editor
+    # narrows an export, and it renumbered everything left.
+    #
+    # MEASURED on the real client export it was reported from: a full run numbers two of its
+    # clips 33 and 58, and with only one file type ticked the same clips come out 15 and 27 —
+    # the exact numbers on the screenshot. Same complaint as --pick, through a different flag.
+    _narrowed = bool(getattr(args, "pick", None)) or bool(getattr(args, "ext", None))
+    _keep_numbers = _narrowed and not getattr(args, "renumber", False)
     for i, c in enumerate(tl.cuts, start=1):
         c.index = (c.timeline_index or i) if _keep_numbers else i
         # PER CUT, and it compares rates rather than reading the flag. --fps 30 on a

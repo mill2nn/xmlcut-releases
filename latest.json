@@ -1,6 +1,6 @@
 {
-  "version": "3.80",
-  "notes": "2 n\u00fat Source/Timeline Render nay to v\u00e0 n\u1ed5i h\u1eb3n, \u0111\u00fang th\u1ee9 c\u1ea7n b\u1ea5m \u0111\u1ea7u ti\u00ean; 'sound when done' v\u00e0 'skip clips already there' chuy\u1ec3n v\u00e0o Render settings cho b\u1edbt r\u1ed1i. Audio: th\u00eam l\u1ef1a ch\u1ecdn xu\u1ea5t M\u1ed6I TRACK th\u00e0nh 1 file ri\u00eang nguy\u00ean track (VO t\u1eeb \u0111\u1ea7u t\u1edbi cu\u1ed1i), \u0111\u1eb7t t\u00ean theo track anh th\u1ea5y (A1, A2). Tick l\u1ea1i v\u00e0i clip \u0111\u1ec3 export l\u1ea1i: s\u1ed1 th\u1ee9 t\u1ef1 nay gi\u1eef nguy\u00ean nh\u01b0 l\u1ea7n ch\u1ea1y \u0111\u1ee7, n\u00ean file m\u1edbi \u0111\u00e8 \u0111\u00fang file c\u0169 thay v\u00ec sinh file tr\u00f9ng \u2014 n\u00fat Retry t\u1eebng d\u00f2ng c\u0169ng v\u1eady. C\u1eaft theo dissolve ch\u1ec9 \u00e1p d\u1ee5ng \u1edf ch\u1ed7 Premiere th\u1eadt s\u1ef1 c\u00f3 transition, layer ch\u1ed3ng nhau kh\u00f4ng c\u00f2n b\u1ecb c\u1eaft nh\u1ea7m.",
+  "version": "3.81",
+  "notes": "Clip l\u1ed7i nay hi\u1ec7n L\u00dd DO ngay d\u01b0\u1edbi d\u00f2ng \u0111\u00f3: tr\u01b0\u1edbc ch\u1ec9 hi\u1ec7n khi r\u00ea chu\u1ed9t n\u00ean ch\u1ee5p m\u00e0n h\u00ecnh g\u1eedi \u0111i kh\u00f4ng ai th\u1ea5y nguy\u00ean nh\u00e2n. B\u1ecf tick b\u1edbt lo\u1ea1i file (.png, .aegraphic...) nay c\u0169ng GI\u1eee NGUY\u00caN s\u1ed1 th\u1ee9 t\u1ef1 nh\u01b0 l\u1ea7n ch\u1ea1y \u0111\u1ee7 \u2014 tr\u01b0\u1edbc \u0111\u00e2y ch\u1ec9 tick .mov th\u00ec clip s\u1ed1 33 nh\u1ea3y th\u00e0nh 15, n\u00ean export l\u1ea1i sinh file tr\u00f9ng thay v\u00ec \u0111\u00e8 \u0111\u00fang file c\u0169. Mu\u1ed1n \u0111\u00e1nh s\u1ed1 l\u1ea1i 01..N th\u00ec d\u00f9ng --renumber.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

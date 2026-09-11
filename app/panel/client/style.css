@@ -247,6 +247,17 @@ body {
 .modebtn.on .modename { color: var(--accent); }
 .modebtn.on .modenote { color: var(--dim); }
 
+/* THE REASON A ROW FAILED, under the row itself. It was reachable only by hovering, which
+ * is invisible in the screenshot people actually send — see the note in renderClips(). */
+.whyrow > .whycell {
+    padding: 1px 8px 6px 30px;
+    font-size: var(--fs-small);
+    line-height: 1.35;
+    color: var(--bad, #ff8b7a);
+    white-space: normal;
+    word-break: break-word;
+}
+
 /* ═════════════════════════════════════════════════ SAVE TO, LIT WHEN IT IS EMPTY
  *
  * The only control in this panel with no correct default. Empty, the frame and its button

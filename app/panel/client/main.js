@@ -888,7 +888,15 @@
             "Muốn đánh số lại 01..N như cũ thì dùng --pick-renumber."
     ].concat(CL_379);
 
+    var CL_381 = [
+            "Clip lỗi nay hiện LÝ DO ngay dưới dòng đó — trước chỉ hiện khi rê chuột, nên chụp màn hình không thấy.",
+            "Bỏ tick bớt loại file (.png, .aegraphic...) cũng GIỮ NGUYÊN số thứ tự như lần chạy đủ.",
+            "Trước đây chỉ tick .mov thì clip số 33 nhảy thành 15 — nay vẫn là 33.",
+            "Muốn đánh số lại 01..N thì dùng --renumber."
+    ].concat(CL_380);
+
     var CHANGELOG = {
+        "3.81": CL_381,
         "3.80": CL_380,
         "3.79": CL_379,
         "3.78": CL_378,
@@ -4286,6 +4294,28 @@
                 tr.appendChild(td);
             }
             body.appendChild(tr);
+            /* ⚠️ WHY IT FAILED, ON THE ROW — because a screenshot cannot carry a tooltip.
+             * The reason has always been in tr.title, and reaching it needs a hover. The
+             * team lead reported the same three failed clips on 9 Sep and again on 10 Sep,
+             * both times as a picture showing "failed" and nothing else, and asked "chú đã
+             * tìm ra nguyên nhân chưa" — a question the screenshot could not answer, and so
+             * neither could I. The engine knew and had written it to the manifest.
+             *
+             * A row of its own, full width, because the clip column is ~100px and a reason
+             * is a sentence. Failed rows only, so a clean export looks exactly as it did.
+             * It is not a clip row: it carries the `whyrow` class for the same reason
+             * `divider` exists, and anything counting clips skips both. */
+            if (rst === "bad" && rs && rs.why) {
+                var wtr = document.createElement("tr");
+                wtr.className = "whyrow";
+                var wtd = document.createElement("td");
+                wtd.colSpan = 4;
+                wtd.className = "whycell";
+                wtd.textContent = rs.why;
+                wtd.title = rs.why;
+                wtr.appendChild(wtd);
+                body.appendChild(wtr);
+            }
         }
         var cuttable = 0, chosen = 0;
         for (var m = 0; m < visible.length; m++) {
