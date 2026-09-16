@@ -915,7 +915,14 @@
             "File xuất ra nay đánh số 01..N liên tục, không nhảy 1,5,7 nữa: clip không cắt được (Dynamic Link, title, adjustment layer) không còn chiếm số."
     ].concat(CL_381);
 
+    var CL_383 = [
+            "2 nút Source Render / Timeline Render nay TÔ ĐẶC màu, nổi hẳn như nút Export.",
+            "Toàn bộ thông tin debug (engine, đường dẫn cut script, check update, test render) gom vào tab Info.",
+            "Bấm bánh răng nay mở thẳng tab Info, không còn mở bảng riêng nữa."
+    ].concat(CL_382);
+
     var CHANGELOG = {
+        "3.83": CL_383,
         "3.82": CL_382,
         "3.81": CL_381,
         "3.80": CL_380,
@@ -2129,10 +2136,10 @@
                 : "");
         if (!state.script && state.dump) {
             el["export"].textContent = "Find xmlcut.py first";
-            // The gear, not Advanced: the engine row moved there, so opening Advanced
-            // would reveal a compare command and a log rather than the thing to fix.
-            show(el.gearmenu, true);
-            el.gear.className = "gearbtn on";
+            // The Info tab, which is where the engine row lives now. It has to be OPENED
+            // rather than merely present: the thing to fix is in there and nothing else on
+            // screen says so.
+            setTab("tabinfo");
         }
         renderNext();
     }
@@ -4795,7 +4802,7 @@
 
         state.fetching = true;
         el.recheck.disabled = true;
-        show(el.gearmenu, true);           // whatever happens next, he should see it
+        setTab("tabinfo");                 // whatever happens next, he should see it
         setEngineStat("busy", "xmlcut.py is missing — asking the release channel…");
         log("cut script missing; " + (auto ? "auto-" : "") + "recovering from "
             + UPDATE_OWNER + "/" + UPDATE_REPO);
@@ -8323,10 +8330,13 @@
         el.setdet.addEventListener("toggle", function () { rememberSetOpen(); });
     }
 
+    /* ⚠️ THE GEAR IS A SHORTCUT TO THE INFO TAB NOW, not an overlay of its own. "Nhớ cho hết
+     * những thông tin debug, chưa cần thiết,... vô 1 nút infor cho gọn vs dễ check nhé"
+     * (16 Sep) — the engine status, the cut-script path, the update check and the POC render
+     * are exactly that, and they were living behind a second door beside it. One place, and
+     * the gear still gets you there in one click. */
     el.gear.addEventListener("click", function () {
-        var open = el.gearmenu.hidden;
-        show(el.gearmenu, open);
-        el.gear.className = "gearbtn" + (open ? " on" : "");
+        setTab("tabinfo");
     });
 
     /* --------------------------------------------------------------- boot */

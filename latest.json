@@ -1,6 +1,6 @@
 {
-  "version": "3.82",
-  "notes": "Giao di\u1ec7n m\u1edbi: 2 n\u00fat Source Render / Timeline Render to nh\u1ea5t m\u1ed7i n\u00fat m\u1ed9t m\u00e0u, d\u01b0\u1edbi l\u00e0 3 th\u00f4ng s\u1ed1, ph\u1ea7n c\u00f2n l\u1ea1i gom v\u00e0o 4 tab Clips \u00b7 Tracks \u00b7 Quality \u00b7 Info. L\u1ed7i v\u00e0 c\u1ea3nh b\u00e1o v\u1eabn n\u1eb1m ngo\u00e0i tab. N\u00fat Export v\u00e0 \u00f4 Save to lu\u00f4n d\u00ednh \u1edf \u0111\u00e1y. Audio: b\u1ecf h\u1eb3n ki\u1ec3u xu\u1ea5t l\u1ebb t\u1eebng file \u2014 tick track n\u00e0o th\u00ec track \u0111\u00f3 ra 1 file audio nguy\u00ean v\u1eb9n. File xu\u1ea5t ra nay \u0111\u00e1nh s\u1ed1 01..N li\u00ean t\u1ee5c, kh\u00f4ng nh\u1ea3y 1,5,7 n\u1eefa: clip kh\u00f4ng c\u1eaft \u0111\u01b0\u1ee3c kh\u00f4ng c\u00f2n chi\u1ebfm s\u1ed1.",
+  "version": "3.83",
+  "notes": "2 n\u00fat Source Render / Timeline Render nay T\u00d4 \u0110\u1eb6C m\u00e0u, n\u1ed5i h\u1eb3n nh\u01b0 n\u00fat Export. To\u00e0n b\u1ed9 th\u00f4ng tin debug \u2014 engine, \u0111\u01b0\u1eddng d\u1eabn cut script, check update, test render \u2014 gom h\u1ebft v\u00e0o tab Info. B\u1ea5m b\u00e1nh r\u0103ng nay m\u1edf th\u1eb3ng tab Info, kh\u00f4ng c\u00f2n b\u1ea3ng ri\u00eang.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

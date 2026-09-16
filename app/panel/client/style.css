@@ -251,7 +251,7 @@ body {
     flex: 1 1 0;
     min-width: 0;
     display: block;
-    padding: 11px 9px;
+    padding: 13px 10px;
     text-align: left;
     border: 1px solid;                 /* colour per mode, below */
     border-radius: 7px;
@@ -282,11 +282,11 @@ body {
  * — no relative colour syntax, which this Chromium does not have. */
 #modesrc {
     --mode-hue: 0, 180, 255;
-    background-image: linear-gradient(rgba(0, 180, 255, .26), rgba(0, 180, 255, .26));
+    background-image: linear-gradient(rgba(0, 180, 255, .34), rgba(0, 180, 255, .34));
 }
 #modeseq {
     --mode-hue: 183, 140, 255;
-    background-image: linear-gradient(rgba(183, 140, 255, .26), rgba(183, 140, 255, .26));
+    background-image: linear-gradient(rgba(183, 140, 255, .34), rgba(183, 140, 255, .34));
 }
 
 .modebtn { border-color: rgba(var(--mode-hue), .45); }
@@ -297,18 +297,36 @@ body {
 /* THE SELECTED ONE — four carriers, three of them free of hue: the block lifts to 2.20x the
  * resting luminance; the border doubles, with the padding paying for it so the outer box
  * does not move by a pixel; the glow arrives; and a filled dot joins the sub-line. */
+/* ⚠️ THE SELECTED BLOCK IS A SOLID FILL NOW — "làm sao cho 2 cái nút kia nó pop up hơn đc
+ * nữa thì tốt" (16 Sep), after seeing the tinted version. It is the same language as the
+ * Export button: full-strength hue, dark ink on it, and the glow. Nothing else in this panel
+ * except Export and Read is allowed to look like this, which is the point — these three are
+ * the actions, everything else is a setting.
+ *
+ * ⚠️ THE OPAQUE FLOOR IS STILL A LADDER RUNG. The hue arrives as a full-opacity gradient on
+ * top of #2f3845, so "no opaque background is mixed off-ladder" stays true by construction
+ * rather than by exception. Composited it is the hue itself.
+ *
+ * INK, MEASURED: #07121a on #00b4ff is 8.08:1 and on #b78cff is 7.39:1 — both clear of 4.5
+ * with room, and #07121a is the ink the primary buttons already use.
+ *
+ * ⚠️ WHAT THIS COSTS, STATED: at rest the two blocks are luminance-matched, so brightness
+ * carries only state. Selected they are not — the two hues differ by about 9% in luminance.
+ * That is acceptable because the selected/unselected gap is now enormous (a solid fill
+ * against a 34% tint) and no reader has to compare the two selected states: only one exists
+ * at a time. */
 .modebtn.on {
     border-width: 2px;
-    padding: 10px 8px;
+    padding: 12px 9px;
     background-color: #2f3845;                     /* ladder: hover — the top rung */
     border-color: rgba(var(--mode-hue), 1);
     box-shadow: var(--glow) rgba(var(--mode-hue), .30);
 }
 #modesrc.on {
-    background-image: linear-gradient(rgba(0, 180, 255, .40), rgba(0, 180, 255, .40));
+    background-image: linear-gradient(rgba(0, 180, 255, 1), rgba(0, 180, 255, 1));
 }
 #modeseq.on {
-    background-image: linear-gradient(rgba(183, 140, 255, .40), rgba(183, 140, 255, .40));
+    background-image: linear-gradient(rgba(183, 140, 255, 1), rgba(183, 140, 255, 1));
 }
 .modebtn.on:hover:not(:disabled) { filter: brightness(1.06); }
 .modename {
@@ -339,6 +357,10 @@ body {
  * check_layout measures its scrollWidth against its clientWidth, so a glyph there would eat
  * 10px of the tightest text at a 320px dock. */
 .modebtn.on .modenote::before { content: "\25CF\00A0"; font-size: 9px; }
+/* Dark ink on the solid fill — 8.08:1 on the accent, 7.39:1 on the violet. --fg would be
+ * 1.6:1 on the accent, which is why the name cannot simply stay light. */
+.modebtn.on .modename, .modebtn.on .modenote { color: #07121a; }
+.modebtn.on .modenote { opacity: .8; }
 
 /* THE REASON A ROW FAILED, under the row itself. It was reachable only by hovering, which
  * is invisible in the screenshot people actually send — see the note in renderClips(). */
@@ -2185,3 +2207,33 @@ body { position: relative; }
 @media (max-width: 420px) {
     .figs .figbtn { flex: 1 0 100%; margin-top: 2px; }
 }
+
+/* The setup / debug block, in the Info tab. It was .gearmenu, an overlay that pushed the page
+ * down from behind the gear icon; in Info it is simply a framed block like anything else
+ * there, and the gear icon scrolls you to it by switching the tab. */
+.gearblock {
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 9px 11px;
+    margin: 8px 0;
+    display: grid;
+    gap: 7px;
+    /* ⚠️ min-width: 0 ON A GRID ITEM'S PARENT IS NOT OPTIONAL. A grid and a flex item both
+     * default to min-width:auto, which is "as wide as my content" — so the long script path
+     * and the two side-by-side buttons pushed this block past a 320px dock instead of being
+     * made to fit inside it. */
+    min-width: 0;
+}
+/* The two buttons wrap rather than run off the edge: "Re-check cut script" and "Check for
+ * updates" together need more than 296px of content width. */
+.gearblock .btnrow { flex-wrap: wrap; }
+.gearblock .pathrow, .gearblock .field { min-width: 0; }
+/* The path is the one value here with no natural width — it ellipsises, and the full text
+ * stays on its title. */
+.gearblock .path {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.gearblock .msg { overflow-wrap: anywhere; }

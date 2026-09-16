@@ -44,38 +44,7 @@
 </div>
 
 <!-- Everything about the TOOL rather than about this timeline. -->
-<section id="gearmenu" class="gearmenu" hidden>
-    <p class="lbl">Cut script
-        <span class="q" data-tip="xmlcut.py — the engine that does the cutting. It ships inside this panel, so normally there is nothing to do here. Re-check confirms it is present and runnable, and re-downloads it if it has gone missing.">?</span>
-    </p>
-    <div id="enginestat" class="msg">checking…</div>
-    <div class="pathrow">
-        <span id="scriptpath" class="path">looking…</span>
-        <button id="pickscript" class="mini" hidden>Find</button>
-    </div>
-    <!-- ⚠️ STAYS HERE, and it is one of the three exceptions to the rail. This menu is an
-         overlay that COVERS the rail, so a message produced by a button inside it cannot be
-         shown in the rail at all. It also sits beside Find — the control that fixes it. The
-         headline ("the cut script is missing") is on the rail, in #nextline. -->
-    <div id="scripthelp" class="msg error" hidden></div>
-    <!-- One row, not two stacked full-width buttons: neither is the thing you came for. -->
-    <div class="btnrow">
-        <button id="recheck" class="mini">Re-check cut script</button>
-        <button id="checkupd" class="mini">Check for updates</button>
-    </div>
-
-    <!-- POC. Lives behind the gear because it is not a feature yet: it renders two
-         short ranges to answer whether per-segment rendering is fast enough to build
-         on, and changes nothing about how the panel exports. -->
-    <p class="lbl">Export with effects
-        <span class="q" data-tip="Proof of concept. Cutting reads the raw source, so nothing from the timeline — colour, Motion, titles, speed ramps — reaches the clips. This renders and times two short ranges of the open sequence, to see whether rendering each cut separately is quick enough to build on. It exports nothing and puts your in/out points back.">?</span>
-    </p>
-    <div class="btnrow">
-        <button id="pocrender" class="mini">Test render (POC)</button>
-    </div>
-    <!-- Also inside the overlay, and stays for the same reason. -->
-    <div id="pocnote" class="msg pad" hidden></div>
-</section>
+<!-- the setup/debug block moved into the Info tab; see #paneinfo -->
 
 <!-- STEP 1 · read ------------------------------------------------------- -->
 <!-- Collapses once it has succeeded. A finished step with a full-width blue button still
@@ -599,6 +568,39 @@
      action, and both were prose at the outermost level. -->
 <div id="paneinfo" class="tabpane" hidden>
     <div id="infomsgs" class="railmsgs"></div>
+
+<section id="gearmenu" class="gearblock">
+    <p class="lbl">Cut script
+        <span class="q" data-tip="xmlcut.py — the engine that does the cutting. It ships inside this panel, so normally there is nothing to do here. Re-check confirms it is present and runnable, and re-downloads it if it has gone missing.">?</span>
+    </p>
+    <div id="enginestat" class="msg">checking…</div>
+    <div class="pathrow">
+        <span id="scriptpath" class="path">looking…</span>
+        <button id="pickscript" class="mini" hidden>Find</button>
+    </div>
+    <!-- ⚠️ STAYS HERE, and it is one of the three exceptions to the rail. This menu is an
+         overlay that COVERS the rail, so a message produced by a button inside it cannot be
+         shown in the rail at all. It also sits beside Find — the control that fixes it. The
+         headline ("the cut script is missing") is on the rail, in #nextline. -->
+    <div id="scripthelp" class="msg error" hidden></div>
+    <!-- One row, not two stacked full-width buttons: neither is the thing you came for. -->
+    <div class="btnrow">
+        <button id="recheck" class="mini">Re-check cut script</button>
+        <button id="checkupd" class="mini">Check for updates</button>
+    </div>
+
+    <!-- POC. Lives behind the gear because it is not a feature yet: it renders two
+         short ranges to answer whether per-segment rendering is fast enough to build
+         on, and changes nothing about how the panel exports. -->
+    <p class="lbl">Export with effects
+        <span class="q" data-tip="Proof of concept. Cutting reads the raw source, so nothing from the timeline — colour, Motion, titles, speed ramps — reaches the clips. This renders and times two short ranges of the open sequence, to see whether rendering each cut separately is quick enough to build on. It exports nothing and puts your in/out points back.">?</span>
+    </p>
+    <div class="btnrow">
+        <button id="pocrender" class="mini">Test render (POC)</button>
+    </div>
+    <!-- Also inside the overlay, and stays for the same reason. -->
+    <div id="pocnote" class="msg pad" hidden></div>
+</section>
 <div id="seqbox" class="card" hidden>
         <div class="seqrow">
             <div class="seqname" id="seqname">—</div>
