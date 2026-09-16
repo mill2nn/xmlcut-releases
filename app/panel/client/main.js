@@ -48,6 +48,14 @@
                "scale", "scaleread",
                "onlyproblab",
                "actionbar", "barready", "retry", "audiosel",
+               /* CONCEPT C · the tabs, the mode bar and the figures strip. #paneclips is the
+                * one tabpane with no hidden attribute in the markup, which is what makes
+                * opening-on-Clips true from the file rather than from a script.
+                * NOTE, no quote marks in this comment: checkIds() reads every quoted string
+                * inside this array, so a quoted phrase here becomes a phantom id. */
+               "modebar", "figstrip", "figclips", "figsize", "figfps",
+               "tabbar", "tabclips", "tabtracks", "tabqual", "tabinfo",
+               "paneclips", "panetracks", "panequal", "paneinfo", "infomsgs",
                "pocrender", "pocnote",
                /* THE MODE, as two buttons rather than a select. #cutfrom is GONE — see the
                 * comment above the buttons in index.html. state.cutFrom and the
@@ -895,7 +903,20 @@
             "Muốn đánh số lại 01..N thì dùng --renumber."
     ].concat(CL_380);
 
+    var CL_382 = [
+            "Giao diện mới: 2 nút Source Render / Timeline Render to nhất, mỗi nút một màu riêng, nằm trên cùng.",
+            "Ngay dưới là 3 thông số: số clip, dung lượng ước tính, fps.",
+            "Phần còn lại gom vào 4 tab: Clips · Tracks · Quality · Info.",
+            "3 chỗ thừa ngoài giao diện (dòng chữ dài, khung sequence, log) đã chuyển vào nút Info.",
+            "Lỗi và cảnh báo KHÔNG vào tab — vẫn nằm ngoài để nhìn thấy ngay.",
+            "Nút Export và ô Save to luôn dính ở đáy, không bị cuộn mất.",
+            "Audio: bỏ hẳn kiểu xuất lẻ từng file. Nay tick track nào thì track đó ra 1 file audio nguyên vẹn.",
+            "Số thứ tự trên màn hình nay đúng bằng số trên tên file — bỏ tick không làm nhảy số nữa.",
+            "File xuất ra nay đánh số 01..N liên tục, không nhảy 1,5,7 nữa: clip không cắt được (Dynamic Link, title, adjustment layer) không còn chiếm số."
+    ].concat(CL_381);
+
     var CHANGELOG = {
+        "3.82": CL_382,
         "3.81": CL_381,
         "3.80": CL_380,
         "3.79": CL_379,
@@ -1014,9 +1035,22 @@
             var ia = RAIL_KEYS.indexOf(a), ib = RAIL_KEYS.indexOf(b);
             return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
         });
+        /* ⚠️ TWO SINKS NOW, SPLIT BY SEVERITY, and the split is the whole of the team lead's
+         * "3 chỗ này… cho nó vào 1 nút Info" for this region. INFO rows — the audio summary,
+         * the ~25 Mbps explainer, the "N of M cuts" tally — are the stacked prose he circled
+         * on 8 Sep; they go to the Info tab. ERRORS AND WARNINGS DO NOT MOVE. A failure the
+         * reader cannot see is the defect 3.81 shipped a fix for, and putting one a tab deep
+         * would be that bug wearing a hat.
+         *
+         * The ordering above is untouched, so within each sink the rows still come out in
+         * RAIL_KEYS order and a row never changes place because another appeared. */
         el.railmsgs.innerHTML = "";
+        if (el.infomsgs) el.infomsgs.innerHTML = "";
+        var infoCount = 0;
         for (var i = 0; i < keys.length; i++) {
             var r = railRows[keys[i]];
+            var sink = (r.sev === "info" && el.infomsgs) ? el.infomsgs : el.railmsgs;
+            if (sink === el.infomsgs) infoCount++;
             var d = document.createElement("div");
             d.className = "msg " + r.sev;
             // Read by the tests to find a row by SUBJECT rather than by position: rows are
@@ -1035,8 +1069,60 @@
                 d.appendChild(x);
                 d.className += " hasx";
             }
-            el.railmsgs.appendChild(d);
+            sink.appendChild(d);
         }
+        /* The tab says how much is behind it, so moving prose out of sight does not make it
+         * unfindable — which is the one way "put it behind Info" could go wrong. */
+        if (el.tabinfo) {
+            el.tabinfo.textContent = infoCount ? ("Info · " + infoCount) : "Info";
+        }
+    }
+
+    /* ─────────────────────────────────────────────────────────────────────── the tabs
+     *
+     * "hiện giờ nó đang rối quá" · "nhiều thông tin bị thừa ý" — 8 Sep. Measured before this:
+     * 113 separately-drawn things on screen at once, 54 of them operable or readable, and
+     * ~1,480px of content in a 320px dock — four and a half screenfuls.
+     *
+     * ⚠️ hidden, NOT a display class, and NOT through a descendant selector. style.css
+     * restates `div[hidden] { display: none }` at (0,1,1) because an author display rule
+     * beats the browser's; a `.tabs .pane { display: … }` at (0,2,0) would WIN and leave the
+     * hidden pane on screen. That trap has shipped a dead control in this panel once already.
+     *
+     * ⚠️ NO querySelectorAll. The test DOM shim defines it as `() => []`, so selector-based
+     * wiring would silently do nothing under the shim and pass every assertion by vacuum. */
+    var TABS = [
+        { btn: "tabclips",  pane: "paneclips" },
+        { btn: "tabtracks", pane: "panetracks" },
+        { btn: "tabqual",   pane: "panequal" },
+        { btn: "tabinfo",   pane: "paneinfo" }
+    ];
+    var tabNow = "tabclips";
+
+    function setTab(which) {
+        var i, t, hit = false;
+        for (i = 0; i < TABS.length; i++) if (TABS[i].btn === which) hit = true;
+        if (!hit) which = "tabclips";
+        tabNow = which;
+        for (i = 0; i < TABS.length; i++) {
+            t = TABS[i];
+            var on = (t.btn === which);
+            if (el[t.btn]) el[t.btn].className = on ? "tab on" : "tab";
+            if (el[t.pane]) el[t.pane].hidden = !on;
+        }
+        /* ⚠️ #step3 WRAPS BOTH SETTINGS PANES and has its own owner — refreshExportEnabled
+         * shows it once a read exists. Never write step3.hidden from here: two writers on one
+         * flag is how a region ends up visible in a state nobody designed. */
+    }
+
+    function wireTabs() {
+        for (var i = 0; i < TABS.length; i++) {
+            (function (t) {
+                if (!el[t.btn]) return;
+                el[t.btn].addEventListener("click", function () { setTab(t.btn); }, false);
+            })(TABS[i]);
+        }
+        setTab("tabclips");
     }
 
     /* The report is TWO blocks now — its counts and its destination sit above the list it
@@ -1436,9 +1522,13 @@
         el.listnote.textContent = "";
         show(el.seqbox, false);
         show(el.step1body, true);
+        show(el.step1, true);
         el.step1.className = "step";
         show(el.opts, false);
         show(el.step3, false);
+        show(el.modebar, false);
+        show(el.figstrip, false);
+        show(el.tabbar, false);
         show(el.tablewrap, false);
         /* ⚠️ #mergedet, NOT #mergebox — and getting this wrong is why "3 merge notes"
          * expanded to nothing.
@@ -1496,6 +1586,9 @@
                 show(el.seqbox, false);
                 show(el.opts, false);
                 show(el.step3, false);
+                show(el.modebar, false);
+                show(el.figstrip, false);
+                show(el.tabbar, false);
                 return;
             }
             /* ⚠️ ok:true IS NOT THE SAME AS "there is a file", and the two lines below assume
@@ -1773,6 +1866,13 @@
         // worth. `Read again` in the summary card is the way back.
         show(el.step1body, false);
         el.step1.className = "step done";
+        /* ⚠️ AND THE WHOLE STEP GOES WITH IT. Once a read has happened #step1 holds nothing
+         * but its own "Timeline" heading — the Read button is hidden, the progress bar is
+         * finished and the sequence card moved to the Info tab — so what was left on screen
+         * was a section heading with no section under it, sitting between the two mode
+         * blocks and the figures. "nhiều thông tin bị thừa ý". Read again is in the figures
+         * strip, which is what a re-read actually changes. */
+        show(el.step1, false);
 
         say("ramps", "warn", r.keyframed_ramps > 0
             ? (r.keyframed_ramps + " clip"
@@ -3654,6 +3754,13 @@
                 show(el.tablewrap, true);
                 show(el.opts, true);
                 show(el.step3, true);
+                /* The mode pair, the figures and the tabs appear together with the settings
+                 * they head: before a read the panel has one job and one control for it, and
+                 * two large buttons that cannot do anything yet are two more things to read
+                 * past. One reveal site, so they cannot get out of step with each other. */
+                show(el.modebar, true);
+                show(el.figstrip, true);
+                show(el.tabbar, true);
             }
             renderMerge();
             readStage(READ_STEPS.length,
@@ -3792,6 +3899,13 @@
                  * file, which is why both are carried. Falls back for a manifest written
                  * before the engine published it. */
                 premTrack: Number(c.premiere_track || c.track_index || 1),
+                /* THE NUMBER THIS CLIP CARRIES IN A FULL RUN, straight from the engine.
+                 * Read, never recomputed: since 3.80/3.81 xmlcut keeps a narrowed run's
+                 * numbers (--ext and --pick both), so a number worked out from what is
+                 * visible on screen is a DIFFERENT number from the one the filenames get.
+                 * `index` is the fallback for a manifest written before the engine
+                 * published timeline_index; the two are equal on every unnarrowed scan. */
+                tlIndex: Number(c.timeline_index || c.index || 0),
                 /* Is the media where the XML says it is. The engine reports the same fact on
                  * stdout as "!! N cut(s) reference media that isn't at the recorded path",
                  * which the panel could show but not act on. `mediaKind` separates the two
@@ -3852,6 +3966,17 @@
                 kind: kind,
                 source: src
             });
+        }
+        /* ⚠️ THE FALLBACK NUMBER, AND IT IS POSITIONAL OVER THE WHOLE LIST — never over
+         * what happens to be on screen. A manifest written before the engine published
+         * timeline_index carries no number at all, and reading one there would blank the
+         * index column on every row of an older run. Position in THIS list is the same
+         * thing the engine counts, because this list is the unnarrowed scan in timeline
+         * order, so the fallback is stable against hiding and unticking exactly as the
+         * real number is. Assigned once, here, rather than at render time: renderClips()
+         * runs on every tick and must not be able to arrive at a different answer. */
+        for (var ti = 0; ti < state.clips.length; ti++) {
+            if (!state.clips[ti].tlIndex) state.clips[ti].tlIndex = ti + 1;
         }
         return true;
     }
@@ -4026,10 +4151,19 @@
         return p;
     }
 
-    /* Rows for switched-off types are hidden and the rest are renumbered in place.
-     * That is not cosmetic: xmlcut filters by type and THEN assigns 1..N in the same
-     * order, so renumbering the visible rows reproduces exactly the indices the
-     * filenames will carry. */
+    /* ⚠️ ROWS FOR SWITCHED-OFF TYPES ARE HIDDEN AND NOTHING IS RENUMBERED. This used to
+     * renumber the survivors in place, and the reason given was "xmlcut filters by type and
+     * THEN assigns 1..N in the same order, so renumbering the visible rows reproduces
+     * exactly the indices the filenames will carry". That was true until 3.80/3.81 and is
+     * false now: the engine keeps the full run's number through --pick AND --ext
+     * (xmlcut.py, _keep_numbers), because a subset export is a RE-export and a renumbered
+     * re-export cannot replace the file it was meant to replace.
+     *
+     * So the panel stopped computing the number and started reading it — see tlIndex. The
+     * defect this leaves behind if it is ever reverted is the nastier kind: the screen and
+     * the delivered filenames disagree, and the screen is what gets screenshotted. It was
+     * reported exactly that way — "cái lỗi bỏ tick file nó tự thay đổi STT vẫn bị e nhé"
+     * (15 Sep) — against a build whose ENGINE was already correct. */
     /* WHICH GROUP A ROW BELONGS TO — for its COLOUR and for the counts over the list, and
      * for nothing else.
      *
@@ -4104,22 +4238,22 @@
             visible = live;
         }
 
-        // Numbered in TIMELINE order — the order the manifest is already in — because
-        // that is the order xmlcut assigns 1..N in after its own filtering. Only then are
-        // the uncuttable ones sorted to the bottom for display, carrying the number they
-        // were given. Numbering after that sort would put an offline clip at the end with
-        // a number it will never have.
+        // THE NUMBER COMES FROM THE ENGINE, per row, and nothing here derives it from
+        // position. Every row keeps the number the full run gave it whatever else is
+        // hidden, unticked or sorted — which is the whole point, and is what makes the
+        // number on screen the prefix on the file.
         //
-        // Unticked clips take no number at all: they will not be in the run, so giving
-        // them one would misdescribe every filename after them.
+        // ⚠️ AN UNTICKED ROW KEEPS ITS NUMBER TOO, and that is the visible half of the fix
+        // rather than an oversight. The number no longer depends on the tick, so blanking
+        // it would hide the only evidence that unticking is now safe — and the ask was
+        // "a muốn mấy file đó phải giữ nguyên được số thứ tự" (9 Sep). A row that produces
+        // no file is already marked by its dimmed .unpicked class and its cleared tick.
         //
-        // ⚠️ trackPicked() COUNTS HERE TOO. An audio row whose track is not ticked is in
-        // this list — that is how you find out the track has 12 items on it — but it is not
-        // in the export, so giving it a number would misdescribe every filename after it.
-        var n = 0;
+        // A row the engine never numbered (tlIndex 0 — a manifest older than the field, or
+        // a synthetic row) still falls back to an em dash at the cell, below.
         for (var q = 0; q < visible.length; q++) {
             var vv = visible[q];
-            vv.n = (vv.group === 0 && isPicked(vv) && trackPicked(vv)) ? (++n) : 0;
+            vv.n = vv.tlIndex || 0;
         }
         /* Each row's group is worked out ONCE, here, and the list is sorted by it —
          * stably, so timeline order survives inside every group. */
@@ -4776,13 +4910,6 @@
         /* The voice-over, and which tracks it reads. One control, two flags: --audio is the
          * switch and --audio-tracks narrows it, so "every track" needs no second argument and
          * the ordinary case stays a short command line. */
-        if (s.audio === "pertrack") {
-            /* One file per track, not a mixdown — so --audio (the mixer) is NOT sent. */
-            a.push("--audio-per-track");
-        } else if (s.audio) {
-            a.push("--audio");
-            if (s.audio !== "all") a.push("--audio-tracks", s.audio);
-        }
         /* ⚠️ EVERY AUDIO TRACK, then narrowed by --pick. --tracks has no per-track form —
          * it is video|audio|all — so "A1 and A3 but not A2" cannot be said with it. What CAN
          * say it is the pick file the panel already writes from the cut list, and
@@ -4792,7 +4919,29 @@
          * were once conflated.
          *
          * Never "audio": the video cuts are wanted in every case this control has. */
-        if (s.audioCut) a.push("--tracks", "all");
+        /* ⚠️ THE TICKS OWN WHICH AUDIO TRACKS ARE INVOLVED, and they are the ONLY writer of
+         * --audio-tracks. Until 16 Sep this line said `--tracks all`, which put every audio
+         * CUT in the list so --pick could pair one loose audio file with every single video
+         * clip. That is the option the team lead asked to delete outright: "Cái phần audio
+         * kia bỏ hẳn 1 option xuất lẻ từng file" (8 Sep). What he asked for instead is in the
+         * same message — "e chỉ cần để lựa chọn tích vào từng track A1,2,3,... để render toàn
+         * bộ track đấy ra thành file audio riêng thôi" — one tick per track, one WHOLE file
+         * per ticked track, which is --audio-per-track. The engine has done this since 3.80;
+         * only the panel was still spelling the old thing.
+         *
+         * ⚠️ ONE OWNER OF --audio-tracks, DELIBERATELY. It narrows tl.audio_items, which feeds
+         * BOTH write_track_audio() and write_timeline_audio() — so the per-track files and the
+         * mixdown CANNOT be narrowed to different sets, whatever the UI pretends. Giving the
+         * ticks the narrowing and leaving the mixdown a plain yes/no is the only arrangement
+         * where the screen cannot promise something the flags cannot say. */
+        var _afiles = audioCutList();
+        if (_afiles.length) {
+            a.push("--audio-per-track");
+        }
+        if (s.audio) a.push("--audio");
+        if (_afiles.length && _afiles.length !== (state.audioTracks || []).length) {
+            a.push("--audio-tracks", _afiles.join(","));
+        }
         if (s.renderAudio) a.push("--render-audio");
         /* Only when it differs from the engine's own default, same rule as --vcodec above.
          * The panel defaults this ON, so "split" is the flag an ordinary export carries. */
@@ -5134,31 +5283,22 @@
             return;
         }
         sel.disabled = false;
-        opt("all", have.length === 1
-            ? "The audio track"
-            : "All " + have.length + " audio tracks, mixed into one");
+        /* ⚠️ A YES/NO NOW, NOT A TRACK PICKER. Which tracks are involved is the ticks'
+         * question and theirs alone — see settingArgs(). Offering the choice twice, in two
+         * controls that write one flag, is how a panel promises a combination it cannot
+         * deliver. "All N tracks, mixed into one" became simply "and one mixed file of them". */
+        opt("all", "Yes — one mixed MP3 as well");
         /* ⚠️ THE THIRD ANSWER, and it is the one that was actually asked for. "e chỉ cần để
          * lựa chọn tích vào từng track A1,2,3,... để render toàn bộ track đấy ra thành file
          * audio riêng thôi" — 8 Sep — with the reason attached: "vốn là ngta chỉ cần file VO
          * từ đầu tới cuối thôi". The two options above it are a mixdown of everything and a
          * mixdown of one track; neither is "each track, whole, as its own file", which is
          * what a voice-over spread across ninety clipitems has to become to be useful. */
-        opt("pertrack", have.length === 1
-            ? "The audio track, as its own whole file"
-            : "Each track as its own whole file (" + have.length + " files)");
-        for (var i = 0; i < have.length; i++) {
-            var t = have[i];
-            opt(String(t.index), "A" + t.index + " only · " + t.items
-                + (t.items === 1 ? " item" : " items"));
-        }
-        var want = state.audioWant || "";
-        if (want && want !== "all") {
-            var known = false;
-            for (var k = 0; k < have.length; k++) {
-                if (String(have[k].index) === want) known = true;
-            }
-            if (!known && want !== "pertrack") want = "all";
-        }
+        /* "pertrack" and the per-track options are gone: the first is what the ticks do now,
+         * and the rest narrowed a flag the ticks own. A value saved under either of the old
+         * meanings lands on "all" rather than on nothing — the person asked for audio, and the
+         * nearest honest answer to "A2 only" is "yes, mixed", not silence. */
+        var want = state.audioWant ? "all" : "";
         sel.value = want;
         state.audioWant = want;
     }
@@ -5310,32 +5450,40 @@
     function renderAudioCutTracks() {
         var have = state.audioTracks || [];
         var render = state.cutFrom === "render";
-        // Shown in BOTH modes now. It used to hide in Timeline Render — the one mode the
-        // per-track ticks were asked for — because the engine refused audio cuts on a render
-        // run. It no longer does; audio cuts come from their source in every mode.
+        // Shown in BOTH modes, and it still must be: the "own file" tick is mode-free — a
+        // whole-track mp3 is mixed from the timeline's audio whichever way the PICTURE is
+        // cut. Only the "in clip" column is render-only, and that is gated on `render` at the
+        // row below rather than by hiding the whole field.
         show(el.atracksfield, have.length > 0);
         if (!el.atracks) return;
         el.atracks.innerHTML = "";
         if (!have.length) return;
         // One row per track; a caption row; two tick columns in Timeline Render (hear / file),
         // one in Source Render (file — a source clip already carries its own camera sound).
+        // ⚠️ "own file" IS ONE FILE FOR THE WHOLE TRACK, not one per clip. The per-clip export
+        // was deleted on 16 Sep at the team lead's request; see settingArgs().
         el.atracks.className = render ? "atgrid two" : "atgrid one";
-        var head = document.createElement("div");
-        head.className = "atrow";
-        head.appendChild(atCap("", ""));
+        /* ⚠️ NO CAPTION ROW IN SOURCE RENDER. With two columns the captions are the only
+         * thing telling them apart; with ONE the caption "own file" floated above a lone
+         * tick, a long way from the track it belonged to, and said less than the field's own
+         * label already does. A header over a single column is a header over nothing. */
+        var head = render ? document.createElement("div") : null;
+        if (head) head.className = "atrow";
+        if (head) head.appendChild(atCap("", ""));
         /* "in clip" / "own file" rather than "hear" / "file". Two people in a row could not
          * tell from the old captions that these are unrelated switches — one decides what a
          * video clip SOUNDS like, the other whether loose audio files appear beside it — and
          * "file" read as "put this in a file", which is what the other column does. The
          * captions size the grid column to their own text (auto), so the track name beside
          * them just ellipsises; nothing else moves. */
-        if (render) head.appendChild(atCap("in clip", "Tick: this track is audible inside "
+        if (head) head.appendChild(atCap("in clip", "Tick: this track is audible inside "
             + "each exported video clip. Untick: it is silent in the clips. Your timeline is "
             + "put back exactly as it was afterwards."));
-        head.appendChild(atCap("own file", "Tick: this track's clips ALSO come out as "
-            + "separate audio files, one per clip. Untick: no separate audio files. This is "
-            + "not about the sound inside the video clips."));
-        el.atracks.appendChild(head);
+        if (head) head.appendChild(atCap("own file", "Tick: this whole track comes out as ONE audio "
+            + "file, as long as the sequence, with the gaps as silence — _track_A2.mp3. "
+            + "Untick: no file for this track. This is not about the sound inside the video "
+            + "clips."));
+        if (head) el.atracks.appendChild(head);
         for (var i = 0; i < have.length; i++) atRow(have[i]);
 
         function atCap(text, tip) {
@@ -5363,7 +5511,9 @@
             var name = document.createElement("span");
             name.className = "atname";
             name.textContent = "A" + t.index + " · " + t.items + (t.items === 1 ? " item" : " items");
-            row.appendChild(name);
+            // Two columns need the name first so the two ticks line up under their captions;
+            // one column reads better as "[x] A1 · 8 items". See .atgrid.one.
+            if (render) row.appendChild(name);
             if (render) {
                 row.appendChild(atTick(t.index, "data-h", audioHearOn(t.index),
                     "Hear A" + t.index + " in each clip", function (on) {
@@ -5379,7 +5529,7 @@
                 }));
             }
             row.appendChild(atTick(t.index, "data-a", audioCutOn(t.index),
-                "Cut A" + t.index + "'s clips to their own files", function (on) {
+                "Write A" + t.index + " as one whole audio file", function (on) {
                 var keep = [], j;
                 for (j = 0; j < have.length; j++) {
                     if ((have[j].index === t.index) ? on : audioCutOn(have[j].index)) {
@@ -5389,8 +5539,13 @@
                 state.audioCutWant = keep.join(",");
                 rememberAudioCutWant();
                 renderSettings();
-                rescanForSetting("Re-reading…");
+                /* ⚠️ NO RESCAN ANY MORE. This tick used to send --tracks all, which changed
+                 * what was IN the cut list, so the list had to be fetched again. It now only
+                 * decides which whole-track audio files are written beside the clips — the
+                 * cut list is identical either way, and re-reading the timeline on every tick
+                 * was a second or two of the panel going blank for nothing. */
             }));
+            if (!render) row.appendChild(name);
             el.atracks.appendChild(row);
         }
     }
@@ -6342,6 +6497,24 @@
         }
     }
 
+    /* ───────────────────────────────────────────── the three figures under the two buttons
+     *
+     * "bên dưới là thống số render" — 28 Aug, the second half of the sentence that asked for
+     * the two buttons. Three numbers and nothing else.
+     *
+     * ⚠️ READ FROM THE SAME PLACES THE PROSE DID, never recomputed. The clip count is
+     * pickedClips(), which is what the Export button counts; the size is the total
+     * renderSizeEstimate() has just summed; the rate is the one renderSequence() wrote on
+     * the sequence card. A figure computed a second way is a figure that can disagree with
+     * the sentence it replaced, and this panel has shipped that before. */
+    function renderFigs(totalBytes) {
+        if (!el.figclips) return;
+        var picked = pickedClips();
+        el.figclips.textContent = picked.length ? String(picked.length) : "—";
+        el.figsize.textContent = (totalBytes > 0) ? humanBytes(totalBytes) : "—";
+        el.figfps.textContent = state.seqFps ? String(state.seqFps) : "—";
+    }
+
     function renderSizeEstimate() {
         if (!el.sizeest) return;
         renderCapNote();
@@ -6359,6 +6532,7 @@
         var picked = pickedClips();
         if (!picked.length) {
             show(el.sizeest, false);
+            renderFigs(0);
             say("sizes", "warn", "");
             return;
         }
@@ -6374,9 +6548,11 @@
             + (total > 0 ? "  ·  " + humanBytes(total) : "");
         if (!known) {
             show(el.sizeest, false);
+            renderFigs(0);
             say("sizes", "warn", "");
             return;
         }
+        renderFigs(total);
         /* THE NUMBER IN THE BAR, THE CAVEAT ELSEWHERE.
          *
          * This one line used to carry both, and the explaining half is three times the
@@ -8221,6 +8397,7 @@
          * gets read: renderAudioCutTracks() draws a tick only for a track that exists. */
         loadAudioCutWant();
         loadAudioHearWant();
+        wireTabs();
         /* WHERE A CROSS-DISSOLVE IS CUT. Loaded before restoreSettings() so the box on
          * screen and state agree from the first paint — the tick is `checked` in the markup,
          * and a stored "ignore" has to win over that rather than the other way round. */

@@ -1,6 +1,6 @@
 {
-  "version": "3.81",
-  "notes": "Clip l\u1ed7i nay hi\u1ec7n L\u00dd DO ngay d\u01b0\u1edbi d\u00f2ng \u0111\u00f3: tr\u01b0\u1edbc ch\u1ec9 hi\u1ec7n khi r\u00ea chu\u1ed9t n\u00ean ch\u1ee5p m\u00e0n h\u00ecnh g\u1eedi \u0111i kh\u00f4ng ai th\u1ea5y nguy\u00ean nh\u00e2n. B\u1ecf tick b\u1edbt lo\u1ea1i file (.png, .aegraphic...) nay c\u0169ng GI\u1eee NGUY\u00caN s\u1ed1 th\u1ee9 t\u1ef1 nh\u01b0 l\u1ea7n ch\u1ea1y \u0111\u1ee7 \u2014 tr\u01b0\u1edbc \u0111\u00e2y ch\u1ec9 tick .mov th\u00ec clip s\u1ed1 33 nh\u1ea3y th\u00e0nh 15, n\u00ean export l\u1ea1i sinh file tr\u00f9ng thay v\u00ec \u0111\u00e8 \u0111\u00fang file c\u0169. Mu\u1ed1n \u0111\u00e1nh s\u1ed1 l\u1ea1i 01..N th\u00ec d\u00f9ng --renumber.",
+  "version": "3.82",
+  "notes": "Giao di\u1ec7n m\u1edbi: 2 n\u00fat Source Render / Timeline Render to nh\u1ea5t m\u1ed7i n\u00fat m\u1ed9t m\u00e0u, d\u01b0\u1edbi l\u00e0 3 th\u00f4ng s\u1ed1, ph\u1ea7n c\u00f2n l\u1ea1i gom v\u00e0o 4 tab Clips \u00b7 Tracks \u00b7 Quality \u00b7 Info. L\u1ed7i v\u00e0 c\u1ea3nh b\u00e1o v\u1eabn n\u1eb1m ngo\u00e0i tab. N\u00fat Export v\u00e0 \u00f4 Save to lu\u00f4n d\u00ednh \u1edf \u0111\u00e1y. Audio: b\u1ecf h\u1eb3n ki\u1ec3u xu\u1ea5t l\u1ebb t\u1eebng file \u2014 tick track n\u00e0o th\u00ec track \u0111\u00f3 ra 1 file audio nguy\u00ean v\u1eb9n. File xu\u1ea5t ra nay \u0111\u00e1nh s\u1ed1 01..N li\u00ean t\u1ee5c, kh\u00f4ng nh\u1ea3y 1,5,7 n\u1eefa: clip kh\u00f4ng c\u1eaft \u0111\u01b0\u1ee3c kh\u00f4ng c\u00f2n chi\u1ebfm s\u1ed1.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

@@ -62,6 +62,15 @@
     --ok: #3ff08a;        /* 13.09:1 / 10.66:1 */
     --warn: #ffc233;      /* 12.13:1 / 9.88:1 */
     --bad: #ff5470;       /*  6.29:1 /  5.13:1 */
+    /* THE SECOND MODE'S HUE, measured rather than picked:
+     *   #b78cff on the ground 7.65:1 · on a card 6.23:1 · dark ink on it 7.39:1
+     *   HSL H262 S100% L77% — 100% saturated like every other hue here
+     *   apart(--accent) = 271, past the 20..260 band the type table calls "related":
+     *   these two are alternatives, not siblings, and must not read as shades.
+     * Rejected: #8b5cf6 (ink 4.47:1, under the floor), #a855f7 (4.78:1, on the line),
+     * #c4a0ff (L81%, a pale lavender — the thing the note above says not to do).
+     * ⚠️ NOT a ladder rung. It must never be written as an opaque hex fill. */
+    --violet: #b78cff;
 
     /* THE SURFACE LADDER. Four steps, each measured against the ground, and everything
      * opaque in this file uses one of them rather than a grey mixed by eye. Eleven such
@@ -197,6 +206,43 @@ body {
  * MEASURED at a real 320px viewport (tests/check_layout.js): 270px of group content, 8px
  * gap, so 131px a button — and "Timeline Render" at 12px/600 inks 96px, which is why the
  * name is nowrap and the padding is 7px rather than the 9px a primary button uses. */
+/* ═══════════════════════════════════════════════ THE MODE, AS TWO BLOCKS
+ *
+ * "2 nút to nhất… nổi khối nổi bật màu khác hẳn xung quanh" — asked five times over four
+ * days. This reverses the earlier reading of it. That reading was: "different from their
+ * SURROUNDINGS, not from each other — colour means SELECTED here, and giving each mode a
+ * fixed hue would leave nothing to say which one is live." The objection was sound; the
+ * answer was to drop the second hue rather than to find another carrier for state.
+ *
+ * ⚠️ AND IT PRODUCED AN INVERTED BUTTON. Measured: `.modebtn.on` resolved to
+ * rgba(0,180,255,.08) over the page ground — the rule at the foot of this file beat the
+ * #262e39 one here — which composites to #091923, 1.095:1 against the ground, while the
+ * UNSELECTED button sat at 1.228:1. The selected button was 1.81x DARKER than the
+ * unselected one: the exact "button reading as recessed" failure the ladder check exists
+ * to catch, missed because an rgba() is not a six-digit hex.
+ *
+ * THE SPLIT THAT FIXES BOTH: hue answers "which button is this", luminance answers "which
+ * one is live". Hue is redundant for the first question — the buttons are NAMED — and
+ * luminance is the channel a colour-blind reader keeps. Two channels, two jobs, no
+ * crosstalk. In any one state the two buttons are luminance-MATCHED (0.985x apart), so
+ * brightness carries only state.
+ *
+ * Every opaque value below is a ladder rung; each hue arrives as a gradient layer on top,
+ * so "no opaque background is mixed off-ladder" stays honest rather than merely passing.
+ *
+ *   state              floor            tint   composite           vs ground
+ *   rest               card   #1d222c   .26    #154863 / #453e63   1.99 / 1.98 : 1
+ *   hover, unselected  raised #262e39   .26    #1c516c / #4c466c   2.28 / 2.24 : 1
+ *   selected           hover  #2f3845   .40    #1c6a8f / #655a8f   3.27 / 3.18 : 1
+ *
+ * selected/rest is 2.20x where the ladder's own "visibly apart" threshold is 1.2x, and
+ * hovering an unselected button reaches only 1.27x — so hover can never be misread as
+ * selected. The prominence ladder now runs, end to end, strictly increasing:
+ *   ground 1.000 < sunken 1.090 < card 1.228 < raised 1.428 < hover 1.652
+ *                < mode rest 1.99 < mode hover 2.28 < mode ON 3.27 < Export fill 8.36
+ *
+ * ⚠️ COLOUR IS SET ON THE IDS, geometry on the class. #modesrc is (1,0,0) and .modebtn.on
+ * is (0,2,0), so a colour written on the class would LOSE to the id. */
 .modepair {
     display: flex;
     gap: 8px;
@@ -205,47 +251,94 @@ body {
     flex: 1 1 0;
     min-width: 0;
     display: block;
-    /* ⚠️ THE BIGGEST THING ON THE PANEL, and it is the one piece of feedback asked for nine
-     * separate times between 28 Aug and 10 Sep: "2 nút to nhất, bên trái là Source Render,
-     * bên phải là Timeline Render… nổi khối nổi bật màu khác hẳn xung quanh". Read carefully,
-     * that is "different from their SURROUNDINGS" — not two different colours from each
-     * other. Colour still means SELECTED here, and giving each mode a fixed hue of its own
-     * would leave nothing to say which one is live. So both lift away from the panel; the
-     * chosen one keeps the accent. */
-    padding: 13px 10px;
+    padding: 11px 9px;
     text-align: left;
-    /* On the documented ladder: card at rest so the pair lifts clear of the page ground,
-     * raised when selected, hover above that. Off-ladder greys are refused by check_panel. */
-    background: #1d222c;
-    border: 1px solid #39424f;
+    border: 1px solid;                 /* colour per mode, below */
     border-radius: 7px;
+    background-color: #1d222c;         /* ladder: card. The only opaque value here. */
+    background-repeat: no-repeat;
+    /* ⚠️ NO box-shadow at rest, EVER. check_layout asserts the unselected button's computed
+     * box-shadow names no rgb colour at all — that is how it proves the selected one is
+     * something ADDED rather than by the other being degraded. */
+    /* ⚠️ NO TRANSITION ON COLOUR, and it is not a taste call. These two buttons are a STATE
+     * INDICATOR: for the length of any fade the panel is showing a colour that is not the
+     * truth, which is the one thing a state indicator must never do. It also makes the state
+     * unmeasurable — getComputedStyle immediately after the class changes returns the
+     * START value of a transitioned property, so check_layout read the resting border and
+     * resting ground on a button that was already selected. Three declarations in the same
+     * rule applied and two did not, which is a confusing enough signature to be worth this
+     * note: it was the transition, not the cascade and not rgb() vs rgba(). */
 }
-.modebtn:hover:not(:disabled) { background: #2f3845; border-color: #4a5464; }
+/* ⚠️ THE HUE IS A VARIABLE ON THE ID; EVERY COLOUR RULE IS ON THE CLASS.
+ *
+ * The first cut of this put the colours on #modesrc / #modeseq directly, reasoning that an
+ * id (1,0,0) beating .modebtn (0,1,0) keeps the specificity uniform. It does — but it also
+ * meant the resting colour and the selected colour lived at DIFFERENT specificities, which
+ * is a needless subtlety in the one place a reader has to be sure which wins. Here the two
+ * states are both (0,2,0) with the selected one written second, so the cascade reads in the
+ * order the states occur. The id carries nothing but the hue.
+ *
+ * Substitution is textual, so rgba(var(--mode-hue), .45) expands to rgba(0, 180, 255, .45)
+ * — no relative colour syntax, which this Chromium does not have. */
+#modesrc {
+    --mode-hue: 0, 180, 255;
+    background-image: linear-gradient(rgba(0, 180, 255, .26), rgba(0, 180, 255, .26));
+}
+#modeseq {
+    --mode-hue: 183, 140, 255;
+    background-image: linear-gradient(rgba(183, 140, 255, .26), rgba(183, 140, 255, .26));
+}
+
+.modebtn { border-color: rgba(var(--mode-hue), .45); }
+.modebtn:hover:not(.on):not(:disabled) {
+    background-color: #262e39;                     /* ladder: raised */
+    border-color: rgba(var(--mode-hue), .70);
+}
+/* THE SELECTED ONE — four carriers, three of them free of hue: the block lifts to 2.20x the
+ * resting luminance; the border doubles, with the padding paying for it so the outer box
+ * does not move by a pixel; the glow arrives; and a filled dot joins the sub-line. */
+.modebtn.on {
+    border-width: 2px;
+    padding: 10px 8px;
+    background-color: #2f3845;                     /* ladder: hover — the top rung */
+    border-color: rgba(var(--mode-hue), 1);
+    box-shadow: var(--glow) rgba(var(--mode-hue), .30);
+}
+#modesrc.on {
+    background-image: linear-gradient(rgba(0, 180, 255, .40), rgba(0, 180, 255, .40));
+}
+#modeseq.on {
+    background-image: linear-gradient(rgba(183, 140, 255, .40), rgba(183, 140, 255, .40));
+}
+.modebtn.on:hover:not(:disabled) { filter: brightness(1.06); }
 .modename {
     display: block;
-    font-size: var(--fs-big, 14px);
+    font-size: 13.5px;
+    letter-spacing: .01em;
     font-weight: 600;
-    color: var(--fg, #d6dae2);
+    color: var(--fg);
     white-space: nowrap;
 }
-/* What it PRODUCES, in three words. Not a sentence, and not a justification of the control —
- * "camera originals" and "effects included" are the difference between the two, which is the
- * only thing the sub-line has to carry. */
+/* What it PRODUCES, in three words — the difference between the two, which is the only thing
+ * the sub-line has to carry.
+ * ⚠️ --dim IS ILLEGAL HERE. Measured on these blocks it reads 3.81:1 at rest and 2.32:1 when
+ * selected; the name is 13.5px and the note 10px, so neither is WCAG large text and 4.5:1 is
+ * the floor. --fg clears it in every state. The note stays quieter than the name by SIZE and
+ * WEIGHT, which is how the rest of this file does level two anyway.
+ * ⚠️ display: block IS LOAD-BEARING. Without it the two spans run together on one line and
+ * the button reads "Source Render ● camera originals" — which is how they shipped for one
+ * build after a refactor dropped these two rules. */
 .modenote {
     display: block;
     margin-top: 1px;
-    font-size: var(--fs-small);
-    color: var(--off);
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--fg);
 }
-/* THE SELECTED ONE, and it is unmistakable: accent border, accent name, and the same --glow
- * every other lit thing in this panel uses. No new colour and no new token. */
-.modebtn.on {
-    background: #262e39;
-    border-color: var(--accent);
-    box-shadow: var(--glow) rgba(0, 180, 255, .30);
-}
-.modebtn.on .modename { color: var(--accent); }
-.modebtn.on .modenote { color: var(--dim); }
+/* THE ACHROMATIC MARK, on .modenote and not on .modename: the name is nowrap and
+ * check_layout measures its scrollWidth against its clientWidth, so a glyph there would eat
+ * 10px of the tightest text at a 320px dock. */
+.modebtn.on .modenote::before { content: "\25CF\00A0"; font-size: 9px; }
 
 /* THE REASON A ROW FAILED, under the row itself. It was reachable only by hovering, which
  * is invisible in the screenshot people actually send — see the note in renderClips(). */
@@ -337,7 +430,13 @@ body {
  * forces tracks into existence whether they fit or not. */
 .fields {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+    /* ⚠️ 200px, RAISED FROM 148 ON 16 SEP. The frame used to be a half or a third of a wide
+     * panel, so 148px tracks meant one or two columns inside it. Concept C gives the visible
+     * frame the FULL width — one pane at a time — and at 148px a 1600px panel fitted enough
+     * tracks to squeeze every select down to 151px. The floor that matters is the control's,
+     * not the column's: check_layout holds selects at 200px or wider at every width, and a
+     * 320px dock still resolves to exactly one track either way. */
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 12px 18px;
     align-items: start;
 }
@@ -389,9 +488,18 @@ body {
  * The mode and the destination SPAN BOTH: the two mode buttons are the panel's headline and
  * halving them would make them ordinary, and a path is the one value here with no natural
  * width. */
+/* ⚠️ THE STRIP IS ONE COLUMN AT EVERY WIDTH SINCE CONCEPT C, and the multi-column rules that
+ * stood here are gone. They shared the strip between four frames; there are two left and only
+ * ONE of them is ever on screen, because they are tabs now. A single frame in a two- or
+ * three-track grid takes one track and leaves the rest empty — which is exactly what it did:
+ * the Tracks frame occupied the left half of a wide panel with a dead column beside it.
+ *
+ * The width is not wasted, it moved inwards: .fields inside each group is still an auto-fit
+ * track grid, so a wide panel puts the fields side by side WITHIN the frame instead of
+ * putting frames side by side. That is also the only arrangement where the frame's caption
+ * still describes everything under it. */
 @media (min-width: 560px) {
-    .strip { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
-    .g-mode, .g-dest { grid-column: 1 / -1; }
+    .strip { gap: 8px 10px; }
 }
 /* And THREE from 900px up, where the destination stops spanning and joins the other two on
  * one row — mode across the top, then Save to · Tracks · Render settings.
@@ -404,10 +512,7 @@ body {
  * and the field resolves to the group's full 296px. That is the documented `span 2` trap
  * being useful for once rather than harmful: no overflow, and the path row gets the same
  * width it has at a 320px dock. */
-@media (min-width: 900px) {
-    .strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .g-dest { grid-column: auto; }
-}
+
 
 /* The field's own label line: name, its tooltip, and the readout that used to sit in a row
  * of its own inside the control. One label per control, not two. */
@@ -1215,13 +1320,9 @@ td.sts.why { color: var(--bad); }
  * than as one more block in the scroll. Not `position: sticky`: the page is short, four
  * scroll regions already compete inside it, and a sticky footer over a scrolling table is
  * how the clip you were reading ends up behind a button. */
-.actionbar {
-    margin-top: 14px;
-    padding-top: 12px;
-    border-top: 1px solid var(--line);
-    display: grid;
-    gap: 9px;
-}
+/* ⚠️ THE RULE MOVED to the concept C block at the foot of this file, where it became a
+ * sticky floor. Two .actionbar blocks in one stylesheet is one too many: the later wins and
+ * the earlier reads as live. Left as a pointer rather than silently deleted. */
 
 /* Facts left, buttons right, and it collapses to two stacked rows before either half has to
  * squeeze — a wrapped row of buttons under the number it belongs to still reads as one
@@ -1742,7 +1843,21 @@ td.clipname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
  * on the row lets the grid place the cells directly (Chromium 88 supports it). */
 .atgrid { display: grid; gap: 3px 10px; align-items: center; padding-top: 2px; }
 .atgrid.two { grid-template-columns: minmax(0, 1fr) auto auto; }
-.atgrid.one { grid-template-columns: minmax(0, 1fr) auto; }
+/* ⚠️ THE TICK COMES FIRST IN THE ONE-COLUMN CASE, and that is the whole readability fix.
+ * With the name first and a lone tick floating at the right-hand edge under a caption, the
+ * reviewer's "để cái in clip với own file kia mọi người sẽ không hiểu sẽ phải tích vào đâu"
+ * survived the deletion of the second column — the tick was still a long way from the thing
+ * it ticks. Tick, then name, reads as one sentence: "[x] A1 · 8 items". */
+.atgrid.one { grid-template-columns: auto minmax(0, 1fr); }
+.atgrid.one .attick { justify-self: start; }
+.atgrid.one .atname { text-align: left; }
+/* ⚠️ THE MIXDOWN GETS ITS OWN FULL-WIDTH ROW, UNDER the per-track ticks. In the auto-fit
+ * .fields grid it landed BESIDE them — a select captioned "One MP3 of the whole timeline"
+ * sitting level with the tick column, close enough to read as another column of it, and
+ * narrow enough that its own text was cut off mid-word. It is a different question about a
+ * different output, so it gets a line of its own and the width to state itself. */
+.strip .field.f-atracks { grid-column: 1 / -1; }
+.strip .field.f-audio { grid-column: 1 / -1; }
 .atrow { display: contents; }
 .atcap { font-size: var(--fs-small); color: var(--dim); text-align: center; letter-spacing: .04em; }
 .atname { font-size: var(--fs-small); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1855,11 +1970,7 @@ body { position: relative; }
     padding: 8px 12px 9px;      /* vertical padding as before: the frame is the change, not the height */
 }
 
-/* the two jobs, biggest thing on the panel after Read */
-.modebtn { padding: 11px 9px; border-radius: 7px; }
-.modename { font-size: 13.5px; letter-spacing: .01em; }
-.modenote { font-size: 10px; }
-.modebtn.on { background: rgba(0, 180, 255, .08); }
+/* the two jobs — now the first thing on the panel; all of their colour lives up top */
 
 /* the help marks: a glyph, not a badge */
 .q {
@@ -1886,4 +1997,191 @@ body { position: relative; }
     letter-spacing: 0;
     text-transform: none;
     font-weight: 500;
+}
+
+
+/* ═══════════════════════════════════════════════════════ CONCEPT C · figures, tabs, panes
+ *
+ * The layout the team lead asked for and sent a reference for: HandBrake, which he did not
+ * merely name — he screenshotted it and hand-delivered the 45.8 MB installer on 18 Aug
+ * "e cài vào dùng thử để nghiên cứu các option của nó nhé". Its shape is a summary on top,
+ * tabs in the middle, one action bar pinned at the foot, and that is what is below.
+ */
+
+/* THE THREE FIGURES. Big enough to be read at a glance from across the two buttons they sit
+ * under, which is the whole job: "bên dưới là thống số render". */
+.figs {
+    display: flex;
+    gap: 6px;
+    margin: 8px 0 10px;
+}
+.fig {
+    flex: 1 1 0;
+    min-width: 0;
+    background-color: #14171d;      /* ladder: sunken — quieter than the mode blocks above */
+    border-radius: 6px;
+    padding: 7px 6px;
+    text-align: center;
+}
+.figval {
+    display: block;
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1.1;
+    color: var(--fg);
+    font-variant-numeric: tabular-nums;
+}
+.figcap {
+    display: block;
+    font-size: 9.5px;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--dim);
+}
+
+/* THE TAB BAR. Four labels have to fit 320px minus the panel's own padding; they are given
+ * equal shares and allowed to shrink rather than wrap, because a tab bar that becomes two
+ * rows stops reading as one control. */
+.tabbar {
+    display: flex;
+    gap: 2px;
+    background-color: #14171d;      /* ladder: sunken — the trough the lit tab rises out of */
+    padding: 3px;
+    border-radius: 7px;
+    margin-bottom: 9px;
+}
+.tab {
+    flex: 1 1 0;
+    min-width: 0;
+    border: 0;
+    border-radius: 5px;
+    background-color: #14171d;      /* ladder: sunken — the same trough, so only .on lifts */
+    color: var(--dim);
+    font-size: 11.5px;
+    font-family: inherit;
+    padding: 6px 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.tab:hover:not(.on) { background-color: #1d222c; color: var(--fg); }   /* ladder: card */
+.tab.on {
+    background-color: #2f3845;      /* ladder: hover — the top rung, so the lit tab is
+                                       unmistakably the raised one */
+    color: var(--fg);
+    font-weight: 600;
+}
+
+/* ⚠️ THE PANES RESTATE THE HIDDEN CASE, and this rule is why they can. An author display
+ * rule beats the browser's [hidden]{display:none} — the trap already documented above, which
+ * shipped a dead button once. `.tabpane[hidden]` is (0,1,1) and `.tabpane` is (0,1,0), so the
+ * hidden case wins on its own; what must never appear is a DESCENDANT selector reaching a
+ * tabpane, because (0,2,0) would beat it and leave a hidden one on screen.
+ *
+ * ⚠️ THE NAME IS tabpane AND NOT pane. `.pane` was the two-column layout that was removed
+ * from this panel, and check_panel refuses to let the name come back — reusing it would
+ * have quietly re-adopted a retired selector. */
+.tabpane { display: block; }
+.tabpane[hidden] { display: none; }
+/* ⚠️ INSIDE THE SETTINGS STRIP THE PANES ARE display: contents, so the .group frames stay
+ * DIRECT grid items of #step3. The strip is an auto-fit track grid — that is what makes the
+ * frames line up across rows and what makes it responsive with no breakpoint — and wrapping
+ * each group in a block would have made each pane a single grid item, collapsing the whole
+ * thing to one column at every width.
+ * ⚠️ AND THE HIDDEN CASE IS RESTATED AT THE SAME SPECIFICITY OR HIGHER. #step3 > .tabpane
+ * is (1,1,0), which beats .tabpane[hidden] at (0,1,1) — without the second rule a hidden
+ * pane inside the strip would stay on screen. This is the exact trap documented above. */
+#step3 > .tabpane { display: contents; }
+#step3 > .tabpane[hidden] { display: none; }
+
+/* The merge notes in the Info tab. It carried class="msg det" while it lived on the rail;
+ * a message box outside the rail is refused by check_panel, and rightly — "message" means
+ * "the rail said this". In Info it is reference, so it is styled as reference. */
+.infodet {
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 6px 9px;
+    margin: 8px 0;
+    font-size: 11.5px;
+    color: var(--dim);
+}
+.infodet > summary { cursor: default; }
+
+/* THE ACTION BAR AS A FLOOR. Export and the folder it writes into stay on screen whatever
+ * the tab body is doing — the one part of concept C that is not a tab, because it is the
+ * thing every path ends at.
+ *
+ * ⚠️ AN OPAQUE GROUND IS NOT OPTIONAL. Content scrolls UNDER this bar; with a transparent
+ * or tinted floor the clip rows would be legible through the Export button. */
+.actionbar {
+    position: sticky;
+    bottom: 0;
+    z-index: 4;
+    background-color: #0a0c10;      /* ladder: ground — the page's own colour */
+    margin-top: 14px;
+    padding-top: 12px;
+    padding-bottom: 8px;
+    border-top: 1px solid var(--line);
+    display: grid;
+    gap: 9px;
+}
+/* Save to lives in the bar now: measured, of the fourteen controls in the old settings strip
+ * it was the ONLY one with no correct default, and it was eleventh. The one control nobody
+ * can skip must not be the one behind a tab.
+ *
+ * ⚠️ IT IS ONE LINE HERE, NOT A FRAME, and that is a budget decision rather than a taste one.
+ * The action bar is a sticky floor now, so every pixel of it is spent in all three of its
+ * modes and on every tab — and check_layout holds it under 90px at a 320px dock. Carried in
+ * as a framed .group, caption and all, it measured 155px in ready mode and 159px running:
+ * two thirds of the budget for one path. Stripped to a labelled row it costs about 22px. */
+.actionbar .g-dest {
+    margin: 0;
+    padding: 0 0 0 1px;
+    /* ⚠️ THE BORDER STAYS, TRANSPARENT. An unset destination LIGHTS this frame (.group.lit)
+     * — the panel's way of saying "this is the next thing to do" — and zeroing the border
+     * here put that state out along with the chrome. Transparent costs no ink until .lit
+     * turns it on, and reserves the pixel so nothing shifts when it does. */
+    border: 1px solid transparent;
+    background: none;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+}
+.actionbar .g-dest .gcap {
+    margin: 0;
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: var(--dim);
+}
+.actionbar .g-dest .fields { display: block; flex: 1 1 auto; min-width: 0; margin: 0; }
+.actionbar .g-dest .field { margin: 0; }
+.actionbar .g-dest .pathrow { margin: 0; }
+/* ⚠️ THE LIT STATE HAS TO OUT-SPECIFY THE RESET ABOVE. `.group.lit` is (0,2,0) and so is
+ * `.actionbar .g-dest`; the reset is written later in the file, so it won. An unset
+ * destination is the one moment this row has to shout, and it had gone silent. */
+.actionbar .g-dest.lit { border-color: var(--accent); }
+.actionbar .g-dest.lit .gcap { color: var(--accent); }
+
+/* The mode pair is the panel's headline, so it carries no frame — see index.html. Its caption
+ * stays only to hang the ? on, at the size of a hint rather than a section heading. */
+.g-mode { margin-bottom: 10px; }
+.modecap {
+    margin: 0 0 5px;
+    font-size: 10px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--off);
+}
+
+/* Read again sits with the figures rather than inside them: a control, not a number, so it
+ * keeps its own height and does not stretch to the cards' size. */
+.figs { flex-wrap: wrap; }
+.figs .figbtn { flex: 0 0 auto; align-self: center; margin: 0; }
+/* ⚠️ IN A DOCK IT TAKES ITS OWN LINE. Beside the three figures at 320px it left them 45-75px
+ * each and "124.6 MB" wrapped to two lines inside its card — the figures are the thing being
+ * read here and the button is the thing being reached for occasionally, so the button yields.
+ * Above 420px there is room for both on one row and it goes back beside them. */
+@media (max-width: 420px) {
+    .figs .figbtn { flex: 1 0 100%; margin-top: 2px; }
 }

@@ -1791,35 +1791,63 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
  * are ones nobody here understands well enough to invent.
  */
 
-/* Replace ONE parameter's value.
+/* Where ONE parameter's value sits — the span between its own <ParamValue> tags.
  *
- * ⚠️ The value is found by searching FORWARD from the identifier, so a parameter that has
- * no <ParamValue> would otherwise reach into the NEXT parameter and rewrite that one
- * instead — silently, and in a file no one is going to read. The guard below stops at the
- * next identifier. Returns null rather than a half-patched string. */
-function patchEprParam(xml, ident, value) {
+ * ⚠️ THE ORDER INSIDE A BLOCK IS NOT FIXED, and assuming it was is what broke this.
+ * An .epr is a serialised object graph: each parameter is an <ExporterParam> block holding
+ * a <ParamValue> and a <ParamIdentifier>, and Adobe writes them in EITHER order — both
+ * shapes occur in the same folder, and for the same identifier. In the H.264 folder of
+ * Premiere / Media Encoder 2026, 14 of the 43 presets put the value FIRST and 29 put the
+ * identifier first; "Match Source - High bitrate", the one this file copies, is value-first.
+ *
+ * This used to search FORWARD from the identifier for the next <ParamValue>. On a
+ * value-first block that lands on the NEXT parameter: reading the target bitrate returned
+ * the maximum's 10./12. mix-up, and patching it wrote the number into the maximum. The
+ * maximum itself was then refused — the block after it has no value at all — so
+ * writeRenderPreset gave up and every render fell back to the stock 10 Mbps, whatever the
+ * quality slider said.
+ *
+ * So the BLOCK is the unit. Never "the next <ParamValue> in the file", only this
+ * parameter's own; if its block has none, that is null rather than a neighbour's value. */
+function eprValueSpan(xml, ident) {
     var tag = "<ParamIdentifier>" + ident + "</ParamIdentifier>";
     var at = xml.indexOf(tag);
     if (at < 0) return null;
-    var vs = xml.indexOf("<ParamValue>", at);
+    /* The block this identifier belongs to. The trailing space keeps the search off
+     * <ExporterParamContainer, which wraps the blocks rather than being one. Every one of
+     * the 53,872 blocks in the 1,074 presets Premiere and Media Encoder 2026 ship carries
+     * attributes, so an attribute-less <ExporterParam> is not tolerated here — it would be
+     * a shape nothing has ever been measured against, and refusing is the safe answer:
+     * writeRenderPreset says which parameter it could not find and the render falls back. */
+    var start = xml.lastIndexOf("<ExporterParam ", at);
+    if (start < 0) return null;
+    /* Where THIS block ends — measured from its opening tag, never from the identifier.
+     * end < at means a block closed between the two, so the identifier is not inside it
+     * and has no block of its own; a block that never closes gives -1 and fails the same
+     * comparison, so one line answers both — and the suite has a fixture for each. */
+    var end = xml.indexOf("</ExporterParam>", start);
+    if (end < at) return null;
+    /* Searched inside the block and nowhere else. This is the whole fix: a parameter with
+     * no value of its own comes back empty-handed instead of reaching into its neighbour. */
+    var block = xml.substring(start, end);
+    var vs = block.indexOf("<ParamValue>");
     if (vs < 0) return null;
-    var ve = xml.indexOf("</ParamValue>", vs);
+    var ve = block.indexOf("</ParamValue>", vs);
     if (ve < 0) return null;
-    var next = xml.indexOf("<ParamIdentifier>", at + tag.length);
-    if (next >= 0 && vs > next) return null;
-    return xml.substring(0, vs + "<ParamValue>".length) + value + xml.substring(ve);
+    return { from: start + vs + "<ParamValue>".length, to: start + ve };
+}
+
+/* Replace ONE parameter's value. Returns null rather than a half-patched string. */
+function patchEprParam(xml, ident, value) {
+    var span = eprValueSpan(xml, ident);
+    if (!span) return null;
+    return xml.substring(0, span.from) + value + xml.substring(span.to);
 }
 
 function readEprParam(xml, ident) {
-    var tag = "<ParamIdentifier>" + ident + "</ParamIdentifier>";
-    var at = xml.indexOf(tag);
-    if (at < 0) return null;
-    var vs = xml.indexOf("<ParamValue>", at);
-    var ve = xml.indexOf("</ParamValue>", vs);
-    if (vs < 0 || ve < 0) return null;
-    var next = xml.indexOf("<ParamIdentifier>", at + tag.length);
-    if (next >= 0 && vs > next) return null;
-    return xml.substring(vs + "<ParamValue>".length, ve);
+    var span = eprValueSpan(xml, ident);
+    if (!span) return null;
+    return xml.substring(span.from, span.to);
 }
 
 /* Adobe writes a whole number as "10." rather than "10". Matched, because a format the

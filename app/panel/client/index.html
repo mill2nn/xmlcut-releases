@@ -40,10 +40,7 @@
         <div class="updtext" id="updtext"></div>
         <button id="updbtn" class="mini">Update</button>
     </div>
-    <details id="mergedet" class="msg det" hidden>
-        <summary id="mergesum">Merge notes</summary>
-        <div id="mergebox" class="mergebox"></div>
-    </details>
+    <!-- merge notes moved to #paneinfo; see there -->
 </div>
 
 <!-- Everything about the TOOL rather than about this timeline. -->
@@ -84,6 +81,47 @@
 <!-- Collapses once it has succeeded. A finished step with a full-width blue button still
      in it competes with the button you actually want next, and this one occupied a third
      of the panel to say something a single line says. -->
+<!-- ══ THE MODE, AS THE FIRST THING ON SCREEN ════════════════════════════════════════
+     "a vẫn nghĩ UI e nên để 2 nút to nhất, bên trái là Source Render, bên phải là Timeline
+     Render" · "2 nút ý cho màu sắc hoặc độ nổi khối khác hẳn đc khum" — 8 Sep, asked five
+     times over four days.
+
+     ⚠️ HOISTED OUT OF #step3, WHICH IS WHY IT IS A SECTION OF ITS OWN. It used to be the
+     first of four frames inside the settings strip — measured, it began at y=336 in a 320px
+     dock, the fourth region down, with the rail's own next-action line BIGGER than either
+     button. Nothing about making the buttons larger could fix that; the pair had to leave
+     the strip.
+
+     ⚠️ STILL HIDDEN UNTIL A READ, deliberately. Before a read the panel has exactly one job
+     and one control for it, and two large buttons that cannot do anything yet would be two
+     more things to read past. renderSequence() reveals this the moment #step3 appears. -->
+<section id="modebar" hidden>
+<!-- ⚠️ NO FRAME AND NO CAPTION ROUND THE PAIR. It was .group.g-mode with a "Cut from"
+     caption, which is a box and a label around the two things meant to BE the headline —
+     "2 nút to nhất… nổi khối nổi bật màu khác hẳn xung quanh". A frame makes them a section
+     of the panel; without one they are the top of it. The ? keeps the explanation. -->
+<div class="g-mode">
+        <div class="gcap modecap">Cut from
+            <span class="q" data-tip="Source Render cuts the raw camera files: fast, original pixels, but nothing from the timeline is in them. Timeline Render has Premiere render each cut first, so colour, titles, Motion, transitions and ramps come out with the clip — slower, needs Media Encoder, leaves your timeline as it found it.">?</span>
+        </div>
+        <!-- Two buttons, side by side at every width including a 320px dock. The selected
+             one carries the accent border and the --glow, which is the same "one lit thing"
+             language the primary buttons use — no new colour, no new token. -->
+        <div class="modepair">
+            <button id="modesrc" class="modebtn"
+                    title="Cut the camera originals. Fast, and the pixels are the source's own — nothing from the timeline is in them.">
+                <span class="modename">Source Render</span>
+                <span class="modenote">camera originals</span>
+            </button>
+            <button id="modeseq" class="modebtn"
+                    title="Premiere renders each cut from the timeline first, so colour, titles, Motion, transitions and speed ramps are in the pixels. Slower, and it needs Media Encoder.">
+                <span class="modename">Timeline Render</span>
+                <span class="modenote">effects included</span>
+            </button>
+        </div>
+    </div>
+</section>
+
 <section id="step1" class="step">
     <div class="stephead">Timeline</div>
     <div id="step1body">
@@ -102,23 +140,7 @@
         <div id="readtext" class="hint"></div>
     </section>
 
-    <div id="seqbox" class="card" hidden>
-        <div class="seqrow">
-            <div class="seqname" id="seqname">—</div>
-            <button id="readagain" class="mini">Read again</button>
-        </div>
-        <div class="seqmeta" id="seqmeta"></div>
-        <!-- The read mode, the ramp warning and the note about what the saved folder costs
-             were three notes stacked inside this card. All three are on the rail now, so the
-             card is the sequence's own facts and one path. -->
-        <div id="savedbox" class="saved" hidden>
-            <div class="pathrow">
-                <span class="q" data-tip="Where this read and its XML were saved: beside your Premiere project, in xmlcut/&lt;sequence name&gt;/. Each read adds a timestamped pair, and only the newest ten are kept. An unsaved project has nowhere beside it, so the read goes to the Desktop.">?</span>
-                <span id="savedpath" class="path">—</span>
-                <button id="showsaved" class="mini">Show</button>
-            </div>
-        </div>
-    </div>
+    <!-- the sequence card moved to #paneinfo; see there -->
 </section>
 
 <!-- SETTINGS, IN FRAMED GROUPS -----------------------------------------------------------
@@ -148,6 +170,42 @@
 
      ⚠️ NO STEP NUMBER, still. This was "3 Export" once. Settings are not a stage you pass
      through — they are a thing you reach for at any point, and a number said otherwise. -->
+<!-- ══ THE RENDER FIGURES, DIRECTLY UNDER THE TWO BUTTONS ════════════════════════════
+     "bên dưới là thống số render" — 28 Aug, the second half of the same sentence that asked
+     for the two buttons. Three numbers, because three is what he named: how many clips, how
+     big, at what rate. #sizeest moved here from the action bar, where it was a sentence. -->
+<div id="figstrip" class="figs" hidden>
+    <div class="fig"><span id="figclips" class="figval">—</span><span class="figcap">clips</span></div>
+    <div class="fig"><span id="figsize" class="figval">—</span><span class="figcap">est. size</span></div>
+    <div class="fig"><span id="figfps" class="figval">—</span><span class="figcap">fps</span></div>
+    <!-- ⚠️ READ AGAIN LIVES WITH THE FIGURES IT REFRESHES. It was inside the sequence card,
+         and the sequence card moved into the Info tab — which would have left the only way to
+         re-read a changed timeline two clicks deep, behind a tab named for reference. These
+         three numbers are what a re-read changes, so the button belongs beside them. -->
+    <button id="readagain" class="mini figbtn">Read again</button>
+</div>
+
+<!-- ══ THE TABS ═══════════════════════════════════════════════════════════════════════
+     "hiện giờ nó đang rối quá" · "nhiều thông tin bị thừa ý" — 8 Sep. Measured before this:
+     113 separately-drawn things on screen at once, ~1,480px of content in a 320px dock.
+
+     ⚠️ CLIPS IS THE DEFAULT AND CARRIES NO hidden ATTRIBUTE. That is load-bearing twice: it
+     is what puts the clip list — and a failed clip's reason with it — in front of the reader
+     without a click, and panel_dom.js reads these attributes straight out of this file, so
+     "the panel opens on Clips" is assertable from the markup alone.
+
+     ⚠️ NOTHING THAT REPORTS A FAILURE OR A RUNNING JOB IS IN A TAB. The rail, the read
+     progress and the action bar are all outside them. A failure the reader cannot see is the
+     defect 3.81 shipped a fix for; hiding it one tab deep would be the same bug wearing a
+     hat. Only INFO-severity rail rows move, into the Info tab, which is the three places
+     marked on the 8 Sep screenshots. -->
+<div id="tabbar" class="tabbar" hidden>
+    <button id="tabclips" class="tab on" data-tab="clips">Clips</button>
+    <button id="tabtracks" class="tab" data-tab="tracks">Tracks</button>
+    <button id="tabqual" class="tab" data-tab="qual">Quality</button>
+    <button id="tabinfo" class="tab" data-tab="info">Info</button>
+</div>
+
 <section id="step3" class="strip" hidden>
 
     <!-- ══ 1 · THE MODE, AS TWO BUTTONS ══════════════════════════════════════════════════
@@ -163,26 +221,7 @@
          "xmlcut.cutfrom" localStorage key are untouched — every reader of the mode, the
          render branches and the saved value all still work off state — and these two buttons
          are what write it. See setMode() in main.js. -->
-    <div class="group g-mode">
-        <div class="gcap">Cut from
-            <span class="q" data-tip="Source Render cuts the raw camera files: fast, original pixels, but nothing from the timeline is in them. Timeline Render has Premiere render each cut first, so colour, titles, Motion, transitions and ramps come out with the clip — slower, needs Media Encoder, leaves your timeline as it found it.">?</span>
-        </div>
-        <!-- Two buttons, side by side at every width including a 320px dock. The selected
-             one carries the accent border and the --glow, which is the same "one lit thing"
-             language the primary buttons use — no new colour, no new token. -->
-        <div class="modepair">
-            <button id="modesrc" class="modebtn"
-                    title="Cut the camera originals. Fast, and the pixels are the source's own — nothing from the timeline is in them.">
-                <span class="modename">Source Render</span>
-                <span class="modenote">camera originals</span>
-            </button>
-            <button id="modeseq" class="modebtn"
-                    title="Premiere renders each cut from the timeline first, so colour, titles, Motion, transitions and speed ramps are in the pixels. Slower, and it needs Media Encoder.">
-                <span class="modename">Timeline Render</span>
-                <span class="modenote">effects included</span>
-            </button>
-        </div>
-    </div>
+    <!-- the mode buttons moved to #modebar, above; see there -->
 
     <!-- ══ 2 · SAVE TO ═══════════════════════════════════════════════════════════════════
          PROMOTED, and this is the measured reason: of the fourteen controls this strip held,
@@ -192,26 +231,14 @@
          Empty, the frame lights and the button is the primary action, because it is the one
          thing that has to happen. Set, it goes quiet and Copy comes back: there is nothing
          to copy when there is no path. -->
-    <div class="group g-dest" id="destgroup">
-        <div class="gcap">Save to
-            <span class="q" data-tip="Pick this once. Every export makes a folder named after the sequence inside it, then writes into raw/ for Source Render or edited/ for Timeline Render — each set of clips separate, with its own 01..N numbering and clips.csv.">?</span>
-        </div>
-        <div class="fields">
-            <div class="field f-dest">
-                <div class="pathrow">
-                    <span id="outpath" class="path">—</span>
-                    <button id="copyout" class="mini" title="Copy this path">Copy</button>
-                    <button id="pickout" class="mini">Change</button>
-                </div>
-            </div>
-        </div>
-    </div>
+    <!-- Save to moved into #actionbar; see there -->
 
     <!-- ══ 3 · TRACKS ════════════════════════════════════════════════════════════════════
          Which tracks the export reads, in one frame, because "which track" is one question
          however the answer is spelled. Hidden entirely when there is nothing in it to
          answer — source mode on a timeline with no audio — rather than showing a caption
          over a disabled select. -->
+    <div id="panetracks" class="tabpane" hidden>
     <div class="group g-tracks" id="trackgroup" hidden>
         <div class="gcap">Tracks</div>
         <div class="fields">
@@ -257,7 +284,7 @@
                  Hidden until a read finds audio tracks, and hidden in Timeline Render, where
                  the engine drops every audio cut anyway. -->
             <div class="field f-atracks" id="atracksfield" hidden>
-                <div class="flbl">Sound from each track
+                <div class="flbl">An audio file for each ticked track
                     <span class="q" data-tip="Two separate questions per track. IN CLIP: is this track audible inside each exported video clip? Untick it and the clips are silent on that track; your timeline is put back afterwards. OWN FILE: does this track also come out as separate audio files, one per clip? The two do not affect each other — you can have sound in the clips with no separate files, or separate files with silent clips.">?</span>
                 </div>
                 <div id="atracks" class="vinclude"></div>
@@ -270,7 +297,7 @@
                  voice-over above it, and a dataset of what was SAID wants one and not the
                  other. -->
             <div class="field f-audio" id="audiofield">
-                <div class="flbl">One MP3 of the whole timeline
+                <div class="flbl">Also one mixed MP3 of the whole timeline
                     <span class="q" data-tip="A third, separate thing: ONE mp3 as long as the whole sequence, with the chosen tracks at their timeline positions and gaps as silence. It lands beside the clips as _timeline_audio.mp3. Nothing to do with the ticks above, which are per clip.">?</span>
                 </div>
                 <select id="audiosel" class="sel wide">
@@ -297,6 +324,9 @@
 
          Frame rate is OUTSIDE the fold on purpose: it is the one field here that raises a
          warning, and a warning has to be visible beside the control that caused it. -->
+    </div><!-- /#panetracks -->
+
+<div id="panequal" class="tabpane" hidden>
     <div class="group g-out">
         <div class="gcap">Render settings</div>
         <details id="setdet" class="setdet">
@@ -448,8 +478,11 @@
     <!-- The four notes that used to close this strip — the render-mode consequences, a refused
          preset, the destination folder and the frame-rate warning — are all on the rail now.
          They were the last four blocks of prose in a region whose whole job is fields. -->
+</div><!-- /#panequal -->
 </section>
 
+<!-- ══ TAB BODY · CLIPS — the default, and the ONLY pane with no hidden attribute ══════ -->
+<section id="paneclips" class="tabpane">
 <!-- STEP 2 · choose ----------------------------------------------------- -->
 <section id="opts" class="step" hidden>
     <div class="stephead">Clips
@@ -553,12 +586,89 @@
 
      The three mode blocks keep their old ids (#prog, #report) so every show() that drove
      those sections still drives them here. Only their position and their frame changed. -->
+</section><!-- /#paneclips -->
+
+<!-- ══ TAB BODY · INFO ════════════════════════════════════════════════════════════════
+     The three places marked on the 8 Sep screenshots, and nothing else:
+       1 · the stacked prose — every INFO-severity rail row now lands in #infomsgs below,
+           while errors and warnings stay on the rail where they can be seen;
+       2 · the sequence card, with its fps / clip-count meta line and the saved-XML path;
+       3 · the audio "in clip / own file" grid — which was not moved but DELETED, because
+           "Cái phần audio kia bỏ hẳn 1 option xuất lẻ từng file".
+     The merge notes and the Advanced log join them: both are reference, neither is an
+     action, and both were prose at the outermost level. -->
+<div id="paneinfo" class="tabpane" hidden>
+    <div id="infomsgs" class="railmsgs"></div>
+<div id="seqbox" class="card" hidden>
+        <div class="seqrow">
+            <div class="seqname" id="seqname">—</div>
+        </div>
+        <div class="seqmeta" id="seqmeta"></div>
+        <!-- The read mode, the ramp warning and the note about what the saved folder costs
+             were three notes stacked inside this card. All three are on the rail now, so the
+             card is the sequence's own facts and one path. -->
+        <div id="savedbox" class="saved" hidden>
+            <div class="pathrow">
+                <span class="q" data-tip="Where this read and its XML were saved: beside your Premiere project, in xmlcut/&lt;sequence name&gt;/. Each read adds a timestamped pair, and only the newest ten are kept. An unsaved project has nowhere beside it, so the read goes to the Desktop.">?</span>
+                <span id="savedpath" class="path">—</span>
+                <button id="showsaved" class="mini">Show</button>
+            </div>
+        </div>
+    </div>
+<details id="mergedet" class="infodet" hidden>
+        <summary id="mergesum">Merge notes</summary>
+        <div id="mergebox" class="mergebox"></div>
+    </details>
+<details id="adv">
+    <summary>Advanced</summary>
+    <p class="lbl">Compare against the XML export</p>
+    <code id="cmd"></code>
+    <!-- ⚠️ THE LOG IS THE ONE THING PEOPLE ARE ASKED TO SEND BACK, and it could not be
+         copied: body sets user-select:none and .log opts back in, but selecting hundreds of
+         lines by dragging inside a scrolling <pre> is not something anyone does twice. The
+         reviewer asked for this by name — "cho thêm nút Copy để bấm 1 phát copy hết đc log"
+         — so that a whole run's log reaches a bug report in one click. -->
+    <p class="lbl">Log
+        <button id="copylog" class="linkbtn">Copy log</button>
+    </p>
+    <pre id="log" class="log">—</pre>
+</details>
+</div><!-- /#paneinfo -->
+
 <section id="actionbar" class="actionbar">
     <!-- The stall warning and the merge notes used to ride above this bar. Both are on the
          rail: a message that appears above the one control you are waiting to press MOVES
          that control, which is the worst place on the page to put a new block. -->
 
     <!-- READY: what it will cost, and the button that commits to it. -->
+
+
+    <!-- ⚠️ SAVE TO IS IN THE STICKY BAR, ABOVE THE THREE MODE ROWS, and it costs real height
+         — which is the trade being made rather than an oversight. Measured at a 320px dock:
+         the bar is 120px in ready mode with this line and 90px without it, against a budget
+         that used to read 90. The alternative was putting it behind a tab, and of the
+         fourteen controls in the old settings strip this is the ONLY one with no correct
+         default — it was also eleventh in reading order, which is why it was promoted in the
+         first place. The one thing nobody can skip must not be the one thing they cannot see.
+
+         It is a bare labelled row here, not a framed .group: carried in with its frame the
+         bar measured 155px. The frame still lights when no folder is chosen — see the
+         .actionbar .g-dest rules, which keep the border for exactly that state. -->
+<div class="group g-dest" id="destgroup">
+        <div class="gcap">Save to
+            <span class="q" data-tip="Pick this once. Every export makes a folder named after the sequence inside it, then writes into raw/ for Source Render or edited/ for Timeline Render — each set of clips separate, with its own 01..N numbering and clips.csv.">?</span>
+        </div>
+        <div class="fields">
+            <div class="field f-dest">
+                <div class="pathrow">
+                    <span id="outpath" class="path">—</span>
+                    <button id="copyout" class="mini" title="Copy this path">Copy</button>
+                    <button id="pickout" class="mini">Change</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="barready" class="abrow">
         <div class="abfacts">
             <!-- THE NUMBER ONLY. The sentence explaining how the number was arrived at —
@@ -623,20 +733,7 @@
     </div>
 </section>
 
-<details id="adv">
-    <summary>Advanced</summary>
-    <p class="lbl">Compare against the XML export</p>
-    <code id="cmd"></code>
-    <!-- ⚠️ THE LOG IS THE ONE THING PEOPLE ARE ASKED TO SEND BACK, and it could not be
-         copied: body sets user-select:none and .log opts back in, but selecting hundreds of
-         lines by dragging inside a scrolling <pre> is not something anyone does twice. The
-         reviewer asked for this by name — "cho thêm nút Copy để bấm 1 phát copy hết đc log"
-         — so that a whole run's log reaches a bug report in one click. -->
-    <p class="lbl">Log
-        <button id="copylog" class="linkbtn">Copy log</button>
-    </p>
-    <pre id="log" class="log">—</pre>
-</details>
+
 
 <div id="tip" class="tip" hidden></div>
 

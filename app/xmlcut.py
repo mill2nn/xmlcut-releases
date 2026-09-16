@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.81"
+VERSION = "3.82"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -8112,8 +8112,37 @@ def main():
     # every cut --tracks and --video-track are about to remove, so a clip the full export
     # calls 04 is 06 in it — measured. Here the list is exactly what an unpicked run would
     # number, which is the number a picked run has to reproduce.
-    for _i, _c in enumerate(tl.cuts, start=1):
-        _c.timeline_index = _i
+    #
+    # ⚠️ A CLIP THAT CANNOT PRODUCE A FILE DOES NOT CONSUME A NUMBER, and this is the OTHER
+    # numbering complaint — the 3 Sep one, which is not the same bug as the 9 Sep one:
+    #
+    #   "cái số thứ tự ở phần 'raw' đang bị sai ở trong Sequence đấy luôn, nó nhảy lung tung
+    #    số (mặc dù thứ tự xuất hiện vẫn đúng, nhg nó ko lần lượt là 1,2,3,... mà nó nhảy
+    #    1,5,7,...)"
+    #
+    # MEASURED on a real reported sequence in source mode: 78 cuts, 47 written, and the
+    # delivered folder ran 01, 03, 04, 09, 11, 14 … up to 78 — forty-seven files with
+    # thirty-one holes in the sequence. Every hole is a Dynamic Link comp, a title or an
+    # adjustment layer: media_kind "unsupported", which source mode can never decode. They
+    # were taking a number each on the way past.
+    #
+    # ⚠️ media_kind ONLY — NOT source_exists. A file that is merely missing is a REPAIRABLE
+    # failure: relink it and it delivers. If a missing source lost its number, relinking and
+    # re-exporting would renumber everything after it and the repair would break the very
+    # filenames it was meant to restore. So offline media keeps its place in the sequence and
+    # only the structurally undeliverable are skipped.
+    #
+    # ⚠️ AND IT IS PER MODE, which is correct rather than a wrinkle: the same .aegraphic is
+    # undeliverable in Source Render and perfectly deliverable in Timeline Render, where the
+    # render supplies the pixels. The two modes write into different folders — raw/ and
+    # edited/ — each with its own 01..N, so they were never one sequence to keep in step.
+    _n = 0
+    for _c in tl.cuts:
+        if _c.render_planned or _c.media_kind != "unsupported":
+            _n += 1
+            _c.timeline_index = _n
+        else:
+            _c.timeline_index = 0
 
     if args.ext:
         # ⚠️ THE GUARD, AND IT CHECKS THE FACT RATHER THAN A FLAG. An earlier version of
@@ -8234,8 +8263,18 @@ def main():
     # the exact numbers on the screenshot. Same complaint as --pick, through a different flag.
     _narrowed = bool(getattr(args, "pick", None)) or bool(getattr(args, "ext", None))
     _keep_numbers = _narrowed and not getattr(args, "renumber", False)
-    for i, c in enumerate(tl.cuts, start=1):
-        c.index = (c.timeline_index or i) if _keep_numbers else i
+    # ⚠️ BOTH BRANCHES SKIP THE UNDELIVERABLE, so a narrowed run and a full run cannot
+    # disagree about what a number means. timeline_index already carries the skip; the
+    # renumbering branch re-applies the same rule rather than counting rows.
+    _seq = 0
+    for c in tl.cuts:
+        if _keep_numbers:
+            c.index = c.timeline_index
+        elif c.timeline_index:
+            _seq += 1
+            c.index = _seq
+        else:
+            c.index = 0
         # PER CUT, and it compares rates rather than reading the flag. --fps 30 on a
         # 30 fps source emits no -r and keeps every frame.
         # ⚠️ PROVISIONAL. cut.source_fps is still the XML's DECLARED <rate> here, and
