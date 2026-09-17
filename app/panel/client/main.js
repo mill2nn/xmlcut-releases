@@ -480,6 +480,30 @@
          * the table's shape is off, and it is off by DIFFERENT amounts for h264 and ProRes
          * sources (0.25-0.30 vs 0.14-0.16 of the crf-1 rate at crf 14), so no single curve
          * fixes it. Measure at the settings you are going to use. */
+        /* ⚠️ WHICH VIDEO TRACK IS THE MASTER — ON THE READ AS WELL AS THE EXPORT, and it
+         * was on the export only, which is the whole of the bug reported on 17 Sep:
+         *
+         *   "khi tool read thì thậm chí nó cũng đang read sai nữa, nó read lên tận 60,
+         *    trong khi bên dưới ghi có 29 file sẽ đc export"
+         *
+         * The engine numbers the cut list where it BUILDS it, so it can only leave the
+         * overlay tracks out of the numbering if it has been told which track is the
+         * master. The scan never said, so a read numbered every video cut on every track
+         * and the panel then showed the master-track rows carrying 1, 4, 9, 11 … 60 under
+         * a footer promising 29 files. Measured on a real six-track sequence: without the
+         * flag V1 reads 1, 4, 6, 9 … 41; with it, 1..16.
+         *
+         * ⚠️ IT DOES NOT NARROW THE READ. The engine's track filter is gated on
+         * --render-dir, which a scan never passes, so every row is still reported and the
+         * overlay tracks are still LISTED — they simply take no number, because the render
+         * composites them into the master track's frames rather than writing them as files
+         * of their own.
+         *
+         * Sent from here rather than from the two call sites so that the read and the
+         * export cannot disagree about it again. */
+        if (state.cutFrom === "render" && state.vtrackWant) {
+            args.push("--video-track", String(state.vtrackWant));
+        }
         args = args.concat(settingArgs());
         // Opt-in, and for ONE scan. Encoding a second of every clip is the accurate way to
         // size an export and the slow way; the default estimate is metadata only.
@@ -933,7 +957,19 @@
             "Tr\u01b0\u1edbc \u0111\u00e2y ghi \u2018c\u00e1c track \u0111\u00e3 tick\u2019 nh\u01b0ng khi kh\u00f4ng tick g\u00ec n\u00f3 l\u1ea1i tr\u1ed9n h\u1ebft \u2014 h\u00e0nh vi \u0111\u00fang, ch\u1ec9 c\u00e2u ch\u1eef sai."
     ].concat(CL_384);
 
+    /* 3.85 fixed this in the ENGINE and the panel never asked. Two separate places in
+     * main.js were still handing out numbers of their own: the read did not name the master
+     * track, so the engine numbered every video track's cuts; and the positional fallback
+     * filled in every number the engine had deliberately left at 0. Both are the same
+     * symptom to the person reading the list, so they are one line here. */
+    var CL_386 = [
+            "TIMELINE RENDER: s\u1ed1 th\u1ee9 t\u1ef1 l\u00fac READ nay \u0111\u00fang b\u1eb1ng t\u00ean file l\u00fac EXPORT. 3.85 m\u1edbi s\u1eeda ph\u1ea7n engine, panel v\u1eabn c\u00f2n \u0111\u00e1nh s\u1ed1 ri\u00eang.",
+            "C\u00c1C CH\u1ebe \u0110\u1ed8: d\u00f2ng kh\u00f4ng t\u1ea1o ra file (title, Graphic, comp .aep) nay hi\u1ec7n \u2018\u2014\u2019 thay v\u00ec m\u1ed9t s\u1ed1 tr\u00f9ng v\u1edbi file kh\u00e1c.",
+            "\u0110o tr\u00ean hai sequence th\u1eadt: m\u1ed9t c\u00e1i 27 file nh\u01b0ng panel hi\u1ec7n s\u1ed1 t\u1edbi 47 v\u1edbi 16 s\u1ed1 b\u1ecb l\u1eb7p; c\u00e1i kia 34 file, hi\u1ec7n t\u1edbi 57, 24 s\u1ed1 b\u1ecb l\u1eb7p."
+    ].concat(CL_385);
+
     var CHANGELOG = {
+        "3.86": CL_386,
         "3.85": CL_385,
         "3.84": CL_384,
         "3.83": CL_383,
@@ -3364,10 +3400,11 @@
         var args = argsFor(outDir(), false);
         if (renderDirPath) {
             args.push("--render-dir", renderDirPath);
-            // Which track defined the shots. The engine drops every other video track and
-            // every audio cut, so this and renderSpec() must agree or the run would ask
-            // for renders it never made.
-            if (state.vtrackWant) args.push("--video-track", String(state.vtrackWant));
+            /* --video-track used to be pushed here, and ONLY here, which is why the read
+             * numbered tracks the export was about to drop. argsFor() sends it on both
+             * runs now. It is still what makes the engine drop the other video tracks, so
+             * it and renderSpec() must agree or the run would ask for renders it never
+             * made — they are both driven by state.vtrackWant, which is that agreement. */
         }
         /* His standing choice on the tick, and now the ONLY route to --resume: the Replace
          * prompt's one-run "Skip" answer is gone with the option itself. */
@@ -3869,8 +3906,14 @@
         state.seqFps = Number((data.sequence || {}).fps || 0);
         sayAudioRenumbered();
         var clips = data.clips || [];
+        /* Does this manifest publish timeline_index AT ALL — see the fallback below. Asked
+         * of the raw JSON rather than of the parsed row, because the parsed row cannot tell
+         * "the engine did not have this field" from "the engine set it to 0", and those two
+         * want opposite answers. */
+        var sawTlField = false;
         for (var i = 0; i < clips.length; i++) {
             var c = clips[i];
+            if (c.timeline_index !== undefined) sawTlField = true;
             var src = String(c.source_path || "");
             var dot = src.lastIndexOf(".");
             var ext = dot > 0 ? src.substring(dot + 1).toLowerCase() : "(none)";
@@ -3996,8 +4039,22 @@
          * order, so the fallback is stable against hiding and unticking exactly as the
          * real number is. Assigned once, here, rather than at render time: renderClips()
          * runs on every tick and must not be able to arrive at a different answer. */
-        for (var ti = 0; ti < state.clips.length; ti++) {
-            if (!state.clips[ti].tlIndex) state.clips[ti].tlIndex = ti + 1;
+        /* ⚠️ IT USED TO RUN PER ROW, on `!tlIndex`, AND THAT RE-CREATED THE BUG THE ENGINE
+         * HAD JUST BEEN FIXED TO STOP. A zero is not a missing number — it is the engine
+         * saying "this row becomes no file": a title, a Graphic, a Dynamic Link comp, or,
+         * in Timeline Render, a clip on a track that is composited into the master track's
+         * picture. Numbering those positionally put a number back on every one of them AND
+         * made it collide with a real one. Measured on two of his own multi-track sequences,
+         * through this very function: one writes 27 files and the list showed numbers up to
+         * 47 with 16 of them landing on two rows each; the other writes 34 and showed up to
+         * 57, 24 duplicated.
+         *
+         * So the question is asked of the MANIFEST, once: if it publishes the field at all,
+         * every value in it is the engine's answer, zero included. */
+        if (!sawTlField) {
+            for (var ti = 0; ti < state.clips.length; ti++) {
+                if (!state.clips[ti].tlIndex) state.clips[ti].tlIndex = ti + 1;
+            }
         }
         return true;
     }
