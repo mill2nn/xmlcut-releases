@@ -32,8 +32,20 @@ if [ -n "$missing" ]; then
   echo
   echo "  (If you don't have Homebrew: https://brew.sh)"
   echo
-  echo "  Press return to close this window."
-  read -r _
+  # ⚠️ ONLY PAUSE IF A HUMAN IS THERE TO PRESS THE KEY. These files are written to be
+  # double-clicked in Finder, which hands them a Terminal window that would vanish before the
+  # result could be read — hence the pause. Run any other way (a build script, a task runner,
+  # plain `bash <file>`) stdin is a pipe that never closes, so the script sat here FOREVER with
+  # its work already done. Measured: five of them parked for up to 3h45m at 0% CPU.
+  #
+  # `[ -t 0 ]` asks the only question that matters: is stdin a terminal someone can type into.
+  # ⚠️ NOT `[ -r /dev/tty ]`, which install.sh uses for a DIFFERENT problem — it runs as
+  # `curl … | bash`, so its stdin is the script itself and it has to reach around to the human.
+  # Here stdin is exactly the thing being tested.
+  if [ -t 0 ]; then
+    echo "  Press return to close this window."
+    read -r _
+  fi
   exit 1
 fi
 
@@ -42,7 +54,7 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo
   echo "      xcode-select --install"
   echo
-  read -r _
+  [ -t 0 ] && read -r _ || true
   exit 1
 fi
 

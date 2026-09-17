@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.83"
+VERSION = "3.84"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which

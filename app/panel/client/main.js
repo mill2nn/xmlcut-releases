@@ -921,7 +921,13 @@
             "Bấm bánh răng nay mở thẳng tab Info, không còn mở bảng riêng nữa."
     ].concat(CL_382);
 
+    var CL_384 = [
+            "Sửa file cài đặt: chạy bằng Terminal hoặc script giờ tự thoát, không còn treo ở dòng \u2018Press any key to close\u2019.",
+            "Bấm 2 lần trong Finder thì vẫn dừng lại như cũ để đọc kết quả."
+    ].concat(CL_383);
+
     var CHANGELOG = {
+        "3.84": CL_384,
         "3.83": CL_383,
         "3.82": CL_382,
         "3.81": CL_381,
