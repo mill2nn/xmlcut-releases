@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.84"
+VERSION = "3.85"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -8136,9 +8136,34 @@ def main():
     # undeliverable in Source Render and perfectly deliverable in Timeline Render, where the
     # render supplies the pixels. The two modes write into different folders — raw/ and
     # edited/ — each with its own 01..N, so they were never one sequence to keep in step.
+    #
+    # ⚠️ AND IN TIMELINE RENDER THE MASTER TRACK DECIDES, WHICH IS THE OTHER HALF OF THE SAME
+    # BUG AND WAS REPORTED SEPARATELY:
+    #
+    #   "phần edited nó vẫn đang bị nhảy STT e ạ, khi tool read thì thậm chí nó cũng đang read
+    #    sai nữa, nó read lên tận 60, trong khi bên dưới ghi có 29 file sẽ đc export"  (17 Sep)
+    #
+    # MEASURED on the same reported sequence: 65 video cuts spread over SIX tracks — 29 on V1,
+    # 27 on V3, the rest scattered — and a Timeline Render writes one file per cut on the
+    # MASTER track only, because everything above it is IN the picture rather than a shot of
+    # its own. All 65 were taking a number here and 36 of them were dropped ~70 lines below by
+    # the --video-track filter, so 29 delivered files came out numbered 1, 4, 9, 11, 14 … 60.
+    # His two numbers, exactly.
+    #
+    # ⚠️ render_planned IS NOT ENOUGH TO TEST. It is set a few lines above for EVERY video cut
+    # in render mode, not just the master track's — so it answers "is this run a render", not
+    # "will this cut become a file". The track is the question, and it has to be asked here
+    # rather than at the filter, because by then the numbers are already assigned.
+    _vt = int(getattr(args, "video_track", 0) or 0)
+    _rmode = bool(getattr(args, "render_planned", False) or getattr(args, "render_dir", None))
     _n = 0
     for _c in tl.cuts:
-        if _c.render_planned or _c.media_kind != "unsupported":
+        if (_rmode and _vt and _c.track_type == "video"
+                and int(_c.track_index) != _vt):
+            # Another track's picture. The render composites it INTO the master track's
+            # frames; it is never a file of its own, so it takes no number.
+            _c.timeline_index = 0
+        elif _c.render_planned or _c.media_kind != "unsupported":
             _n += 1
             _c.timeline_index = _n
         else:

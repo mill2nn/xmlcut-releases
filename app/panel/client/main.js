@@ -926,7 +926,15 @@
             "Bấm 2 lần trong Finder thì vẫn dừng lại như cũ để đọc kết quả."
     ].concat(CL_383);
 
+    var CL_385 = [
+            "TIMELINE RENDER: s\u1eeda l\u1ed7i nh\u1ea3y STT. Clip \u1edf track tr\u00ean (V2, V3...) l\u00e0 ph\u1ea7n \u0111\u1eafp v\u00e0o h\u00ecnh, kh\u00f4ng ph\u1ea3i file ri\u00eang \u2014 nay kh\u00f4ng c\u00f2n chi\u1ebfm s\u1ed1 th\u1ee9 t\u1ef1 n\u1eefa.",
+            "S\u1ed1 l\u00fac READ nay \u0111\u00fang b\u1eb1ng s\u1ed1 l\u00fac EXPORT. Tr\u01b0\u1edbc \u0111\u00e2y read l\u00ean t\u1eadn 60 trong khi ch\u1ec9 xu\u1ea5t 29 file.",
+            "\u00d4 \"m\u1ed9t file MP3 tr\u1ed9n chung\" nay ghi r\u00f5 l\u1ea5y track n\u00e0o: ch\u01b0a tick track n\u00e0o th\u00ec ghi \u2018t\u1ea5t c\u1ea3 N track\u2019, tick r\u1ed3i th\u00ec ghi \u2018N track \u0111\u00e3 tick\u2019.",
+            "Tr\u01b0\u1edbc \u0111\u00e2y ghi \u2018c\u00e1c track \u0111\u00e3 tick\u2019 nh\u01b0ng khi kh\u00f4ng tick g\u00ec n\u00f3 l\u1ea1i tr\u1ed9n h\u1ebft \u2014 h\u00e0nh vi \u0111\u00fang, ch\u1ec9 c\u00e2u ch\u1eef sai."
+    ].concat(CL_384);
+
     var CHANGELOG = {
+        "3.85": CL_385,
         "3.84": CL_384,
         "3.83": CL_383,
         "3.82": CL_382,
@@ -5300,7 +5308,22 @@
          * question and theirs alone — see settingArgs(). Offering the choice twice, in two
          * controls that write one flag, is how a panel promises a combination it cannot
          * deliver. "All N tracks, mixed into one" became simply "and one mixed file of them". */
-        opt("all", "Yes — one mixed MP3 as well");
+        /* ⚠️ THE LABEL SAYS WHICH TRACKS, BECAUSE THE ANSWER CHANGES WITH THE TICKS AND THE
+         * FIRST VERSION DID NOT SAY SO. It read "one mixed MP3 of the ticked tracks", and the
+         * field label above it still says "of the whole timeline" — but with NOTHING ticked
+         * the panel sends a bare --audio, and the engine's narrowing is `if want:`, so no
+         * narrowing means EVERY track goes into the mix. The team lead found it within a day:
+         * "nếu a chọn Yes như hình mà ko tick ở trên thì a thấy nó vẫn ra file audio cho track
+         * VO, cái này nó tự detect hay đang hoạt động theo role nào vậy nhỉ?" — nothing is
+         * detected, the mix simply had no reason to leave anything out.
+         *
+         * The behaviour is right; the sentence was wrong. Now it counts. */
+        var _tk = audioCutList().length;
+        opt("all", _tk
+            ? ("Yes — one mixed MP3 of the " + _tk + " ticked track"
+               + (_tk === 1 ? "" : "s"))
+            : ("Yes — one mixed MP3 of all " + have.length + " track"
+               + (have.length === 1 ? "" : "s")));
         /* ⚠️ THE THIRD ANSWER, and it is the one that was actually asked for. "e chỉ cần để
          * lựa chọn tích vào từng track A1,2,3,... để render toàn bộ track đấy ra thành file
          * audio riêng thôi" — 8 Sep — with the reason attached: "vốn là ngta chỉ cần file VO

@@ -1,6 +1,6 @@
 {
-  "version": "3.84",
-  "notes": "S\u1eeda file c\u00e0i \u0111\u1eb7t: ch\u1ea1y b\u1eb1ng Terminal ho\u1eb7c script gi\u1edd t\u1ef1 tho\u00e1t, kh\u00f4ng c\u00f2n treo \u1edf d\u00f2ng 'Press any key to close'. B\u1ea5m 2 l\u1ea7n trong Finder th\u00ec v\u1eabn d\u1eebng l\u1ea1i nh\u01b0 c\u0169 \u0111\u1ec3 \u0111\u1ecdc k\u1ebft qu\u1ea3.",
+  "version": "3.85",
+  "notes": "TIMELINE RENDER: s\u1eeda l\u1ed7i nh\u1ea3y STT. Clip \u1edf track tr\u00ean (V2, V3...) l\u00e0 ph\u1ea7n \u0111\u1eafp v\u00e0o h\u00ecnh, kh\u00f4ng ph\u1ea3i file ri\u00eang \u2014 nay kh\u00f4ng c\u00f2n chi\u1ebfm s\u1ed1 th\u1ee9 t\u1ef1. S\u1ed1 l\u00fac READ nay \u0111\u00fang b\u1eb1ng s\u1ed1 l\u00fac EXPORT: tr\u01b0\u1edbc \u0111\u00e2y read l\u00ean t\u1eadn 60 trong khi ch\u1ec9 xu\u1ea5t 29 file. \u00d4 'm\u1ed9t file MP3 tr\u1ed9n chung' nay ghi r\u00f5 l\u1ea5y track n\u00e0o.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
