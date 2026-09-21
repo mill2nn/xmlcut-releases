@@ -982,7 +982,18 @@
             "N\u1ebfu clip \u0111\u1ea7u ti\u00ean render h\u1ecfng v\u00ec preset, l\u1ea7n ch\u1ea1y t\u1ef1 quay v\u1ec1 preset g\u1ed1c v\u00e0 ch\u1ea1y ti\u1ebfp \u2014 m\u1ea5t 1 clip ch\u1ee9 kh\u00f4ng m\u1ea5t c\u1ea3 29."
     ].concat(CL_386);
 
+    /* One measurement, one change. The read's whole cost was ffprobe running one file at a
+     * time — 94% of it, measured against --no-probe on a real Drive-backed timeline — while
+     * the export path had been using the thread pool for months. Only the FETCH is parallel;
+     * everything that writes to a clip still runs one at a time, in timeline order. */
+    var CL_388 = [
+            "L\u1ea6N READ \u0110\u1ea6U NHANH H\u01a0N NHI\u1ec0U. Tr\u01b0\u1edbc \u0111\u00e2y tool \u0111\u1ecdc th\u00f4ng tin t\u1eebng file m\u1ed9t; nay \u0111\u1ecdc nhi\u1ec1u file c\u00f9ng l\u00fac.",
+            "\u0110o tr\u00ean timeline th\u1eadt c\u00f3 20 file n\u1eb1m tr\u00ean Google Drive: 1,60 gi\u00e2y xu\u1ed1ng 0,33 gi\u00e2y \u2014 nhanh g\u1ea5p 4,8 l\u1ea7n. File ch\u01b0a t\u1ea3i s\u1eb5n v\u1ec1 m\u00e1y th\u00ec ch\u00eanh l\u1ec7ch c\u00f2n l\u1edbn h\u01a1n.",
+            "K\u1ebft qu\u1ea3 \u0111\u1ecdc ra kh\u00f4ng \u0111\u1ed5i m\u1ed9t ch\u1eef: danh s\u00e1ch, s\u1ed1 th\u1ee9 t\u1ef1 v\u00e0 m\u1ecdi th\u00f4ng s\u1ed1 gi\u1ed1ng h\u1ec7t tr\u01b0\u1edbc."
+    ].concat(CL_387);
+
     var CHANGELOG = {
+        "3.88": CL_388,
         "3.87": CL_387,
         "3.86": CL_386,
         "3.85": CL_385,
