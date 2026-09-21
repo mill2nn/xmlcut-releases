@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.86"
+VERSION = "3.87"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -7558,11 +7558,16 @@ def main():
                     help="a SCAN flag, meaningless on an export: report the cut list as "
                          "it will be once Premiere has rendered it, so comps and offline "
                          "clips are not marked uncuttable")
-    ap.add_argument("--video-track", dest="video_track", type=int, default=0,
+    # ⚠️ THE DEFAULT IS None, NOT 0, AND THE DIFFERENCE IS LOAD-BEARING. `0` is a real
+    # answer — "number and keep every video track" — and the numbering below defaults an
+    # UNANSWERED flag to the lowest track. With default=0 the two were the same value, so
+    # giving the numbering a default silently removed the ability to ask for every track.
+    ap.add_argument("--video-track", dest="video_track", type=int, default=None,
                     metavar="N",
                     help="with --render-dir, which video track defines the shots — one "
                          "track supplies the cut list and everything above it is already "
-                         "in the picture. 0 keeps every video track.")
+                         "in the picture. 0 keeps every video track; omitted, a render "
+                         "numbers the lowest video track that has cuts.")
     ap.add_argument("--audio", action="store_true",
                     help="write ONE mp3 for the whole timeline: the chosen audio tracks "
                          "at their timeline positions, gaps as silence, as long as the "
@@ -8156,6 +8161,57 @@ def main():
     # rather than at the filter, because by then the numbers are already assigned.
     _vt = int(getattr(args, "video_track", 0) or 0)
     _rmode = bool(getattr(args, "render_planned", False) or getattr(args, "render_dir", None))
+
+    # ⚠️ AND WHEN NOBODY SAYS WHICH TRACK IS THE MASTER, THE FIRST READ IS THE ONE THAT PAYS.
+    #
+    # Reported 17 Sep, after the fix above had shipped in 3.86: "his first read still wrong",
+    # with a list numbered to 60 under a footer promising 29 files — the same symptom, on a
+    # sequence that had been read once. The panel only learns which video tracks exist FROM a
+    # read (the menu is built from the scan's own manifest), so on the FIRST read of a session
+    # state.vtrackWant is empty and --video-track is not sent at all. The flag arrives from the
+    # second read onwards, which is why it looked fixed.
+    #
+    # So the default belongs here, where the numbering is: in render mode with no track named,
+    # take the LOWEST video track that has numberable cuts — the same rule the panel's menu
+    # uses for its own default, so the read and the export cannot disagree about it.
+    #
+    # NUMBERING ONLY. args.video_track is deliberately NOT written back: the filter ~70 lines
+    # below reads it too, it is gated on --render-dir, and a CLI export that never named a
+    # track must keep writing what it writes today. This changes which cuts take a NUMBER,
+    # never which cuts become files.
+    #
+    # And it fires only when the flag was OMITTED. `--video-track 0` is a real answer meaning
+    # "every video track", which is why the argument's default is None rather than 0.
+    # Two clauses that were here are gone because nothing could tell them apart from their
+    # neighbours: an `_rmode and` on this `if` (the skip below already asks, and the
+    # source-mode check in check_render_mode.py is what proves that one), and a
+    # render_planned/media_kind filter on the track list (in render mode render_planned is
+    # set for EVERY video cut a few lines above, so it selected nothing). A clause no test
+    # can fail is a claim nobody can check.
+    #
+    # ⚠️ AND IT IS GATED ON THERE BEING NO --render-dir, BECAUSE THE FILTER IS WHAT MAKES A
+    # DEFAULT SAFE. The filter ~70 lines below reads args.video_track itself, and for an
+    # OMITTED flag that is 0 — "keep every video track". So on an export it keeps all of
+    # them while this would have numbered only the lowest: every cut off that track is
+    # written, carrying index 0, and two of them sharing a timeline range and a source name
+    # resolve to the SAME filename. Measured on a three-track fixture: four cuts, three
+    # files, one shot lost to an overwrite, and a --resume rerun then reporting
+    # "1 written, 0 failed … 3 already there" over the folder that was missing it. 3.86
+    # numbered the same four 01..04.
+    #
+    # A scan has no filter to disagree with — it reports every row either way — so the
+    # default does its job there, which is the first read this exists for. An export that
+    # named no track keeps doing exactly what it did in 3.86: every video track numbered,
+    # every video track written. That is also what this block's own comment above promises
+    # ("a CLI export that never named a track must keep writing what it writes today"),
+    # and without this gate it was the one thing it did not do.
+    if (getattr(args, "video_track", None) is None
+            and not getattr(args, "render_dir", None)):
+        _vtracks = sorted(set(int(_c.track_index) for _c in tl.cuts
+                              if _c.track_type == "video"))
+        if _vtracks:
+            _vt = _vtracks[0]
+
     _n = 0
     for _c in tl.cuts:
         if (_rmode and _vt and _c.track_type == "video"

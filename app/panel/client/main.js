@@ -968,7 +968,22 @@
             "\u0110o tr\u00ean hai sequence th\u1eadt: m\u1ed9t c\u00e1i 27 file nh\u01b0ng panel hi\u1ec7n s\u1ed1 t\u1edbi 47 v\u1edbi 16 s\u1ed1 b\u1ecb l\u1eb7p; c\u00e1i kia 34 file, hi\u1ec7n t\u1edbi 57, 24 s\u1ed1 b\u1ecb l\u1eb7p."
     ].concat(CL_385);
 
+    /* Three separate faults in the Timeline Render path, all found in one afternoon and all
+     * invisible from the panel: a preset patcher writing into the NEIGHBOURING parameter, a
+     * bitrate written past what the preset declares it can carry, and a pass-mode value that
+     * belongs to another codec family. The first made every render quietly fall back to
+     * 10 Mbps; the other two hung Media Encoder at 0%. Plus the numbering again — 3.86 made
+     * the read send the master track, and the FIRST read of a session has no master track to
+     * send. */
+    var CL_387 = [
+            "TIMELINE RENDER: l\u1ea7n READ \u0110\u1ea6U TI\u00caN sau khi m\u1edf panel nay c\u0169ng \u0111\u00e1nh s\u1ed1 \u0111\u00fang. 3.86 m\u1edbi s\u1eeda t\u1eeb l\u1ea7n read th\u1ee9 hai tr\u1edf \u0111i, v\u00ec l\u1ea7n \u0111\u1ea7u panel ch\u01b0a bi\u1ebft timeline c\u00f3 track n\u00e0o.",
+            "S\u1eeda l\u1ed7i render b\u1ecb treo 0%: file preset \u0111\u01b0\u1ee3c ghi bitrate cao h\u01a1n m\u1ee9c ch\u00ednh n\u00f3 cho ph\u00e9p, Media Encoder nh\u1eadn r\u1ed3i \u0111\u1ee9ng im. Nay t\u1ef1 h\u1ea1 xu\u1ed1ng \u0111\u00fang m\u1ee9c v\u00e0 ghi r\u00f5 trong ghi ch\u00fa c\u1ee7a l\u1ea7n ch\u1ea1y.",
+            "S\u1eeda l\u1ed7i m\u1ecdi b\u1ea3n render \u00e2m th\u1ea7m tr\u1edf v\u1ec1 10 Mbps d\u00f9 k\u00e9o thanh ch\u1ea5t l\u01b0\u1ee3ng l\u00ean: tool s\u1eeda nh\u1ea7m \u00f4 b\u00ean c\u1ea1nh trong file preset.",
+            "N\u1ebfu clip \u0111\u1ea7u ti\u00ean render h\u1ecfng v\u00ec preset, l\u1ea7n ch\u1ea1y t\u1ef1 quay v\u1ec1 preset g\u1ed1c v\u00e0 ch\u1ea1y ti\u1ebfp \u2014 m\u1ea5t 1 clip ch\u1ee9 kh\u00f4ng m\u1ea5t c\u1ea3 29."
+    ].concat(CL_386);
+
     var CHANGELOG = {
+        "3.87": CL_387,
         "3.86": CL_386,
         "3.85": CL_385,
         "3.84": CL_384,
@@ -6003,10 +6018,20 @@
         var fps = Number(info.fps || 0);
         if (!(w > 0 && h > 0 && fps > 0)) return 0;
         var bits = lerp(BPP_INTER, state.crfVal || 1) * w * h * fps * RENDER_HEADROOM;
-        // Floored so a very low quality setting cannot produce an intermediate that is
-        // itself the problem; capped so a near-lossless one cannot ask for a rate no
-        // sensible disk wants. Both are limits on the RENDER, never on the export.
-        return Math.max(4, Math.min(150, bits / 1e6));
+        /* Floored so a very low quality setting cannot produce an intermediate that is
+         * itself the problem. Both are limits on the RENDER, never on the export.
+         *
+         * ⚠️ THE CEILING IS NOT A TASTE DECISION — IT IS WHAT THE PRESET CAN CARRY. It was
+         * 150, and on 2026-09-17 a 1080x1920 sequence at CRF 6 asked for 94.4 Mbps: the
+         * stock "Match Source - High bitrate" this is written into declares a maximum of
+         * 50, the .epr was written past it, and 8 of 8 cuts rendered nothing before the run
+         * fell through to Media Encoder sitting at 0%. 41.7 is that 50 with Adobe's own 20%
+         * gap taken off the top, so target x 1.2 lands exactly on it.
+         *
+         * host.jsx clamps to whatever the base preset actually declares and says so in the
+         * run's notes — that is the authority. This number exists so the sentence the panel
+         * prints is the bitrate the render will really use, rather than one it cannot have. */
+        return Math.max(4, Math.min(41.7, bits / 1e6));
     }
 
     /* The list only holds what the run will cut, so it has to say so — a list that

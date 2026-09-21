@@ -1547,6 +1547,9 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
          * and stopping an export over it would be out of proportion. But it is carried
          * into the run's own notes — a render quietly made at a bitrate nobody chose is
          * exactly the kind of thing that never gets noticed. */
+        /* Kept so a generated preset the encoder will not take can be backed out of after
+         * the first cut rather than after the twenty-ninth. See the loop below. */
+        var stockPre = pre;
         if (Number(mbps) > 0) {
             var gen = writeRenderPreset(dir.fsName, mbps, onePass);
             for (i = 0; i < gen.tried.length; i++) res.tried.push("preset: " + gen.tried[i]);
@@ -1632,7 +1635,6 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
         writeRenderProgress(prog, 0, ranges.length, ranges[0].label, 0);
 
         var totalMs = 0;
-        var onePassUsed = !!(res.bitrate && res.bitrate.one_pass);
 
         /* ⚠️ THE ONLY PLACE THIS LOOP CAN BE STOPPED FROM OUTSIDE.
          *
@@ -1662,37 +1664,40 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
                                      ranges[i].out_frames, dir.fsName, pre.found,
                                      timebase);
 
-            /* ⚠️ ONE PASS IS VERIFIED BY RENDERING, because it cannot be verified by
-             * reading — the stock presets are unanimous about the value, so there is
-             * nothing to compare against.
+            /* The one-pass retry that used to sit here is gone with the setting it
+             * recovered from: nothing writes the pass mode any more, so there is nothing
+             * to roll back. See PASS_MODE_IS_NOT_OURS — and note that it could never have
+             * fired against what actually went wrong, because the export HUNG rather than
+             * returning a failure. */
+
+            /* ⚠️ AND IF THE GENERATED PRESET IS THE PROBLEM, STOP USING IT.
              *
-             * If the very FIRST range fails for any reason other than the in/out points,
-             * the pass mode is the newest thing in the chain and the likeliest cause. The
-             * preset is rebuilt at the stock two passes and the range tried once more.
-             * Only the first range gets this: a failure on cut nine is that cut's problem,
-             * not a broken setting, and rebuilding then would hide it.
+             * On 2026-09-17 a generated preset asked for a bitrate its base file forbade,
+             * and every cut failed the same way — 8 of 8, each falling through all three
+             * export methods, the last of which hands the job to Media Encoder, which sat
+             * at 0% behind a modal. A run cannot ask anything while it renders, so it has
+             * to decide this itself.
              *
-             * Reported in the run's notes either way. A performance setting quietly
-             * reverting is still a thing that happened. */
-            if (i === 0 && !one.ok && !one.no_range && onePassUsed) {
-                var again = writeRenderPreset(dir.fsName, mbps, false);
-                if (again.ok) {
-                    res.warnings.push("the one-pass render preset produced nothing on the"
-                        + " first cut, so this run fell back to the stock two-pass setting");
-                    res.tried.push("preset: fell back to pass mode " + again.pass);
-                    pre = { found: again.path, name: eprNumber(again.target) + " Mbps" };
-                    res.preset = again.path;
-                    res.preset_name = pre.name + " (two-pass fallback)";
-                    res.bitrate = { target: again.target, max: again.max, min: again.min,
-                                    pass: again.pass, one_pass: false, base: again.base };
-                    onePassUsed = false;
-                    one = renderOneRange(seq, ranges[i].label, ranges[i].in_frames,
-                                         ranges[i].out_frames, dir.fsName, pre.found,
-                                         timebase);
-                } else {
-                    res.tried.push("preset: could not rebuild at two passes ("
-                        + (again.error || "unknown") + ")");
-                }
+             * The stock preset is the one thing here known to work: Premiere ships it, and
+             * every render made before this feature existed used it. So a first cut that
+             * fails with OUR preset falls back to it and the run carries on at the stock
+             * bitrate — a quality shortfall, said out loud, rather than a folder of nothing.
+             *
+             * Only the first cut, and only while a generated preset is in use: a failure on
+             * cut nine is that cut's problem, and swapping the preset then would hide it. */
+            if (shouldFallBackToStock(i, one, pre, stockPre)) {
+                res.warnings.push("the render preset built from the quality setting"
+                    + " produced nothing on the first cut, so this run fell back to the"
+                    + " stock " + stockPre.name + " — these clips are rendered at its"
+                    + " bitrate, not the one the quality slider asks for");
+                res.tried.push("preset: fell back to the stock " + stockPre.found);
+                pre = stockPre;
+                res.preset = stockPre.found;
+                res.preset_name = stockPre.name + " (stock, after the built one failed)";
+                res.preset_fallback = true;
+                one = renderOneRange(seq, ranges[i].label, ranges[i].in_frames,
+                                     ranges[i].out_frames, dir.fsName, pre.found,
+                                     timebase);
             }
 
             res.renders.push(one);
@@ -1764,7 +1769,7 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
          * notes, and the pass mode it was rendered at is beside it. */
         res.total_ms = totalMs;
         res.pass_used = res.bitrate ? String(res.bitrate.pass || "") : "";
-        res.one_pass_used = !!onePassUsed;
+        res.one_pass_used = false;   // nothing writes the pass mode; see writeRenderPreset
 
         res.ok = res.written > 0 && !res.aborted;
         if (!res.ok && !res.error) res.error = "Premiere rendered none of the cuts.";
@@ -1809,7 +1814,8 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
  *
  * So the BLOCK is the unit. Never "the next <ParamValue> in the file", only this
  * parameter's own; if its block has none, that is null rather than a neighbour's value. */
-function eprValueSpan(xml, ident) {
+function eprValueSpan(xml, ident, field) {
+    field = field || "ParamValue";
     var tag = "<ParamIdentifier>" + ident + "</ParamIdentifier>";
     var at = xml.indexOf(tag);
     if (at < 0) return null;
@@ -1830,11 +1836,12 @@ function eprValueSpan(xml, ident) {
     /* Searched inside the block and nowhere else. This is the whole fix: a parameter with
      * no value of its own comes back empty-handed instead of reaching into its neighbour. */
     var block = xml.substring(start, end);
-    var vs = block.indexOf("<ParamValue>");
+    var open = "<" + field + ">", shut = "</" + field + ">";
+    var vs = block.indexOf(open);
     if (vs < 0) return null;
-    var ve = block.indexOf("</ParamValue>", vs);
+    var ve = block.indexOf(shut, vs);
     if (ve < 0) return null;
-    return { from: start + vs + "<ParamValue>".length, to: start + ve };
+    return { from: start + vs + open.length, to: start + ve };
 }
 
 /* Replace ONE parameter's value. Returns null rather than a half-patched string. */
@@ -1850,6 +1857,20 @@ function readEprParam(xml, ident) {
     return xml.substring(span.from, span.to);
 }
 
+/* What the preset says this parameter is ALLOWED to be — <ParamMaxValue> / <ParamMinValue>
+ * in the same block, when it carries them. Returns 0 when it does not, and callers read
+ * that as "this file states no limit", never as "the limit is zero".
+ *
+ * ⚠️ THIS IS NOT DECORATION. Eight of the 43 stock H.264 presets declare a ceiling and the
+ * rest do not; "Match Source - High bitrate", the one this copies, declares 50. Writing
+ * past it is what a real run died of — see writeRenderPreset. */
+function eprLimit(xml, ident, which) {
+    var span = eprValueSpan(xml, ident, which);
+    if (!span) return 0;
+    var n = Number(String(xml.substring(span.from, span.to)).replace(/\.$/, ""));
+    return (n > 0) ? n : 0;
+}
+
 /* Adobe writes a whole number as "10." rather than "10". Matched, because a format the
  * file has never contained is a format nothing has ever parsed. */
 function eprNumber(n) {
@@ -1862,17 +1883,48 @@ function eprNumber(n) {
  * Returns {ok, path, target, max, min, base, tried[]}. Everything it wrote is read back
  * out of the finished file and reported: a preset that patched the wrong parameter would
  * still render, and the only sign would be a bitrate nobody asked for. */
-/* VBR one pass. Adobe's own enum, and the reason it is a constant rather than a
- * setting: every one of the 43 stock H.264 presets is TWO pass, which on an intermediate
- * that is about to be re-encoded buys precision in a bitrate target nobody reads. It is
- * not a large saving — rendering was measured at about two thirds of a second a cut with
- * two passes on — but it is free, and there is nothing to weigh up per export.
+/* THE PASS MODE IS NOT OURS TO SET, and this is what that cost.
  *
- * ⚠️ NOT VERIFIABLE BY READING. The value cannot be confirmed from the stock files, which
- * are unanimous. So the caller renders with it and, if the very first range fails,
- * rebuilds the preset at the stock pass mode and tries once more — reporting both, never
- * silently. See renderCuts. */
-var VBR_ONE_PASS = "1";
+ * This wrote ADBEVideoBitrateEncoding = 1 for "VBR, one pass", reasoning that the stock
+ * presets were unanimous so there was nothing to check the value against, and that
+ * rendering with it would prove it. Both halves were wrong.
+ *
+ * They are not unanimous. In Premiere / Media Encoder 2026's H.264 folder 37 of the 43
+ * presets carry 2 and six — the Adobe Stock ones — carry 3. And 1 appears in 68 presets
+ * elsewhere on this machine, every one of them another codec family (HDV, DV, MPEG-2),
+ * where the same parameter means something else. NO H.264 PRESET ADOBE SHIPS USES 1.
+ *
+ * What rendering with it proved, on 2026-09-17, on a client's timeline, twice: the export
+ * sat at 0% behind a modal and the run never finished. A hang is worse here than a
+ * failure — the recovery this file used to carry, "if the first range fails, rebuild at
+ * two passes", can never fire, because a call that does not return cannot be caught.
+ *
+ * The saving it bought was measured at about two thirds of a second a cut. That does not
+ * buy an unverifiable enum in a file handed to an encoder, so the pass mode is left
+ * exactly as the stock preset has it. If one pass is ever wanted again, 3 is the value to
+ * TEST — the only other one this exporter is known to use — and it has to be proved by a
+ * render before it goes near a run. */
+var PASS_MODE_IS_NOT_OURS = true;
+
+/* Whether this run should stop using the preset it built and go back to the stock one.
+ *
+ * A predicate rather than four clauses inside the loop, because each clause is a decision
+ * somebody will be tempted to relax:
+ *
+ *   FIRST CUT ONLY  — a failure on cut nine is that cut's problem, and swapping the preset
+ *                     then would hide it behind a quality change nobody asked for.
+ *   NOT no_range    — an in/out that will not move is not the preset's fault; the caller
+ *                     stops the whole run for that, and retrying would render the entire
+ *                     timeline to a clip's filename.
+ *   ONLY IF OURS    — with the stock preset already in use there is nothing to fall back
+ *                     to, and retrying the same file twice just doubles the wait.
+ */
+function shouldFallBackToStock(index, render, current, stock) {
+    if (index !== 0) return false;
+    if (!render || render.ok || render.no_range) return false;
+    if (!stock || !stock.found || !current || !current.found) return false;
+    return current.found !== stock.found;
+}
 
 function writeRenderPreset(destFolder, mbps, onePass, baseOverride) {
     var res = { ok: false, tried: [] };
@@ -1895,6 +1947,9 @@ function writeRenderPreset(destFolder, mbps, onePass, baseOverride) {
         }
         var xml = f.read();
         f.close();
+        /* The base file as it arrived. xml is patched in place below, so this is what the
+         * finished preset's untouched parameters are checked against. */
+        var xml0 = xml;
 
         var target = Number(mbps);
         if (!(target > 0)) {
@@ -1904,14 +1959,47 @@ function writeRenderPreset(destFolder, mbps, onePass, baseOverride) {
         // Adobe's own presets sit max 20% above target (10/12, 20/24, 80/96). Kept, so the
         // generated preset behaves like the ones the exporter was tuned against.
         var maxb = target * 1.2;
+
+        /* ⚠️ THE PRESET STATES ITS OWN CEILING, AND WRITING PAST IT KILLED A REAL RUN.
+         * On 2026-09-17, a 1080x1920 sequence at the top of the quality slider asked for
+         * 94.4 Mbps target / 113.3 max. "Match Source - High bitrate" declares
+         * <ParamMaxValue>50.</ParamMaxValue> on both. Premiere took the preset, then
+         * exportAsMediaDirect produced nothing for cut after cut — 8 of 8 — before falling
+         * through to queueing at Media Encoder, which sat at 0%. Nothing said why, because
+         * a preset out of its own declared range is not an error anyone reports.
+         *
+         * So the file's own numbers are the limit. The MAXIMUM is clamped first and the
+         * target follows it down, because Adobe's presets always keep max above target and
+         * a target above its own maximum is a preset describing nothing. A file that
+         * declares no ceiling (35 of the 43 do not, and Adobe ships 80 Mbps in one of them)
+         * is left alone — absent is not zero. */
+        var capM = eprLimit(xml, "ADBEVideoMaxBitrate", "ParamMaxValue");
+        var capT = eprLimit(xml, "ADBEVideoTargetBitrate", "ParamMaxValue");
+        if (capM > 0 && maxb > capM) {
+            maxb = capM;
+            if (target > maxb / 1.2) target = maxb / 1.2;
+        }
+        if (capT > 0 && target > capT) {
+            target = capT;
+            if (maxb < target) maxb = target;
+        }
+        if (target !== Number(mbps)) {
+            res.capped = { asked: Number(mbps), target: target, max: maxb,
+                           ceiling: (capM || capT) };
+            res.tried.push("the quality setting asked for " + eprNumber(Number(mbps))
+                + " Mbps, but this preset declares a maximum of " + eprNumber(capM || capT)
+                + " — written at " + eprNumber(target) + " / " + eprNumber(maxb)
+                + " instead, which is the most it can be asked for");
+        }
+
         var minb = Math.min(2, target);
 
         var pairs = [["ADBEVideoTargetBitrate", eprNumber(target)],
                      ["ADBEVideoMaxBitrate", eprNumber(maxb)],
                      ["ADBEVideoMinBitrate", eprNumber(minb)]];
-        /* The pass mode is an INTEGER parameter — type 2 in the file, written plainly,
-         * unlike the bitrates which are floats carrying Adobe's trailing dot. */
-        if (onePass) pairs.push(["ADBEVideoBitrateEncoding", VBR_ONE_PASS]);
+        /* The pass mode is deliberately NOT in that list — see PASS_MODE_IS_NOT_OURS.
+         * onePass is still accepted so no caller has to change, and is reported back as
+         * refused rather than quietly dropped. */
         for (i = 0; i < pairs.length; i++) {
             var next = patchEprParam(xml, pairs[i][0], pairs[i][1]);
             if (next === null) {
@@ -1949,14 +2037,19 @@ function writeRenderPreset(destFolder, mbps, onePass, baseOverride) {
                 + " (target " + gotT + ", max " + gotM + ") — not using it.";
             return res;
         }
-        /* The pass mode is checked too. It is the one setting here that cannot be
-         * confirmed against the stock files — they are unanimous — so it had better be
-         * confirmed against what was just written. */
+        /* The pass mode is still read back, and now it is checked for NOT having moved:
+         * whatever the stock preset said is what this copy has to say. */
         var gotP = readEprParam(back, "ADBEVideoBitrateEncoding");
-        if (onePass && gotP !== VBR_ONE_PASS) {
-            res.error = "The preset was written for one pass but reads back as " + gotP
-                + " — not using it.";
+        var stockP = readEprParam(xml0, "ADBEVideoBitrateEncoding");
+        if (gotP !== stockP) {
+            res.error = "The preset's pass mode moved from " + stockP + " to " + gotP
+                + " — nothing here sets it, so this preset is not trustworthy.";
             return res;
+        }
+        if (onePass) {
+            res.tried.push("one pass was asked for and NOT written — no H.264 preset Adobe"
+                + " ships uses that value, and writing it hung a real run; left at the"
+                + " stock pass mode " + gotP);
         }
 
         res.ok = true;
@@ -1965,7 +2058,7 @@ function writeRenderPreset(destFolder, mbps, onePass, baseOverride) {
         res.max = Number(maxb);
         res.min = Number(minb);
         res.pass = gotP;
-        res.one_pass = !!onePass;
+        res.one_pass = false;
         res.tried.push("wrote " + eprNumber(target) + " Mbps target / "
             + eprNumber(maxb) + " max, pass mode " + gotP + ", from " + base.name);
     } catch (e) {

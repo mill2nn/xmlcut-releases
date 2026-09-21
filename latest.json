@@ -1,6 +1,6 @@
 {
-  "version": "3.86",
-  "notes": "TIMELINE RENDER: s\u1ed1 th\u1ee9 t\u1ef1 l\u00fac READ nay \u0111\u00fang b\u1eb1ng t\u00ean file l\u00fac EXPORT \u2014 3.85 m\u1edbi s\u1eeda ph\u1ea7n engine, panel v\u1eabn c\u00f2n t\u1ef1 \u0111\u00e1nh s\u1ed1 ri\u00eang. D\u00f2ng kh\u00f4ng t\u1ea1o ra file (title, Graphic, comp .aep) nay hi\u1ec7n '\u2014' thay v\u00ec m\u1ed9t s\u1ed1 tr\u00f9ng v\u1edbi file kh\u00e1c. \u0110o tr\u00ean hai sequence th\u1eadt: m\u1ed9t c\u00e1i 27 file nh\u01b0ng hi\u1ec7n s\u1ed1 t\u1edbi 47 v\u1edbi 16 s\u1ed1 b\u1ecb l\u1eb7p; c\u00e1i kia 34 file, hi\u1ec7n t\u1edbi 57, 24 s\u1ed1 b\u1ecb l\u1eb7p.",
+  "version": "3.87",
+  "notes": "TIMELINE RENDER: l\u1ea7n READ \u0110\u1ea6U TI\u00caN sau khi m\u1edf panel nay c\u0169ng \u0111\u00e1nh s\u1ed1 \u0111\u00fang \u2014 3.86 m\u1edbi s\u1eeda t\u1eeb l\u1ea7n read th\u1ee9 hai tr\u1edf \u0111i. S\u1eeda l\u1ed7i render treo 0%: preset b\u1ecb ghi bitrate cao h\u01a1n m\u1ee9c ch\u00ednh n\u00f3 cho ph\u00e9p. S\u1eeda l\u1ed7i m\u1ecdi b\u1ea3n render \u00e2m th\u1ea7m v\u1ec1 10 Mbps d\u00f9 \u0111\u00e3 k\u00e9o ch\u1ea5t l\u01b0\u1ee3ng l\u00ean. Clip \u0111\u1ea7u render h\u1ecfng v\u00ec preset th\u00ec t\u1ef1 quay v\u1ec1 preset g\u1ed1c v\u00e0 ch\u1ea1y ti\u1ebfp.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
