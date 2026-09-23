@@ -70,7 +70,7 @@
                "vinclude",
                /* The four framed groups that carry a caption, and the fold over the four
                 * settings that have a correct default. */
-               "destgroup", "trackgroup", "audiofield", "setdet", "setsum",
+               "destgroup", "trackgroup", "audiogroup", "audiofield", "setdet", "setsum",
                // The three engine flags the panel could not reach, and the fps option whose
                // label is filled in from the read: --transitions, --tracks, --remap, --fps.
                "splitdis", "dissnote", "atracksfield", "atracks", "relink", "fpssrc"];
@@ -441,7 +441,8 @@
             // sequence-level export holds only this one, but the project-level fallback
             // holds them all, and xmlcut refuses to guess between them.
             args = [state.script, state.xml,
-                    "--sequence", state.info.sequence,
+                    // "name:" so a sequence NAMED "2" is not read as position 2 (xmlcut _pick_sequence).
+                    "--sequence", "name:" + state.info.sequence,
                     "--panel", state.dump,
                     "-o", outDir];
         } else {
@@ -992,7 +993,19 @@
             "K\u1ebft qu\u1ea3 \u0111\u1ecdc ra kh\u00f4ng \u0111\u1ed5i m\u1ed9t ch\u1eef: danh s\u00e1ch, s\u1ed1 th\u1ee9 t\u1ef1 v\u00e0 m\u1ecdi th\u00f4ng s\u1ed1 gi\u1ed1ng h\u1ec7t tr\u01b0\u1edbc."
     ].concat(CL_387);
 
+    /* 3.89 — the UI revamp (direction A, chosen from mock-ups of the real panel) and the 23 Sep
+     * engine audit: 38 confirmed defects, each fix adversarially reviewed before merging. Five
+     * lines, in what an editor notices, not in how many things changed. */
+    var CL_389 = [
+            "GIAO DI\u1ec6N M\u1edaI: ch\u1ec9 c\u00f2n 2 tab (Clips | Settings), m\u1ed9t d\u00f2ng th\u00f4ng tin thay cho 3 \u00f4 s\u1ed1, n\u00fat Export ghi lu\u00f4n s\u1ed1 clip v\u00e0 dung l\u01b0\u1ee3ng. Info n\u1eb1m sau n\u00fat \u2699.",
+            "AUDIO: 2 c\u00e2u h\u1ecfi r\u00f5 r\u00e0ng thay cho b\u1ea3ng \u2018in clip / own file\u2019 \u2014 tick track n\u00e0o th\u00ec ra 1 file audio nguy\u00ean track \u0111\u00f3 (v\u00ed d\u1ee5 VO).",
+            "S\u1eeda l\u1ed7i SOURCE RENDER b\u1ecb l\u1ec7ch 1 frame tr\u00ean footage iPhone 59.94: clip m\u1ea5t frame \u0111\u1ea7u v\u00e0 d\u01b0 1 frame cu\u1ed1i. \u0110\u00e3 ki\u1ec3m tra t\u1eebng frame tr\u00ean timeline th\u1eadt.",
+            "Th\u01b0 m\u1ee5c xu\u1ea5t an to\u00e0n h\u01a1n: file c\u0169 kh\u00f4ng c\u00f2n kh\u1edbp \u0111\u01b0\u1ee3c chuy\u1ec3n v\u00e0o _earlier_export/ (kh\u00f4ng x\u00f3a) v\u00e0 c\u00f3 c\u1ea3nh b\u00e1o; clip \u0111\u1ed5i s\u1ed1 th\u1ee9 t\u1ef1 th\u00ec xu\u1ea5t l\u1ea1i \u0111\u00fang s\u1ed1 m\u1edbi.",
+            "B\u1ea5m H\u1ee7y nay d\u1eebng h\u1eb3n, kh\u00f4ng \u0111\u1ec3 l\u1ea1i file d\u1edf dang. Audio: gi\u1eef gain, fade v\u00e0 audio trong nested sequence; 1 file audio l\u1ed7i kh\u00f4ng c\u00f2n l\u00e0m h\u1ecfng c\u1ea3 file mix."
+    ].concat(CL_388);
+
     var CHANGELOG = {
+        "3.89": CL_389,
         "3.88": CL_388,
         "3.87": CL_387,
         "3.86": CL_386,
@@ -1159,6 +1172,13 @@
         if (el.tabinfo) {
             el.tabinfo.textContent = infoCount ? ("Info · " + infoCount) : "Info";
         }
+        /* 3.89 · the Info tab is gone from the bar, so what it counted rides on the gear —
+         * moving prose out of sight must not make it unfindable. */
+        if (el.gear) {
+            el.gear.setAttribute("data-n", infoCount ? String(infoCount) : "");
+            el.gear.title = infoCount ? (infoCount + " note" + (infoCount === 1 ? "" : "s")
+                + " in Info — settings, updates and the log") : "Info — settings, updates and the log";
+        }
     }
 
     /* ─────────────────────────────────────────────────────────────────────── the tabs
@@ -1174,24 +1194,31 @@
      *
      * ⚠️ NO querySelectorAll. The test DOM shim defines it as `() => []`, so selector-based
      * wiring would silently do nothing under the shim and pass every assertion by vacuum. */
+    /* 3.89 · TWO TABS AND A GEAR. Tracks and Quality answered one question — what comes out —
+     * from two tabs, so the Settings tab (still #tabtracks, which every caller and test uses)
+     * shows both panes in captioned frames. Info is reached from the gear. "tabqual" survives
+     * only as an alias, so a caller that still asks for it lands on the pane that holds it. */
     var TABS = [
-        { btn: "tabclips",  pane: "paneclips" },
-        { btn: "tabtracks", pane: "panetracks" },
-        { btn: "tabqual",   pane: "panequal" },
-        { btn: "tabinfo",   pane: "paneinfo" }
+        { btn: "tabclips",  panes: ["paneclips"] },
+        { btn: "tabtracks", panes: ["panetracks", "panequal"] },
+        { btn: "tabinfo",   panes: ["paneinfo"] }
     ];
     var tabNow = "tabclips";
 
     function setTab(which) {
         var i, t, hit = false;
+        if (which === "tabqual") which = "tabtracks";
         for (i = 0; i < TABS.length; i++) if (TABS[i].btn === which) hit = true;
         if (!hit) which = "tabclips";
         tabNow = which;
+        if (el.gear) el.gear.className = "gearbtn" + (which === "tabinfo" ? " on" : "");
         for (i = 0; i < TABS.length; i++) {
             t = TABS[i];
             var on = (t.btn === which);
             if (el[t.btn]) el[t.btn].className = on ? "tab on" : "tab";
-            if (el[t.pane]) el[t.pane].hidden = !on;
+            for (var pi = 0; pi < t.panes.length; pi++) {
+                if (el[t.panes[pi]]) el[t.panes[pi]].hidden = !on;
+            }
         }
         /* ⚠️ #step3 WRAPS BOTH SETTINGS PANES and has its own owner — refreshExportEnabled
          * shows it once a read exists. Never write step3.hidden from here: two writers on one
@@ -2179,9 +2206,7 @@
         // files will land is a thing you do BEFORE committing, which is the whole reason this
         // sits beside Export rather than in the report.
         el.openout.disabled = !state.out;
-        el["export"].textContent = n > 0
-            ? ("Export " + n + " clip" + (n === 1 ? "" : "s"))
-            : "Nothing selected";
+        el["export"].textContent = exportLabel(n);
         /* ⚠️ A DEAD BUTTON THAT EXPLAINS ITSELF.
          *
          * MEASURED with a real mouse gesture on a real disabled <button> in Chromium:
@@ -2309,6 +2334,12 @@
         }
         el.nextline.textContent = msg;
         el.nextline.className = cls;
+        /* 3.89 · SAID ONCE. With a read in and clips ticked, "Ready. 20 clips will be written
+         * into SEQ/" repeated the status line ("20 clips · 167 MB") and the Export button
+         * ("Export 20 clips · 167 MB"). The line still speaks whenever it has something the
+         * rest of the panel does not: the empty state, a missing script, failures, nothing
+         * ticked. It is HIDDEN when ready rather than emptied — an empty line reads as broken. */
+        show(el.nextline, cls.indexOf(" good") < 0);
         // renderNext runs from refreshExportEnabled, which fires on every transition that
         // shows or hides step 3 — so the layout follows without a second hook to forget.
         paintBody();
@@ -2654,7 +2685,11 @@
              * "Change" over a dash. */
             el.pickout.textContent = empty ? "Choose folder" : "Change";
         }
-        show(el.copyout, !empty);
+        /* 3.89 · Copy is off the bar: clicking the path opens it to the full, selectable
+         * text, and Open shows it in Finder — the two ways of checking it, which is the ask
+         * ("a ko bấm vào cái ô Path để check xem đã đúng Path hay chưa"). Three buttons beside
+         * a 340px path left it reading "/Users/ed…". */
+        show(el.copyout, false);
     }
 
     function setOut(p) {
@@ -3235,8 +3270,13 @@
     function clashCount() {
         var dir = outDir();
         if (!dir) return 0;
+        /* _earlier_export is where the engine MOVES an earlier run's file that this run did
+         * not reproduce (a clip that failed, went missing or was refused), rather than leave
+         * it under a delivery name. It is a folder of files already moved out of the way,
+         * never one this export overwrites — counting it would announce one clip too many. */
         var skip = { "manifest.json": 1, "clips.csv": 1, "pick.txt": 1,
-                     "_renders": 1, "_render_progress.json": 1, "_render_stop": 1 };
+                     "_renders": 1, "_render_progress.json": 1, "_render_stop": 1,
+                     "_earlier_export": 1 };
         var n = 0;
         try {
             var names = fs.readdirSync(dir);
@@ -4304,6 +4344,7 @@
      * row's colour comes from _grp directly and the counts walk GROUPS in order. */
 
     function renderClips() {
+        var anyStatus = false;   // 3.89 · see the end of this function
         var body = el.clipbody;
         body.innerHTML = "";
         // Read once for the whole table rather than per row.
@@ -4506,6 +4547,7 @@
                     ? (rs.note || ((rs.t1 && rs.t0) ? secs(rs.t1 - rs.t0) : ""))
                     : (v.group === 0 && /^ready/i.test(v.status)
                         ? "" : shortStatus(v.status));
+            if (lastText) anyStatus = true;
             var cells = [
                 [v.n ? pad2(v.n) : "—", "idx num"], [v.clip, "clipname"],
                 [sizeText, "siz num" + (over ? " over" : "")
@@ -4590,6 +4632,14 @@
                 : "show the " + deadCount + " that cannot be cut";
         }
         syncPickAll();
+        /* 3.89 · AN EMPTY COLUMN IS NOT FREE. Before a run nearly every row's Status is blank
+         * (plain "ready" is blanked on purpose), and at a 340px dock that blank column was
+         * what truncated the sizes — "18.4 …", "77.6 …". It is drawn when a row has a word
+         * for it: a graphic needing a render, a missing source, and every row during a run. */
+        if (el.cliptable) {
+            el.cliptable.className = String(el.cliptable.className || "")
+                .replace(/\s*\bnostatus\b/g, "") + (anyStatus ? "" : " nostatus");
+        }
         // The frame-rate caveat counts TICKED clips against their own source rates, so it
         // has to be re-asked whenever the list or the selection changes — not only when a
         // control in the strip moves.
@@ -5581,30 +5631,35 @@
         // one in Source Render (file — a source clip already carries its own camera sound).
         // ⚠️ "own file" IS ONE FILE FOR THE WHOLE TRACK, not one per clip. The per-clip export
         // was deleted on 16 Sep at the team lead's request; see settingArgs().
-        el.atracks.className = render ? "atgrid two" : "atgrid one";
-        /* ⚠️ NO CAPTION ROW IN SOURCE RENDER. With two columns the captions are the only
-         * thing telling them apart; with ONE the caption "own file" floated above a lone
-         * tick, a long way from the track it belonged to, and said less than the field's own
-         * label already does. A header over a single column is a header over nothing. */
-        var head = render ? document.createElement("div") : null;
-        if (head) head.className = "atrow";
-        if (head) head.appendChild(atCap("", ""));
-        /* "in clip" / "own file" rather than "hear" / "file". Two people in a row could not
-         * tell from the old captions that these are unrelated switches — one decides what a
-         * video clip SOUNDS like, the other whether loose audio files appear beside it — and
-         * "file" read as "put this in a file", which is what the other column does. The
-         * captions size the grid column to their own text (auto), so the track name beside
-         * them just ellipsises; nothing else moves. */
-        if (head) head.appendChild(atCap("in clip", "Tick: this track is audible inside "
-            + "each exported video clip. Untick: it is silent in the clips. Your timeline is "
-            + "put back exactly as it was afterwards."));
-        if (head) head.appendChild(atCap("own file", "Tick: this whole track comes out as ONE audio "
-            + "file, as long as the sequence, with the gaps as silence — _track_A2.mp3. "
-            + "Untick: no file for this track. This is not about the sound inside the video "
-            + "clips."));
-        if (head) el.atracks.appendChild(head);
+        /* 3.89 · TWO QUESTIONS, TWO ROWS — NOT ONE GRID WITH TWO COLUMNS. "để cái 'in clip'
+         * với 'own file' kia mọi người sẽ không hiểu sẽ phải tích vào đâu" (8 Sep). They are
+         * unrelated switches, and a grid made them read as two answers to one question. Now
+         * each is its own row with its own sentence; the ticks, their data-h / data-a
+         * attributes, their state and their callbacks are exactly what they were. */
+        el.atracks.className = "atq";
+        var fileRow = atQuestion("Audio files",
+            "Tick a track to get it as one file, start to end — e.g. the voice-over.");
+        var hearRow = render ? atQuestion("Sound in the clips",
+            "Ticked tracks are heard inside each video clip. Untick one to leave it out.") : null;
         for (var i = 0; i < have.length; i++) atRow(have[i]);
 
+        function atQuestion(title, hint) {
+            var box = document.createElement("div");
+            box.className = "atqrow";
+            var h = document.createElement("div");
+            h.className = "atqcap";
+            h.textContent = title;
+            var s = document.createElement("div");
+            s.className = "atqhint";
+            s.textContent = hint;
+            var ticks = document.createElement("div");
+            ticks.className = "atqticks";
+            box.appendChild(h);
+            box.appendChild(s);
+            box.appendChild(ticks);
+            el.atracks.appendChild(box);
+            return ticks;
+        }
         function atCap(text, tip) {
             var sp = document.createElement("span");
             sp.className = "atcap";
@@ -5612,29 +5667,26 @@
             if (tip) sp.title = tip;
             return sp;
         }
-        function atTick(idx, attr, on, tip, onChange) {
+        function atTick(idx, attr, on, tip, onChange, text) {
             var lab = document.createElement("label");
-            lab.className = "tick attick";
+            lab.className = "tick attick" + (on ? " on" : "");
             lab.title = tip;
             var box = document.createElement("input");
             box.type = "checkbox";
             box.checked = !!on;
             box.setAttribute(attr, String(idx));
-            box.addEventListener("change", function () { onChange(box.checked); }, false);
+            box.addEventListener("change", function () {
+                lab.className = "tick attick" + (box.checked ? " on" : "");
+                onChange(box.checked);
+            }, false);
             lab.appendChild(box);
+            if (text) lab.appendChild(document.createTextNode(text));
             return lab;
         }
         function atRow(t) {
-            var row = document.createElement("div");
-            row.className = "atrow";
-            var name = document.createElement("span");
-            name.className = "atname";
-            name.textContent = "A" + t.index + " · " + t.items + (t.items === 1 ? " item" : " items");
-            // Two columns need the name first so the two ticks line up under their captions;
-            // one column reads better as "[x] A1 · 8 items". See .atgrid.one.
-            if (render) row.appendChild(name);
+            var label = "A" + t.index + " · " + t.items + (t.items === 1 ? " item" : " items");
             if (render) {
-                row.appendChild(atTick(t.index, "data-h", audioHearOn(t.index),
+                hearRow.appendChild(atTick(t.index, "data-h", audioHearOn(t.index),
                     "Hear A" + t.index + " in each clip", function (on) {
                     var keep = [], j;
                     for (j = 0; j < have.length; j++) {
@@ -5645,9 +5697,9 @@
                     state.audioHearWant = (keep.length === have.length) ? null : keep.join(",");
                     rememberAudioHearWant();
                     renderSettings();
-                }));
+                }, label));
             }
-            row.appendChild(atTick(t.index, "data-a", audioCutOn(t.index),
+            fileRow.appendChild(atTick(t.index, "data-a", audioCutOn(t.index),
                 "Write A" + t.index + " as one whole audio file", function (on) {
                 var keep = [], j;
                 for (j = 0; j < have.length; j++) {
@@ -5663,9 +5715,7 @@
                  * decides which whole-track audio files are written beside the clips — the
                  * cut list is identical either way, and re-reading the timeline on every tick
                  * was a second or two of the panel going blank for nothing. */
-            }));
-            if (!render) row.appendChild(name);
-            el.atracks.appendChild(row);
+            }, label));
         }
     }
 
@@ -6323,7 +6373,11 @@
          *
          * ⚠️ THE GROUP, NOT ITS FIELDS. Hiding only the fields would leave the frame and its
          * caption drawn around 0px of content: a labelled empty box, measured at 34px tall. */
-        show(el.trackgroup, render || (state.audioTracks || []).length > 0);
+        show(el.trackgroup, render);
+        /* 3.89 · AUDIO HAS ITS OWN FRAME, shown whenever there is audio to choose from, in
+         * either mode. The two used to share one "Tracks" frame, captioned for a master-track
+         * question that Source Render never asks. */
+        show(el.audiogroup, (state.audioTracks || []).length > 0);
         /* And the mixdown goes with the same fact: with no audio tracks it can only ever
          * offer "no audio tracks", which is a sentence, not a setting. */
         show(el.audiofield, (state.audioTracks || []).length > 0);
@@ -6636,7 +6690,21 @@
      * renderSizeEstimate() has just summed; the rate is the one renderSequence() wrote on
      * the sequence card. A figure computed a second way is a figure that can disagree with
      * the sentence it replaced, and this panel has shipped that before. */
+    /* 3.89 · THE BUTTON STATES THE COUNT AND THE SIZE. The size had its own line under the
+     * Save-to row ("~167.4 MB for 20 clips · estimated"), which was the count said a third
+     * time to add one number. The number is on the thing you press now. */
+    function exportLabel(n) {
+        if (!(n > 0)) return "Nothing selected";
+        var s = "Export " + n + " clip" + (n === 1 ? "" : "s");
+        if (state.figBytes > 0) s += "  \u00b7  " + humanBytes(state.figBytes);
+        return s;
+    }
+
     function renderFigs(totalBytes) {
+        state.figBytes = totalBytes > 0 ? totalBytes : 0;
+        if (el["export"] && /^Export /.test(el["export"].textContent || "")) {
+            el["export"].textContent = exportLabel(selectedCount());
+        }
         if (!el.figclips) return;
         var picked = pickedClips();
         el.figclips.textContent = picked.length ? String(picked.length) : "—";
@@ -6892,9 +6960,13 @@
     var SETOPEN_KEY = "xmlcut.setopen";
 
     function loadSetOpen() {
-        var v = null;
-        try { v = window.localStorage.getItem(SETOPEN_KEY); } catch (e) {}
-        if (el.setdet) el.setdet.open = (String(v) === "open");
+        /* 3.89 · ALWAYS OPEN, and the stored value is no longer read. Quality is its own frame
+         * in the Settings tab now, with no summary line to click — the fold existed to keep
+         * four fields off a crowded strip, and the tab is where they are out of the way. A
+         * remembered "shut" would hide the codec, the quality slider and the resolution
+         * behind a disclosure that has no handle: measured, that is exactly what the first
+         * build of this did. SETOPEN_KEY stays written so a downgrade reads a real value. */
+        if (el.setdet) el.setdet.open = true;
     }
 
     function rememberSetOpen() {
@@ -7230,9 +7302,41 @@
         return out.join(", ");
     }
 
+    /* THE PER-TRACK FILES, one clause per ticked track, from settings.track_audio.
+     *
+     * ⚠️ NOTHING READ track_audio UNTIL THIS. The ticks-only export (--audio-per-track, mixdown
+     * off) is the panel's ordinary audio run, and this function returned an empty line for it
+     * before looking at anything — so a ticked track whose source was unreadable, which the
+     * engine reported as "A3: timeline audio failed" with no file, showed exactly what a
+     * healthy one did: nothing. A track file that WAS written can carry a note too (a retimed
+     * clip left out of it, the mix pulled down to stay under full scale), and that is said
+     * as well. Returns {text, bad}: bad when a ticked track produced no file. */
+    function trackFilesLine(list) {
+        var bits = [], bad = false, i, t, nm;
+        for (i = 0; i < (list || []).length; i++) {
+            t = list[i] || {};
+            nm = "A" + t.track;
+            if (t.file) {
+                bits.push(nm + " " + t.file
+                    + (t.seconds ? " (" + Number(t.seconds).toFixed(2) + "s"
+                       + (t.parts ? ", " + t.parts + " item(s)" : "") + ")" : "")
+                    + (t.note ? " — " + String(t.note) : ""));
+            } else {
+                bad = true;
+                bits.push(nm + " NOT written — " + String(t.note || "no reason given"));
+            }
+        }
+        return { text: bits.length ? "Track files: " + bits.join("; ") + "." : "", bad: bad };
+    }
+
     function sayAudioTracks(st) {
+        var tf = trackFilesLine(st.track_audio);
         // Audio was not asked for, so there is nothing to report — not even that there isn't.
-        if (!st.audio) { say("audio", "info", ""); return; }
+        // Per-track files are audio asked for, even with the mixdown off.
+        if (!st.audio) {
+            say("audio", tf.bad ? "warn" : "info", tf.text);
+            return;
+        }
         var used = (st.audio_tracks || []).map(Number);
         var want = (st.audio_tracks_requested || []).map(Number);
         var have = st.audio_tracks_available || [];
@@ -7263,8 +7367,11 @@
             ? (" Written: " + ta.file
                + (ta.seconds ? ", " + Number(ta.seconds).toFixed(2) + "s" : "")
                + (ta.parts ? ", " + ta.parts + " item(s)" : "") + "."
-               + (src.length ? " Holds: " + src.join(", ") + "." : ""))
+               + (src.length ? " Holds: " + src.join(", ") + "." : "")
+               // A written mix can still have left something out; the note says what.
+               + (ta.note ? " " + String(ta.note) : ""))
             : (ta.note ? " " + String(ta.note) : " No audio file written.");
+        if (tf.text) mix += " " + tf.text;
 
         // THE BUG. Said first, said loudly, and said in the words of what it costs.
         if (want.length && want.join(",") !== used.join(",")) {
@@ -7275,7 +7382,7 @@
         }
         // Asked for and got: still reported, because "it worked" is only checkable if the
         // panel says which track it read when it worked.
-        var sev = ta.file ? "info" : "warn";
+        var sev = (ta.file && !tf.bad) ? "info" : "warn";
         if (!want.length) {
             say("audio", sev, "Audio: read "
                 + (used.length ? "all tracks — " + trackNames(used) : "no track")
@@ -7762,6 +7869,28 @@
             }
         });
         q.addEventListener("mouseleave", function () { el.tip.hidden = true; });
+    }
+
+    /* 3.89 · THE QUESTION MARKS GO; WHAT THEY SAID STAYS, ON THE THING IT EXPLAINS.
+     *
+     * Twenty-four "?" glyphs were drawn across the panel — three in the clip table's header
+     * alone — and the team lead's word for the result was "rối". But the explanations are
+     * wanted: "nhờ Claude nó thêm phần giải thích mấy trường này" (15 Aug) is where the Info
+     * ask began. So each glyph's data-tip moves onto the label it sits in, and wireTips()
+     * then gives the LABEL the same bubble: hover "Mixed file" and you read what it means.
+     * Nothing is lost except the glyph. Runs before wireTips(), which is the only reason it
+     * works. A label that already carries its own data-tip keeps it. */
+    function hoistTips() {
+        var qs = document.querySelectorAll(".q[data-tip]");
+        for (var i = 0; i < qs.length; i++) {
+            var q = qs[i], host = q.parentNode;
+            if (!host) continue;
+            if (!host.getAttribute("data-tip")) {
+                host.setAttribute("data-tip", q.getAttribute("data-tip"));
+                host.className = String(host.className || "") + " hastip";
+            }
+            host.removeChild(q);
+        }
     }
 
     function wireTips() {
@@ -8458,7 +8587,8 @@
      * are exactly that, and they were living behind a second door beside it. One place, and
      * the gear still gets you there in one click. */
     el.gear.addEventListener("click", function () {
-        setTab("tabinfo");
+        // A toggle: with Info's own tab gone, the gear is also the way back out of it.
+        setTab(tabNow === "tabinfo" ? "tabclips" : "tabinfo");
     });
 
     /* --------------------------------------------------------------- boot */
@@ -8568,6 +8698,7 @@
         restoreSettings();
         renderSettings();
         if (state.script) loadPresets();
+        hoistTips();
         wireTips();
         wirePathBoxes();
         // Off the critical path: a slow or absent network must never delay the panel.

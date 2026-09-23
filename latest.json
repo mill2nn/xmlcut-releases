@@ -1,6 +1,6 @@
 {
-  "version": "3.88",
-  "notes": "L\u1ea6N READ \u0110\u1ea6U NHANH H\u01a0N NHI\u1ec0U: tr\u01b0\u1edbc \u0111\u00e2y tool \u0111\u1ecdc th\u00f4ng tin t\u1eebng file m\u1ed9t, nay \u0111\u1ecdc nhi\u1ec1u file c\u00f9ng l\u00fac. \u0110o tr\u00ean timeline th\u1eadt c\u00f3 20 file tr\u00ean Google Drive: 1,60 gi\u00e2y xu\u1ed1ng 0,33 gi\u00e2y \u2014 nhanh g\u1ea5p 4,8 l\u1ea7n. K\u1ebft qu\u1ea3 \u0111\u1ecdc ra kh\u00f4ng \u0111\u1ed5i m\u1ed9t ch\u1eef: danh s\u00e1ch, s\u1ed1 th\u1ee9 t\u1ef1 v\u00e0 m\u1ecdi th\u00f4ng s\u1ed1 gi\u1ed1ng h\u1ec7t tr\u01b0\u1edbc.",
+  "version": "3.89",
+  "notes": "GIAO DI\u1ec6N M\u1edaI: 2 tab (Clips | Settings), m\u1ed9t d\u00f2ng th\u00f4ng tin, n\u00fat Export ghi lu\u00f4n s\u1ed1 clip v\u00e0 dung l\u01b0\u1ee3ng. S\u1eeda l\u1ed7i Source Render l\u1ec7ch 1 frame tr\u00ean footage iPhone 59.94. Th\u01b0 m\u1ee5c xu\u1ea5t an to\u00e0n h\u01a1n: file c\u0169 kh\u00f4ng kh\u1edbp \u0111\u01b0\u1ee3c chuy\u1ec3n v\u00e0o _earlier_export/ (kh\u00f4ng x\u00f3a) k\u00e8m c\u1ea3nh b\u00e1o. B\u1ea5m H\u1ee7y d\u1eebng h\u1eb3n, kh\u00f4ng \u0111\u1ec3 l\u1ea1i file d\u1edf dang. Audio gi\u1eef gain, fade v\u00e0 nested sequence; 1 file l\u1ed7i kh\u00f4ng l\u00e0m h\u1ecfng c\u1ea3 file mix.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

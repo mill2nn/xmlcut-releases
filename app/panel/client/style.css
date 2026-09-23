@@ -2237,3 +2237,118 @@ body { position: relative; }
     white-space: nowrap;
 }
 .gearblock .msg { overflow-wrap: anywhere; }
+
+
+/* ══════════════════════════════════════════════════════════════════════════════════════
+ * 3.89 · THE REVAMP — two tabs, one status line, one Export.
+ *
+ * The team lead chose direction A on 23 Sep from mock-ups rendered off the REAL panel on
+ * real reads. What it answers, in his words: "tinh giản" and "nhiều thông tin bị thừa" (the
+ * count was on screen five times), "chưa có khung rõ ràng" (settings in captioned frames),
+ * and the audio grid nobody could read ("in clip / own file… sẽ không hiểu phải tích vào
+ * đâu"). Every colour below is a ladder rung or a token, so the surface check still holds.
+ * ══════════════════════════════════════════════════════════════════════════════════════ */
+
+/* ONE STATUS LINE: the three numbers in a row, Read again at its end */
+.figs.statline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: nowrap;
+    margin: 10px 0;
+    font-size: 12px;
+    color: var(--dim);
+}
+.figs.statline[hidden] { display: none; }
+.figs.statline .stat { white-space: nowrap; }
+.figs.statline .figval {
+    display: inline;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--fg);
+}
+.figs.statline b.figval { font-weight: 700; }
+.figs.statline .statsep { color: var(--off); }
+.figs.statline .figbtn { margin-left: auto; flex: 0 0 auto; }
+
+/* TWO TABS */
+.tabbar .tab[hidden] { display: none; }
+
+/* THE FRAMES in Settings, with air between them */
+#panetracks .group, #panequal .group { margin-bottom: 10px; }
+
+/* AUDIO: two questions, each its own row of ticks */
+.atq { display: grid; gap: 12px; }
+.atqcap { font-size: 12px; color: var(--fg); }
+.atqhint { font-size: 11px; color: var(--dim); margin: 2px 0 6px; line-height: 1.35; }
+.atqticks { display: flex; flex-wrap: wrap; gap: 6px; }
+.atq .attick {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background-color: #262e39;      /* ladder: raised — a control, not a surface */
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 5px 9px;
+    font-size: 12px;
+    color: var(--fg);
+}
+.atq .attick.on { border-color: var(--accent); }
+
+/* QUALITY: the fold is always open, so the line summarising it is not needed */
+#setdet > summary { display: none; }
+
+/* THE LIST: the chips' legend replaces three stacked headings */
+#typelbl .legend { font-size: 11px; color: var(--dim); text-transform: none; letter-spacing: 0; }
+#opts > .stephead { font-size: 0; margin: 0; padding: 0; border: 0; min-height: 0; }
+#opts > .stephead > button { font-size: 12px; }
+#listnote { display: none; }
+
+/* THE STATUS COLUMN, only when a row has a word for it — the blank one truncated the sizes */
+#cliptable.nostatus th.sts,
+#cliptable.nostatus td.sts { display: none; }
+
+/* ONE EXPORT, the full width of the bar, carrying the count and the size.
+   ⚠️ SCOPED TO #barready. Written as `.abrow .abacts` it also caught the progress row a run
+   shows, forcing Cancel onto a line of its own — measured, the bar grew 126px -> 155px in run
+   mode, which is the exact figure the height budget in check_layout.js records for "framed". */
+#barready .abacts { flex: 1 1 100%; }
+#barready .abacts #export {
+    flex: 1 1 auto;
+    width: 100%;
+    font-size: 14px;
+    padding-top: 11px;
+    padding-bottom: 11px;
+}
+
+/* A LABEL THAT EXPLAINS ITSELF on hover — where a "?" used to sit */
+.hastip { cursor: help; }
+
+/* THE GEAR carries Info's count now, and lights while Info is open */
+.gearbtn { position: relative; }
+.gearbtn.on { color: var(--accent); }
+.gearbtn[data-n]:not([data-n=""])::after {
+    content: attr(data-n);
+    position: absolute;
+    top: -2px;
+    right: -4px;
+    min-width: 13px;
+    height: 13px;
+    padding: 0 3px;
+    border-radius: 7px;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 13px;
+    text-align: center;
+}
+
+/* THE SIZE COLUMN takes the room the blank Status column gave back: 50px docked could not hold
+   "77.6 MB", and every clip over 10 MB read "77.6 …". */
+#cliptable.nostatus th.siz,
+#cliptable.nostatus td.siz { width: 66px; }
+
+/* The fold is always open with no summary, so the separator that divided it from its summary
+   line divides it from nothing — a rule and a blank band under the QUALITY caption. */
+#setdet[open] > .fields { margin-top: 0; padding-top: 0; border-top: 0; }

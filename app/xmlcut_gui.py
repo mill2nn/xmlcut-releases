@@ -315,7 +315,15 @@ def do_scan(payload: dict) -> dict:
     JOB.outdir = Path(payload["out"]).expanduser() if payload.get("out") else None
     JOB.say(f"Reading {xml.name} …")
 
-    tl = xmlcut.Timeline(xml, remaps, payload.get("sequence") or None)
+    # ⚠️ THE PAGE SENDS A POSITION, so it is handed over as one. The <select>'s option
+    # values are the list's own 1-based index (applySeqs), never a name; as the bare string
+    # "1" the engine also read it as the NAME "1" and refused it as ambiguous on an XML
+    # whose sequences are named "2" and "1" — neither could be cut from here. Anything
+    # that is not a plain number (an older page, a hand-made request) passes through.
+    seq = payload.get("sequence")
+    if isinstance(seq, str) and seq.strip().isascii() and seq.strip().isdigit():
+        seq = int(seq.strip())
+    tl = xmlcut.Timeline(xml, remaps, seq if seq not in ("", None) else None)
     tl.cuts = [c for c in tl.cuts if c.track_type == args.tracks]
     tl.cuts = [c for c in tl.cuts if c.duration_frames >= args.min_frames]
     for i, c in enumerate(tl.cuts, start=1):

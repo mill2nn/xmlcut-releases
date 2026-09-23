@@ -70,9 +70,7 @@
      "2 nút to nhất… nổi khối nổi bật màu khác hẳn xung quanh". A frame makes them a section
      of the panel; without one they are the top of it. The ? keeps the explanation. -->
 <div class="g-mode">
-        <div class="gcap modecap">Cut from
-            <span class="q" data-tip="Source Render cuts the raw camera files: fast, original pixels, but nothing from the timeline is in them. Timeline Render has Premiere render each cut first, so colour, titles, Motion, transitions and ramps come out with the clip — slower, needs Media Encoder, leaves your timeline as it found it.">?</span>
-        </div>
+
         <!-- Two buttons, side by side at every width including a 320px dock. The selected
              one carries the accent border and the --glow, which is the same "one lit thing"
              language the primary buttons use — no new colour, no new token. -->
@@ -143,15 +141,18 @@
      "bên dưới là thống số render" — 28 Aug, the second half of the same sentence that asked
      for the two buttons. Three numbers, because three is what he named: how many clips, how
      big, at what rate. #sizeest moved here from the action bar, where it was a sentence. -->
-<div id="figstrip" class="figs" hidden>
-    <div class="fig"><span id="figclips" class="figval">—</span><span class="figcap">clips</span></div>
-    <div class="fig"><span id="figsize" class="figval">—</span><span class="figcap">est. size</span></div>
-    <div class="fig"><span id="figfps" class="figval">—</span><span class="figcap">fps</span></div>
-    <!-- ⚠️ READ AGAIN LIVES WITH THE FIGURES IT REFRESHES. It was inside the sequence card,
-         and the sequence card moved into the Info tab — which would have left the only way to
-         re-read a changed timeline two clicks deep, behind a tab named for reference. These
-         three numbers are what a re-read changes, so the button belongs beside them. -->
-    <button id="readagain" class="mini figbtn">Read again</button>
+<div id="figstrip" class="figs statline" hidden>
+    <!-- 3.89 · ONE LINE, NOT THREE CARDS AND A BAR. The count, the size and the rate were a
+         strip of three cards plus a full-width Read-again bar under them — four regions for
+         three numbers, and "20 clips" was then said again by the Ready line, the list header,
+         the size line and the Export button. Five times. Same three ids, so every writer in
+         main.js is untouched. -->
+    <span class="stat"><b id="figclips" class="figval">—</b> clips</span>
+    <span class="statsep">·</span>
+    <span class="stat"><span id="figsize" class="figval">—</span></span>
+    <span class="statsep">·</span>
+    <span class="stat"><span id="figfps" class="figval">—</span> fps</span>
+    <button id="readagain" class="mini figbtn" title="Read the timeline again — after you change it in Premiere">↻ Read again</button>
 </div>
 
 <!-- ══ THE TABS ═══════════════════════════════════════════════════════════════════════
@@ -170,9 +171,13 @@
      marked on the 8 Sep screenshots. -->
 <div id="tabbar" class="tabbar" hidden>
     <button id="tabclips" class="tab on" data-tab="clips">Clips</button>
-    <button id="tabtracks" class="tab" data-tab="tracks">Tracks</button>
-    <button id="tabqual" class="tab" data-tab="qual">Quality</button>
-    <button id="tabinfo" class="tab" data-tab="info">Info</button>
+    <button id="tabtracks" class="tab" data-tab="tracks">Settings</button>
+    <!-- 3.89 · TWO TABS. Tracks and Quality are one question — "what comes out" — so they are
+         one tab now, in three captioned frames. Info is diagnostics nobody needs mid-export,
+         so it lives behind the gear, which already opened it. Both buttons stay in the DOM,
+         hidden, because main.js and the tests address them by id. -->
+    <button id="tabqual" class="tab" data-tab="qual" hidden>Quality</button>
+    <button id="tabinfo" class="tab" data-tab="info" hidden>Info</button>
 </div>
 
 <section id="step3" class="strip" hidden>
@@ -209,7 +214,7 @@
          over a disabled select. -->
     <div id="panetracks" class="tabpane" hidden>
     <div class="group g-tracks" id="trackgroup" hidden>
-        <div class="gcap">Tracks</div>
+        <div class="gcap">Picture</div>
         <div class="fields">
             <!-- Only in render mode, because it only exists there. A render is the whole
                  picture at that instant, so a title on V2 sitting over a clip on V1 would
@@ -252,10 +257,17 @@
 
                  Hidden until a read finds audio tracks, and hidden in Timeline Render, where
                  the engine drops every audio cut anyway. -->
+        </div>
+    </div>
+    <!-- 3.89 · AUDIO IS ITS OWN FRAME. It shared "Tracks" with the master-track select, so in
+         Source Render — where there is no master track — the frame was captioned for a
+         question it did not ask. -->
+    <div class="group g-audio" id="audiogroup" hidden>
+        <div class="gcap">Audio</div>
+        <div class="fields">
             <div class="field f-atracks" id="atracksfield" hidden>
-                <div class="flbl">An audio file for each ticked track
-                    <span class="q" data-tip="Two separate questions per track. IN CLIP: is this track audible inside each exported video clip? Untick it and the clips are silent on that track; your timeline is put back afterwards. OWN FILE: does this track also come out as separate audio files, one per clip? The two do not affect each other — you can have sound in the clips with no separate files, or separate files with silent clips.">?</span>
-                </div>
+                <!-- 3.89 · the two questions are captioned per row by renderAudioCutTracks(). The old
+                     label and its tip ("one per clip") had been untrue since 16 Sep. -->
                 <div id="atracks" class="vinclude"></div>
             </div>
 
@@ -266,9 +278,7 @@
                  voice-over above it, and a dataset of what was SAID wants one and not the
                  other. -->
             <div class="field f-audio" id="audiofield">
-                <div class="flbl">Also one mixed MP3
-                    <span class="q" data-tip="A third, separate thing: ONE mp3 as long as the whole sequence, with the tracks at their timeline positions and gaps as silence. It lands beside the clips as _timeline_audio.mp3. WHICH tracks go into it is the ticks above: tick none and it mixes every track, tick some and it mixes those. The option says which, so you never have to work it out.">?</span>
-                </div>
+                <div class="flbl" title="One MP3 as long as the whole sequence, the tracks at their timeline positions and the gaps as silence — _timeline_audio.mp3. Tick no track above and it mixes every track; tick some and it mixes those.">Mixed file</div>
                 <select id="audiosel" class="sel wide">
                     <option value="">No audio files</option>
                 </select>
@@ -297,8 +307,8 @@
 
 <div id="panequal" class="tabpane" hidden>
     <div class="group g-out">
-        <div class="gcap">Render settings</div>
-        <details id="setdet" class="setdet">
+        <div class="gcap">Quality</div>
+        <details id="setdet" class="setdet" open>
             <summary class="setsum"><span id="setsum" class="setsumval">—</span></summary>
             <div class="fields">
                 <!-- ⚠️ THE TWO PREFERENCES MOVED IN HERE, and the reason is nine messages
@@ -310,15 +320,7 @@
                      "split cross-dissolves" deliberately did NOT come with them: it changes
                      which frames land on disk and it carries a per-timeline count, so it
                      stays where it can be seen. -->
-                <div class="field f-prefs">
-                    <div class="flbl">Preferences</div>
-                    <label class="tick"><input type="checkbox" id="chime" checked>sound when done
-                        <span class="q" data-tip="Plays a short macOS system sound when an export finishes — one tone if every clip wrote, a different one if anything failed or you cancelled. An export takes minutes and you are usually somewhere else; nothing pops up and nothing steals focus.">?</span>
-                    </label>
-                    <label class="tick"><input type="checkbox" id="resume">skip clips already there
-                        <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. ⚠️ A file left half-written by a cancelled or crashed run counts as one that already exists, so it is kept too.">?</span>
-                    </label>
-                </div>
+
                 <div class="field f-preset">
                     <div class="flbl">Render preset <span class="q" data-tip="A named set of the settings below, kept in a file the engine owns so the same preset works from a terminal. Choosing one fills in everything below it; a change by hand sets this back to Custom.">?</span></div>
                     <select id="preset" class="sel"></select>
@@ -435,6 +437,7 @@
         <p class="lbl" hidden>Flag large clips
             <span class="q" data-tip="Marks any clip expected to land above this size, in the list above and in the report — where the number is the file's ACTUAL size on disk. Drag the number sideways, or click and type. Empty means no flagging, and it changes nothing about the encode.">?</span>
         </p>
+        <button id="remeasure" class="mini" hidden title="Encode a second of every clip at these settings, so the sizes are measured rather than estimated.">Re-measure sizes</button>
         <div class="caprow" hidden>
             <span class="capfix">over</span>
             <input type="number" id="cap" class="numin scrub" min="0" step="1"
@@ -472,16 +475,13 @@
     <!-- ⚠️ THE LABEL CARRIES AN ID so the whole File types block can go in one move. It is
          hidden outright in timeline-render mode, where the source file's extension decides
          nothing — see applyCutFrom() in main.js for why hidden rather than dimmed. -->
-    <p class="lbl" id="typelbl">File types
-        <span class="q" data-tip="Only clips whose source file is one of these types get cut. The number is how many are on this timeline; a type showing 0 is still listed, and ticking it is remembered for a timeline that has it.">?</span>
+    <p class="lbl" id="typelbl"><span class="legend" data-tip="Only clips whose source file is one of these types get cut. The number is how many are on this timeline. Untick a type to leave its clips out.">Colour = file type</span>
         <button id="typeall" class="linkbtn">select what's here</button>
     </p>
     <div id="types" class="types"></div>
     <!-- What is NOT ticked, and the "reading the cut list" note, are both on the rail. -->
 
-    <p class="lbl" id="listlbl">Every cut, in timeline order
-        <span class="q" data-tip="Every cut this export will make, in timeline order. Untick a clip to leave it out; the numbers renumber to match the filenames you get. Hover a row for its timeline position and notes.">?</span>
-    </p>
+    <p class="lbl" id="listlbl" hidden></p>
 
     <!-- THE RUN'S RESULT, above the list it describes -------------------------------------
          It used to be the third row of the action bar, which made that bar 210px tall on a
@@ -530,7 +530,7 @@
             <thead><tr>
                 <th class="pick"><input type="checkbox" id="pickall" checked
                     title="tick or untick every clip below"></th>
-                <th class="idx num">#</th>
+                <th class="idx num" data-tip="Every cut, in timeline order. Each clip keeps its number whatever else you untick, so a re-export lands with the same filename it had before.">#</th>
                 <th>Clip</th>
                 <th class="siz num">Size<span class="q" data-tip="What this clip is expected to weigh at the current quality — its source's own bitrate scaled per CRF, then by the resolution. An estimate; it moves as you drag the sliders.">?</span></th>
                 <th class="sts">Status<span class="q" data-tip="Before a run: ready = not cut yet · missing source = not at the recorded path · AE comp = Dynamic Link, render it out first. During: how long it has been encoding. After: what it took, or why it did not write. Hover a row for notes.">?</span></th>
@@ -570,6 +570,23 @@
     <div id="infomsgs" class="railmsgs"></div>
 
 <section id="gearmenu" class="gearblock">
+    <!-- 3.89 · set once and never touched again: a chime and a resume tick are preferences,
+         not export settings, so they sit here rather than between the quality slider and
+         Export. -->
+    <div class="group g-prefs">
+        <div class="gcap">Preferences</div>
+        <div class="fields">
+                <div class="field f-prefs">
+                    <div class="flbl">Preferences</div>
+                    <label class="tick"><input type="checkbox" id="chime" checked>sound when done
+                        <span class="q" data-tip="Plays a short macOS system sound when an export finishes — one tone if every clip wrote, a different one if anything failed or you cancelled. An export takes minutes and you are usually somewhere else; nothing pops up and nothing steals focus.">?</span>
+                    </label>
+                    <label class="tick"><input type="checkbox" id="resume">skip clips already there
+                        <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. ⚠️ A file left half-written by a cancelled or crashed run counts as one that already exists, so it is kept too.">?</span>
+                    </label>
+                </div>
+        </div>
+    </div>
     <p class="lbl">Cut script
         <span class="q" data-tip="xmlcut.py — the engine that does the cutting. It ships inside this panel, so normally there is nothing to do here. Re-check confirms it is present and runnable, and re-downloads it if it has gone missing.">?</span>
     </p>
@@ -658,13 +675,13 @@
          .actionbar .g-dest rules, which keep the border for exactly that state. -->
 <div class="group g-dest" id="destgroup">
         <div class="gcap">Save to
-            <span class="q" data-tip="Pick this once. Every export makes a folder named after the sequence inside it, then writes into raw/ for Source Render or edited/ for Timeline Render — each set of clips separate, with its own 01..N numbering and clips.csv.">?</span>
         </div>
         <div class="fields">
             <div class="field f-dest">
                 <div class="pathrow">
                     <span id="outpath" class="path">—</span>
-                    <button id="copyout" class="mini" title="Copy this path">Copy</button>
+                    <button id="copyout" class="mini" hidden>Copy</button>
+                    <button id="openout" class="mini" title="Open this folder in Finder">Open</button>
                     <button id="pickout" class="mini">Change</button>
                 </div>
             </div>
@@ -672,20 +689,17 @@
     </div>
 
     <div id="barready" class="abrow">
-        <div class="abfacts">
+        <div class="abfacts" hidden>
             <!-- THE NUMBER ONLY. The sentence explaining how the number was arrived at —
                  "an estimate, usually within about 1.5x…" — wrapped to three lines at a 320px
                  dock and made this row 96px tall to say one figure. The figure stays here
                  beside the button; how it was made is on the ? and, when the sizes are STALE
                  and there is something to do about it, on the rail. -->
             <div id="sizeest" class="abfact" hidden></div>
-            <span class="q" data-tip="What the ticked clips are expected to weigh in total. `estimated` — each source's bitrate scaled per CRF, within about 1.5x. `measured` — Re-measure encoded a second of every clip at these settings, good to a few percent. `measured at` another setting: the sizes are that setting's, not the sliders'.">?</span>
         </div>
         <div class="abacts">
             <!-- Encodes a second of each clip for a figure good to a few percent. Opt-in,
                  for one scan: the estimate beside it is metadata only and costs nothing. -->
-            <button id="remeasure" class="mini" hidden
-                    title="encode a second of each clip at these settings">Re-measure</button>
             <!-- The label says the action and its size, so there is nothing to work out
                  before pressing it: "Export 19 clips". -->
             <!-- Beside Export because "where did it go" gets asked in the same breath as
@@ -695,8 +709,6 @@
             <!-- "Folder", not "Open folder": the longer label pushed this row 9px past a
                  320px dock — measured, and the run/done rows were 0px over, which is how the
                  label rather than the layout was identified as the cause. -->
-            <button id="openout" class="mini"
-                    title="open the folder this export writes into">Folder</button>
             <button id="export" class="primary">Export clips</button>
         </div>
     </div>

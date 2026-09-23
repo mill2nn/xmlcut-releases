@@ -147,7 +147,10 @@ def main() -> int:
     if select is None and dseq.get("name"):
         names = [s["name"] for s in xmlcut.Timeline.list_sequences(args.xml)]
         if dseq["name"] in names:
-            select = dseq["name"]
+            # ⚠️ "name:", because a bare name that is all digits is also a POSITION: a
+            # dump of the sequence named "2" was refused as ambiguous on an XML whose
+            # sequences are named "2" and "1" (see Timeline._pick_sequence).
+            select = "name:" + dseq["name"]
 
     try:
         tl = xmlcut.Timeline(args.xml, [], select)

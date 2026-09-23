@@ -157,7 +157,15 @@ python3 xmlcut.py PROMO_MASTER_v7.xml -o ./clips --sequence "PROMO_MASTER_v7"
 
 If the XML holds more than one sequence and you don't say which, xmlcut prints the list and
 stops rather than guessing — cutting the wrong timeline silently is the worst failure mode
-for a dataset. Select by name (`--sequence "Main Edit"`) or by number (`--sequence 2`).
+for a dataset. Select by name (`--sequence "Main Edit"`) or by number (`--sequence 2`). For
+the same reason, a name two sequences share, or a number that is also another sequence's name,
+is refused rather than guessed. Say which you mean: `--sequence pos:2` is always the second
+sequence in `--list-sequences`, `--sequence name:2` always the one named "2" (matched exactly).
+The GUI and the walk-through pick by position and the Premiere panel by name, so none of them
+hits the refusal.
+
+`--manifest-only` and `--dry-run` are refused into a folder that already holds an export: they
+would replace the manifest `--resume` reads. Preview into a different folder.
 
 Output:
 
@@ -427,6 +435,19 @@ came out of, and whether the nest's edges clipped it)
 | `no_audio` | an audio-track clip whose source has no audio stream |
 | `skipped_existing` | `--resume` found the file already written |
 
+A clip that is `failed`, `missing_source`, `unsupported` or refused in a run leaves nothing
+under its name: if an earlier export's file was there, it is moved into `_earlier_export/`
+inside the output folder (never deleted) and the run says which ones. The same happens to a
+file of a clip the edit no longer has, and to an older copy of a clip saved under another
+name. A clip whose NUMBER changed (a clip was added or removed before it) is re-encoded
+under its new number, and its old-numbered file is deleted only when the folder's record
+proves this tool wrote it for that clip; otherwise that file is moved aside too. Either
+happens only once the re-encode is in place: if it fails, its source is offline or the
+export is cancelled, the old-numbered file stays where it was. A
+whole-timeline or per-track mix that fails is handled the same way. The hidden
+`.xmlcut-ledger.json` is the folder's record of what was written and with which settings;
+`--resume` reads it, and keeps a recorded clip even while its source media is offline.
+
 Sequence markers land in `manifest.json` under `markers`, with name, comment, and timecode.
 
 ---
@@ -439,7 +460,8 @@ Sequence markers land in `manifest.json` under `markers`, with name, comment, an
   -o, --out DIR          output directory (default ./clips)
   --tracks {video,audio,all}    default: video
   --remap OLD=NEW        rewrite source paths (repeatable)
-  --sequence NAME|N      which sequence to cut (name or 1-based index)
+  --sequence NAME|N      which sequence to cut (name or 1-based index; pos:N / name:NAME
+                         when a sequence's name is a number)
   --list-sequences       list sequences in the XML and exit
   --vcodec NAME          encoder (default libx264)
   --container EXT        output container (default mp4)
@@ -447,7 +469,8 @@ Sequence markers land in `manifest.json` under `markers`, with name, comment, an
   --min-frames N         skip cuts shorter than N frames
   --ext LIST             only cut clips whose source file has one of these extensions,
                          comma separated (--ext mp4,mov); default is every type present
-  --resume               skip cuts whose output file already exists and is non-empty
+  --resume               keep a clip already in the folder only when this tool recorded
+                         writing that file for that cut at these settings; re-cut the rest
   --no-probe             skip ffprobe technical specs (faster)
   --manifest-only        write the manifest, cut nothing
   --dry-run              show what would happen
@@ -813,7 +836,8 @@ you use.
 2. **The interpreted frame rate** — what the edit is really built on. Reinterpret 24 fps footage
    as 23.976 and the file says one thing while Premiere cut against another. Those clips are
    named on export; their ranges are right, their lengths are reported as unverified.
-3. **Real media paths**, so `--remap` has nothing left to do.
+3. **Real media paths** — Premiere's last-known ones, so an offline clip still arrives with
+   its old path. `--remap` rewrites a dump's paths exactly as it does an XML's.
 
 To see whether any of that matters on your material, compare the two inputs directly:
 
