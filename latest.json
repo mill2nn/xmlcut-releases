@@ -1,6 +1,6 @@
 {
-  "version": "3.89",
-  "notes": "GIAO DI\u1ec6N M\u1edaI: 2 tab (Clips | Settings), m\u1ed9t d\u00f2ng th\u00f4ng tin, n\u00fat Export ghi lu\u00f4n s\u1ed1 clip v\u00e0 dung l\u01b0\u1ee3ng. S\u1eeda l\u1ed7i Source Render l\u1ec7ch 1 frame tr\u00ean footage iPhone 59.94. Th\u01b0 m\u1ee5c xu\u1ea5t an to\u00e0n h\u01a1n: file c\u0169 kh\u00f4ng kh\u1edbp \u0111\u01b0\u1ee3c chuy\u1ec3n v\u00e0o _earlier_export/ (kh\u00f4ng x\u00f3a) k\u00e8m c\u1ea3nh b\u00e1o. B\u1ea5m H\u1ee7y d\u1eebng h\u1eb3n, kh\u00f4ng \u0111\u1ec3 l\u1ea1i file d\u1edf dang. Audio gi\u1eef gain, fade v\u00e0 nested sequence; 1 file l\u1ed7i kh\u00f4ng l\u00e0m h\u1ecfng c\u1ea3 file mix.",
+  "version": "3.90",
+  "notes": "XU\u1ea4T V\u00c0O TH\u01af M\u1ee4C ACT: clip ra th\u1eb3ng <s\u1ea3n ph\u1ea9m>/Output/ACT/<version>/, version l\u1ea5y t\u1eeb t\u00ean sequence (v1.2, vid 13.0 ho\u1eb7c 1.1). Ch\u01b0a c\u00f3 ACT th\u00ec t\u1ef1 t\u1ea1o; kh\u00f4ng xu\u1ea5t n\u1ebfu thi\u1ebfu Output/, t\u00ean kh\u00f4ng c\u00f3 version, ho\u1eb7c folder version \u0111\u00e3 c\u00f3 clip c\u1ee7a sequence kh\u00e1c hay ch\u1ebf \u0111\u1ed9 kh\u00e1c. S\u1eeda 2 l\u1ed7i 3.89: read h\u1ecfng th\u00ec n\u00fat Read timeline hi\u1ec7n l\u1ea1i \u0111\u1ec3 th\u1eed l\u1ea1i; kh\u00f4ng c\u00f2n b\u00e1o nh\u1ea7m 'kh\u00f4ng c\u00f3 cut'.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

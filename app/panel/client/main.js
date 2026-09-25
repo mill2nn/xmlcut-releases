@@ -26,7 +26,7 @@
      * features that were dropped — say() carries the same sentences into #railmsgs. The
      * elements are gone because a message needs a place, not an element of its own. */
     var ids = ["read", "seqbox", "seqname", "seqmeta", "opts", "types",
-               "outpath", "pickout", "export", "prog", "barfill", "progtext",
+               "outpath", "destcap", "pickout", "export", "prog", "barfill", "progtext",
                "cancel", "reveal", "again", "adv", "scriptpath", "openout",
                "pickscript", "cmd", "log", "tip", "ver", "step3",
                "report", "repsum", "tally", "onlyprob", "repcount", "copyrep", "showdead",
@@ -83,7 +83,11 @@
         xmlMethod: "",       // which host API produced it
         info: null,          // summary returned by the ExtendScript
         types: {},           // ext -> {count, on}
-        out: "",
+        out: "",             // Save to — the product folder, unless the project names one
+        /* 3.90 · the Output/ACT this export is about to create ("" when it already exists),
+         * and whether the run that just ended did create it. See settleAct(). */
+        actWanted: "",
+        actMade: false,
         script: "",
         python: "",
         proc: null,
@@ -252,6 +256,7 @@
         repaired: false,     // a damaged bundled engine has already been replaced once
         readTimer: null,     // watchdog on the two ExtendScript calls
         manifestBefore: 0,   // manifest mtime before an export, so a cancel reports nothing
+        rendersPre: null,    // _renders/ entries before a render (dropRefusedRenders)
         resume: false,
         typesReset: "",
         hostHome: "",
@@ -267,6 +272,9 @@
          * "is this the same sequence"; this answers "is it still the same edit". */
         readFp: "",
         seqDrift: false,
+        /* 3.90 · the sentence for "same sequence, but renamed to another version since Read"
+         * ("" when it was not). See renamedAway(). */
+        seqRenamed: "",
         /* CANCEL WAS PRESSED for the run that is going. Read by the render phase to decide
          * whether to hand over to the encode phase at all, and by the close handler so a
          * stopped run is reported as stopped rather than as finished. Cleared when a run
@@ -406,15 +414,28 @@
      * section. Hiding them answered the same question — you cannot change the encoder half
      * way through an encode — by removing the evidence of what the run is doing, which is
      * exactly what you want to look at while waiting. Locked and legible beats gone. */
+    /* 3.90 round 2 · AND THE MODE. A version folder keeps the mode it was delivered in
+     * (folderTaken), so a mode switched while an export runs would make the folder this run
+     * is writing refuse it the moment its manifest lands — outDir() empty, and the finished
+     * run's report with nowhere to be read from. */
     var LOCK_WHILE_RUNNING = ["preset", "savepreset", "delpreset", "vcodec", "crf",
                               "fps", "scale", "cap", "remeasure", "pickout", "pickall",
-                              "readagain", "read"];
+                              "readagain", "read", "modesrc", "modeseq"];
 
     function setRunning(on) {
         state.running = !!on;
         for (var i = 0; i < LOCK_WHILE_RUNNING.length; i++) {
             var e = el[LOCK_WHILE_RUNNING[i]];
             if (e) e.disabled = state.running;
+        }
+        /* Every end of a run comes through here, so this is where the dest row is asked again
+         * — it described the folder BEFORE the run, and measured, it went on saying "already
+         * holds 23 file(s)" over a folder the run had just changed — and then where "did it
+         * make ACT/" is asked, which replaces that row when the answer is yes. */
+        if (!state.running) {
+            setOutDest();
+            settleAct();
+            settleClash();
         }
         paintBody();
     }
@@ -427,7 +448,28 @@
         el.resume.disabled = state.busy;
         el.read.textContent = (state.busy && label) ? label : "Read timeline";
         el.readagain.disabled = state.busy;
+        if (!state.busy) offerRead();
         refreshExportEnabled();
+    }
+
+    /* ⚠️ THERE IS ALWAYS A WAY TO READ AGAIN, and this is the one place that says so.
+     *
+     * 3.89 folded the whole of step 1 away once a read had happened (renderSequence) and left
+     * "↻ Read again" in the figures strip as the way back. But the strip is shown only with a
+     * cut list, so a read whose SCAN failed — which is every zero-cut read, since the engine
+     * exits 1 with "No cuts found" — or came back with no list left NO read control on screen:
+     * the panel said "That read found no cuts on this sequence — nothing to tick" under an
+     * empty page and a gear badge, and the only way to try again was to close the panel.
+     * Reported by the product owner on 3.89, 24 Sep. readStage(-1) re-showed #step1body, which was still
+     * inside the hidden #step1. So whenever the panel comes to rest without the strip, step 1
+     * and its Read button are back; with the strip, step 1 stays folded as the revamp meant. */
+    function offerRead() {
+        var strip = !el.figstrip.hidden;
+        show(el.step1, !strip);
+        if (!strip) {
+            show(el.step1body, true);
+            el.step1.className = "step";
+        }
     }
 
     /* Both the scan and the export invoke xmlcut the same way — only the output folder
@@ -1004,7 +1046,22 @@
             "B\u1ea5m H\u1ee7y nay d\u1eebng h\u1eb3n, kh\u00f4ng \u0111\u1ec3 l\u1ea1i file d\u1edf dang. Audio: gi\u1eef gain, fade v\u00e0 audio trong nested sequence; 1 file audio l\u1ed7i kh\u00f4ng c\u00f2n l\u00e0m h\u1ecfng c\u1ea3 file mix."
     ].concat(CL_388);
 
+    /* 3.90 — where an export lands, decided by the product owner with Tech on 24 Sep:
+     * <product>/Output/ACT/<version>/, flat. Five lines, in what an editor sees: the new
+     * place, what the panel needs to find it, what it does about ACT/ and a version folder
+     * that exists, the two cases it refuses (round 2: another sequence's delivery, the other
+     * mode), and the two 3.89 regressions this release fixes (the Read button that did not
+     * come back, and the read that wrongly found no cuts). */
+    var CL_390 = [
+            "XU\u1ea4T V\u00c0O TH\u01af M\u1ee4C S\u1ea2N PH\u1ea8M: clip ra th\u1eb3ng <s\u1ea3n ph\u1ea9m>/Output/ACT/<version>/. Version l\u1ea5y t\u1eeb t\u00ean sequence: \u201cv1.2\u201d, \u201cvid 13.0\u201d hay \u201c1.1\u201d; \u201cv1,2\u201d b\u1ecb t\u1eeb ch\u1ed1i.",
+            "Project m\u1edf t\u1eeb SAMX_WORKSPACE th\u00ec panel t\u1ef1 bi\u1ebft s\u1ea3n ph\u1ea9m, n\u1ebfu kh\u00f4ng th\u00ec Save to l\u00e0 th\u01b0 m\u1ee5c s\u1ea3n ph\u1ea9m. Kh\u00f4ng c\u00f3 Output/ hay version trong t\u00ean th\u00ec kh\u00f4ng xu\u1ea5t.",
+            "Ch\u01b0a c\u00f3 Output/ACT th\u00ec panel b\u00e1o tr\u01b0\u1edbc v\u00e0 t\u1ef1 t\u1ea1o khi Export; \u0111\u00e3 c\u00f3 folder c\u00f9ng version (v\u00ed d\u1ee5 V1.0) th\u00ec d\u00f9ng l\u1ea1i, kh\u00f4ng t\u1ea1o th\u00eam.",
+            "Folder version \u0111\u00e3 c\u00f3 clip c\u1ee7a SEQUENCE KH\u00c1C (nh\u01b0 9x16 v\u00e0 4x5 c\u00f9ng vid 9.0) hay c\u1ee7a ch\u1ebf \u0111\u1ed9 kia (Source/Timeline Render): panel KH\u00d4NG xu\u1ea5t, n\u00f3i c\u00e1ch x\u1eed l\u00fd.",
+            "S\u1eeda 2 l\u1ed7i c\u1ee7a 3.89: read h\u1ecfng th\u00ec n\u00fat Read timeline hi\u1ec7n l\u1ea1i \u0111\u1ec3 th\u1eed l\u1ea1i; read b\u00e1o nh\u1ea7m \u201ckh\u00f4ng c\u00f3 cut\u201d do th\u01b0 m\u1ee5c t\u1ea1m c\u00f2n file c\u0169, nay d\u1ecdn tr\u01b0\u1edbc m\u1ed7i read."
+    ].concat(CL_389);
+
     var CHANGELOG = {
+        "3.90": CL_390,
         "3.89": CL_389,
         "3.88": CL_388,
         "3.87": CL_387,
@@ -1361,16 +1418,21 @@
         var full = node_._full || "";
         var open = !!node_._open && !!full;
         node_.className = (node_._base || "path") + (open ? " open" : "");
-        node_.textContent = full ? (open ? full : shortPath(full, node_._keep || 40)) : "—";
+        /* A box can carry its own CLOSED label (setPathLabel's 4th argument) when the tail of
+         * the path is not the part that identifies it — #outpath's version folder, below. The
+         * full path is still what it opens to, what it shows on hover, and what Copy copies. */
+        node_.textContent = full
+            ? (open ? full : (node_._label || shortPath(full, node_._keep || 40))) : "—";
         // Kept on the closed box as well: hovering is the cheaper way to check a path you
         // only want to glance at, and it is what this element has always offered.
         node_.title = full || "";
     }
 
-    function setPathLabel(node_, full, keep) {
+    function setPathLabel(node_, full, keep, label) {
         if (!node_) return;
         node_._full = full || "";
         node_._keep = keep || 40;
+        node_._label = (full && label) ? String(label) : "";
         paintPath(node_);
     }
 
@@ -1616,6 +1678,7 @@
         state.types = {};
         state.typesReset = "";
         state.readDone = "";
+        state.readNoCuts = false;          // see renderNext: only a read that got an answer
         /* ⚠️ THE PATH REPAIR DIES WITH THE READ THAT NEEDED IT. --remap is a prefix rewrite
          * over every source path, so one left standing from the last project would silently
          * rewrite this one's — and the paths it rewrote would still resolve to files, so
@@ -1672,9 +1735,10 @@
          * so leaving it up while the read runs would show an error about a state that has
          * just been replaced. */
         say("seq", "error", "");
-        // The destination is named after the sequence, so it is unknown again until this
-        // read answers. Leaving the old sequence's folder on screen would name the wrong
-        // one — the same staleness as the clip table above.
+        // The destination depends on this read — the version is in the sequence name and the
+        // product can be in the project's path — so it is unknown again until the read
+        // answers. Leaving the old one on screen would name the wrong folder — the same
+        // staleness as the clip table above.
         setOutDest();
         setBusy(true, "Reading…");
         readStage(0);
@@ -1728,6 +1792,7 @@
              * so the comparison at export time has something to compare against. */
             state.readFp = "";
             state.seqDrift = false;
+            state.seqRenamed = "";
             cs.evalScript("activeSequenceStamp(true)", function (sraw) {
                 var sr = null;
                 try { sr = JSON.parse(sraw); } catch (eS) {}
@@ -2200,12 +2265,12 @@
         // `!state.busy` is load-bearing, not belt-and-braces: setBusy() disables Read and
         // the pickers but never touched Export, so it stayed live through a read — and
         // during a read state.dump still points at the PREVIOUS sequence.
-        var ready = !!(state.dump && state.script && state.out && n > 0) && !state.busy;
+        var ready = !!(state.dump && state.script && haveDest() && n > 0) && !state.busy;
         el["export"].disabled = !ready;
         // Openable as soon as there is a root, not only once clips exist: checking where the
         // files will land is a thing you do BEFORE committing, which is the whole reason this
         // sits beside Export rather than in the report.
-        el.openout.disabled = !state.out;
+        el.openout.disabled = !haveDest();
         el["export"].textContent = exportLabel(n);
         /* ⚠️ A DEAD BUTTON THAT EXPLAINS ITSELF.
          *
@@ -2231,7 +2296,7 @@
          * reason goes beside it. */
         say("exportwait", "info",
             (state.scanning && !state.running
-             && !!(state.dump && state.script && state.out && n > 0))
+             && !!(state.dump && state.script && haveDest() && n > 0))
                 ? ("Waiting for the cut list to finish reading. The button comes back on "
                    + "its own.")
                 : "");
@@ -2266,8 +2331,14 @@
         } else if (!state.script) {
             msg = "Cut script missing — open ⚙ and press Re-check.";
             cls += " error";
-        } else if (el.report && el.report.hidden === false && failedRows().length) {
-            /* THE FAILURE HEADLINE, in the line that is already at the top of the panel. The
+        } else if (el.report && el.report.hidden === false && failedRows().length
+                   && !(state.clips.length && haveDest() && resolveDest().why)) {
+            /* ⚠️ NOT WHEN THE DESTINATION IS REFUSED (3.90 round 3). "Retry below" then offers a
+             * press that is refused — measured after a mode switch into the folder of the other
+             * mode: the dest row refused while this line still said "1 clip did not write … Retry
+             * below". The destination branch further down speaks instead.
+             *
+             * THE FAILURE HEADLINE, in the line that is already at the top of the panel. The
              * rows carry their own reasons and the bar carries the count, but both are below a
              * table that can be nineteen rows long — and "some of your clips are missing" is
              * not something to scroll for. When every failure shares a reason, it is said
@@ -2304,9 +2375,12 @@
              * where a capability boast costs no pixels. */
             msg = "Open your sequence in Premiere, then press Read timeline. "
                 + "Nothing is written until Export.";
-        } else if (!state.out) {
-            msg = "Choose a folder to save into.";
         } else if (!state.clips.length) {
+            /* ⚠️ BEFORE THE DESTINATION BRANCHES (3.90 round 2). With no list there is nothing to
+             * export whatever the folder, and what to act on is the read. MEASURED on the
+             * integrated build: a read whose scan was refused, on a sequence whose name has no
+             * version, said "the destination needs fixing first" — and after fixing the name
+             * he would still have had no list. */
             /* ⚠️ AN EMPTY LIST IS NOT AN UNTICKED ONE, and this branch is the difference.
              *
              * Without it a read that came back with no cuts fell into the sentence below and
@@ -2318,8 +2392,27 @@
              * to the rail, which sorts errors to the top and is where the cause already is.
              * Deliberately not "the message above says why": a scan that exits 0 with an
              * empty cut list would leave that pointing at no row at all. */
-            msg = "That read found no cuts on this sequence — nothing to tick, and nothing "
-                + "to export yet.";
+            /* ⚠️ AND "NO CUTS" ONLY WHEN THE ENGINE SAID SO. This said "found no cuts" after
+             * ANY read that ended with an empty list — including one whose scan was refused
+             * or never ran. MEASURED on 3.89, 24 Sep: a real 65-clip timeline whose scan the
+             * engine refused ("--out … already holds an export") showed "That read found no
+             * cuts on this sequence" — a claim about the timeline that was false, on the one
+             * screen the editor had to decide what to do next. */
+            msg = state.readNoCuts
+                ? "That read found no cuts on this sequence — nothing to tick, and nothing "
+                  + "to export yet."
+                : "That read did not finish, so nothing is listed yet — the message above "
+                  + "says why. Press Read timeline to try again.";
+            cls += " warn";
+        } else if (!haveDest()) {
+            msg = "Choose a folder to save into.";
+        } else if (resolveDest().why) {
+            /* 3.90 · A DESTINATION THAT WILL BE REFUSED IS NOT "READY". The reason itself is on
+             * the dest row — setOutDest() and refuseIfNoDest() both put it there, in the one
+             * sentence doExport() refuses with — so this line says only that Export is
+             * blocked and where the reason is, rather than restating it a second time. */
+            msg = "Nothing can be exported yet — the destination needs fixing first; the "
+                + "note on the rail says how.";
             cls += " warn";
         } else if (!n) {
             // There is no file type to pick in render mode — the chips are not on screen.
@@ -2328,8 +2421,10 @@
                 : "Nothing is ticked yet — pick at least one clip or file type.";
             cls += " warn";
         } else {
+            // The product and the version, which are the two things that can be wrong.
+            var rd = resolveDest();
             msg = "Ready. " + n + " clip" + (n === 1 ? "" : "s") + " will be written into "
-                + (seqFolder() ? seqFolder() + "/" : "the folder above") + ".";
+                + (rd.ok ? destTail(rd) + "/" : "the folder above") + ".";
             cls += " good";
         }
         el.nextline.textContent = msg;
@@ -2530,133 +2625,828 @@
 
     /* ----------------------------------------------------------- exporting */
 
-    /* "Save to" is a ROOT you pick once. Each export creates <root>/<sequence>/ inside it
-     * and writes there.
+    /* ════════════════════ 3.90 · WHERE AN EXPORT LANDS: <product>/Output/ACT/<version>/
      *
-     * Why it matters beyond tidiness: xmlcut numbers its output 01..N per run, so cutting
-     * three sequences into one folder interleaved three sets of 01_, 02_, 03_ … and the
-     * later runs overwrote the earlier ones wherever a name collided. A folder per sequence
-     * keeps each run's numbering meaning what it says.
+     * Decided by the product owner on 24 Sep 2026; the layout is Tech's. The team drive
+     * SAMX_WORKSPACE holds one folder per product — Asset/, Output/, Sources/ — and Output/
+     * is where finished work is delivered: Tech's own per-channel folders are already there.
+     * This tool's raw beat-cut exports now go beside them, in ACT/, one folder per version
+     * of the edit:
      *
-     * The folder name comes from the HOST (`safe_name`), which already has to turn a
-     * sequence name into a legal folder name for the read folder. folderSafe() below is
-     * only reached by a panel newer than the host.jsx beside it, which reinstalling fixes;
-     * it can disagree about the name but never about what gets cut. */
-    function folderSafe(name) {
-        var s = String(name === null || name === undefined ? "" : name);
-        var out = "", ch, c;
-        for (var i = 0; i < s.length; i++) {
-            ch = s.charAt(i);
-            c = s.charCodeAt(i);
-            if (c < 32) continue;                                   // control characters
-            out += (ch === "/" || ch === ":" || ch === "\\") ? "-" : ch;
+     *     SAMX_WORKSPACE/<product>/Output/ACT/<version>/01_…mp4
+     *
+     * It REPLACES <Save to>/<sequence>/raw|edited/, and two things went with that:
+     *
+     *   · the folder named after the sequence. The folder is named after the VERSION now,
+     *     and the version is read off the sequence name (seqVersion) — never off a folder,
+     *     since a product can itself be called "Brand 2.0".
+     *   · raw/ and edited/. The files sit FLAT in the version folder, so a Source export and
+     *     a Timeline Render export of one sequence share it. What that does to the first
+     *     run's files was measured with the engine, not assumed — CLAUDE.md, "3.90".
+     *
+     * Four questions, each answered in one place, always in this order:
+     *
+     *   WHICH PRODUCT   the open project when it lives inside SAMX_WORKSPACE, otherwise
+     *                   Save to                                      projectProduct()
+     *                                                                saveToProduct()
+     *   IS IT ONE       it has an Output/ — which this panel NEVER creates    resolveDest()
+     *   WHICH VERSION   the sequence name, and only the name                  seqVersion()
+     *   WHICH FOLDER    an ACT/ folder that already IS that version beats a
+     *                   second one                                            resolveDest()
+     *
+     * ⚠️ ONE ANSWER FOR EVERYTHING. outDir() is still the single chokepoint — the argv's -o,
+     * renderDir() and so _renders, report/, the manifest the report reads, Show in Finder,
+     * Copy, the "already holds N files" notice and the Ready line all go through it or
+     * through resolveDest() underneath it — so none of them can name a folder the export is
+     * not writing. It is answered AFRESH on each call, never cached: every question is asked
+     * of the disk (is there an Output/, how is ACT/ really spelled, is v1.2 already there),
+     * and a cached answer is how a folder Tech creates between the read and the Export would
+     * be missed, or one he renames would be written to under its old spelling. */
+
+    /* THE VERSION, read off the SEQUENCE NAME. The structures are the team's own names,
+     * neutralised:
+     *
+     *     "Brand v3.2 [a.b][c.d]"             v3.2
+     *     "Brand v3.0 a.b][c.d]"              v3.0    a handle whose "[" went missing is still one
+     *     "Brand V1.2 [C.a.b][c.d]"           v1.2    the v is always written lowercase
+     *     "Brand vid 13.0 [a.b][c.d] v3"      v13.0   a vid number beats a v number
+     *     "Brand vid35.1 [a.b] [c.d]"         v35.1
+     *     "S17"                               refused — there is nothing to name a folder
+     *
+     * ⚠️ BRACKETS ARE EDITOR HANDLES AND ARE NEVER READ. A handle can hold a v and a digit
+     * ("[ed.v2]"), and counting it would name a delivery folder after a person. Balanced
+     * [...] goes first, then what a broken bracket leaves: a token ending in a closing
+     * bracket (the real "a.b][c.d]" shape, whose opening "[" went missing) or starting with
+     * an opening one.
+     *
+     * ⚠️ NO LITERAL SQUARE BRACKET IN THESE REGEXES, and not for style: the self-updater
+     * refuses a .js whose [ and ] do not balance when counted naively, comments and strings
+     * included (release_file_complaint() in xmlcut.py). An escaped closing
+     * bracket in a pattern is a closing bracket with no opening one, and three of them made
+     * this very file read as "damaged" to every installed copy — measured: check_update.py,
+     * "has 3 more closing than opening square bracket(s)". \x5B and \x5D are the same
+     * characters to the regex and invisible to the count.
+     *
+     * ⚠️ A v OR vid STARTS A TOKEN — the start of the name, or anything that is not a letter
+     * or digit before it ("_v7" is v7, "Rev3" is nothing) — and the number has to END one.
+     * "v3.2a" is no version at all rather than v3: the tail is a lookahead refusing a letter,
+     * a digit, ".digit" or ",digit" after the number, so the regex cannot back off to a
+     * shorter one.
+     *
+     * ⚠️ ",digit" BECAUSE A COMMA IS THE TEAM'S DECIMAL MARK. Vietnamese writes 1,2 for 1.2,
+     * and without the comma in that lookahead "Brand v1,2" read as v1 — measured on a tree
+     * shaped like the real one (ACT/ holding v1.0, v1.1, v1.2): the export went into the
+     * existing, already-delivered ACT/v1.0/. "v1,2" is therefore NO version, refused with a
+     * sentence that says to write the dot. "v1.2, final" and "v1.2,final" are still v1.2:
+     * only a comma followed by a DIGIT is a decimal comma.
+     *
+     * ⚠️ "A LETTER" IS NOT ONLY A-Z. The team names things in Vietnamese, and "Phởv1" read as
+     * v1 while "Việtv1.2" did not — only because the letter before the v happened to be an
+     * ASCII t. VERSION_LETTER spells out the Latin, Greek and Cyrillic letters and the
+     * combining marks a decomposed "ở" leaves before the v, as \u ranges rather than \p{L}:
+     * a regex this runtime cannot compile is a SyntaxError that takes the whole panel down
+     * with it, and \p{} needs a newer Chromium than every CEP build this panel installs into.
+     *
+     * ⚠️ TWO DIFFERENT NUMBERS ARE REFUSED, NEVER PICKED BETWEEN. They name two folders, and
+     * guessing would put a whole export into the wrong version's delivery with nothing on
+     * screen to say so. The same number twice is one version (sameVersion: "v1" and "v1.0"
+     * agree). A v number after a vid number is not a second version — "vid 13.0 … v3" is a
+     * real name, and the vid is the version.
+     *
+     * ⚠️ A REFUSED NAME THAT VISIBLY HOLDS A VERSION SAYS WHY IT WAS NOT READ. "Brand V 1.2",
+     * "Brand v.1.2", "Brand [v1.2]", "Brand v1,2" and "Brand v3.2a" are all refused, which
+     * is safe — but "has no version, add one such as v1.2" over a name that plainly has one
+     * sends him looking for a bug. So when a v (or vid) that starts a token is followed,
+     * within a space, a dot or a comma, by a digit, the sentence names the forms that are
+     * not read instead.
+     *
+     * Returns {version: "v13.0", why: ""}, the digits and dots exactly as written, or
+     * {version: "", why: <the refusal, one sentence>}. */
+    var VERSION_LETTER = "A-Za-z0-9\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u024F"
+        + "\\u0300-\\u036F\\u0370-\\u03FF\\u0400-\\u04FF\\u1E00-\\u1EFF";
+    var VERSION_RE_SRC = "(^|[^" + VERSION_LETTER + "])(vid\\s*|v)(\\d+(?:\\.\\d+)*)"
+        + "(?!\\.?[" + VERSION_LETTER + "]|,\\d)";
+    var VERSION_LOOKALIKE = new RegExp("(^|[^" + VERSION_LETTER + "])v(?:id)?[\\s.,]*\\d", "i");
+    /* ⚠️ A BARE DOTTED NUMBER IS A VERSION TOO — but only as the LAST resort, and only one
+     * that stands on its own. Bom, 24 Sep: a whole product names its sequences with no v at
+     * all — "<Brand> 1.1 […] […]", "… 1.2 …", "… 1.1 … Copy 01" are the real names of one
+     * product in SAMX_WORKSPACE — and a rule that refused them refused the very product the
+     * layout was first tested on. So when there is no vid and no v number, a number WITH A
+     * DOT that starts and ends a token is the version: "Brand 1.1" is v1.1. Without a dot it
+     * is not ("GV 2", "VAP 4", "Copy 01" stay refused), and one glued to letters is not
+     * ("FB9.16(O) …" is an aspect label, and "9x16" / "4x5" have no dot). Two different ones
+     * are refused like two v numbers. A name that TRIES to write a v and fails ("Brand V 1.2")
+     * keeps its own sentence (VERSION_LOOKALIKE comes first), rather than being read by the
+     * back door as its bare "1.2". */
+    var VERSION_BARE_SRC = "(^|[^" + VERSION_LETTER + ".])(\\d+\\.\\d+(?:\\.\\d+)*)"
+        + "(?!\\.?[" + VERSION_LETTER + "]|,\\d)";
+
+    function seqVersion(name) {
+        var raw = String(name === null || name === undefined ? "" : name);
+        var s = raw.replace(/\x5B[^\x5D]*\x5D/g, " ")   // [a.b][c.d]
+                   .replace(/\S*\x5D/g, " ")             // a.b] — the broken one, its [ lost
+                   .replace(/\x5B\S*/g, " ");            // [a.b — its mirror, the ] lost
+        // A fresh RegExp per call: a shared /g one carries lastIndex from the last name.
+        var re = new RegExp(VERSION_RE_SRC, "gi");
+        var vids = [], vs = [], m, i;
+        while ((m = re.exec(s)) !== null) {
+            var isVid = /^vid/i.test(m[2]);
+            var list = isVid ? vids : vs;
+            var dup = false;
+            for (i = 0; i < list.length; i++) {
+                if (sameVersion(list[i].version, "v" + m[3])) { dup = true; break; }
+            }
+            // `said` is the number as the reader will recognise it in their own name.
+            if (!dup) list.push({ version: "v" + m[3], said: (isVid ? "vid " : m[2]) + m[3] });
         }
-        out = out.replace(/^[\s.]+/, "").replace(/[\s.]+$/, "");
-        if (!out) out = "Untitled Sequence";
-        return out.length > 80 ? out.substring(0, 80) : out;
+        var q = "“" + raw + "”";
+        var pick = vids.length ? vids : vs;
+        if (pick.length > 1) {
+            return { version: "", two: true, why: "The sequence name " + q + " has two different "
+                + (vids.length ? "vid numbers" : "versions") + ", " + pick[0].said + " and "
+                + pick[1].said + " — keep only one in the name, then press Read again." };
+        }
+        if (!pick.length && !VERSION_LOOKALIKE.test(raw)) {
+            var bre = new RegExp(VERSION_BARE_SRC, "g"), bares = [];
+            while ((m = bre.exec(s)) !== null) {
+                var bdup = false;
+                for (i = 0; i < bares.length; i++) {
+                    if (sameVersion(bares[i].version, "v" + m[2])) { bdup = true; break; }
+                }
+                if (!bdup) bares.push({ version: "v" + m[2], said: m[2] });
+            }
+            if (bares.length > 1) {
+                return { version: "", two: true, why: "The sequence name " + q + " has two "
+                    + "different version numbers, " + bares[0].said + " and " + bares[1].said
+                    + " — keep only one in the name, then press Read again." };
+            }
+            if (bares.length) return { version: bares[0].version, said: bares[0].said, why: "" };
+        }
+        if (!pick.length && VERSION_LOOKALIKE.test(raw)) {
+            return { version: "", why: "The sequence name " + q + " has no version the panel "
+                + "can read — “v1.2” or “vid 13.0” is read, but not a v with a space or "
+                + "a dot before its number, a comma for the decimal point (write “v1.2”, "
+                + "not “v1,2”), a letter glued on, or anything inside brackets. Fix it in "
+                + "Premiere, then press Read again." };
+        }
+        if (!pick.length) {
+            return { version: "", why: "The sequence name " + q + " has no version — add "
+                + "one such as “v1.2” or “vid 13.0” to it in Premiere, "
+                + "then press Read again." };
+        }
+        return { version: pick[0].version, said: pick[0].said, why: "" };
     }
 
-    function seqFolder() {
-        if (!state.info) return "";
-        return String(state.info.safe_name || folderSafe(state.info.sequence));
+    /* A version one step on, spelt the way the name spells it — "vid 9.0" -> "vid 9.1",
+     * "v1.2" -> "v1.3" — for the sentence that asks him to give this sequence another
+     * version. ⚠️ IN THE NAME'S OWN FORM, never the folder's: on "Brand vid 9.0 … v3 4x5" the
+     * vid number is the version, so suggesting "v9.1" would have him add a v number that the
+     * vid number then overrules, and the export would still be v9.0.
+     *
+     * ⚠️ A MINOR STEP, AND ONE THAT IS FREE (3.90 round 3). "vid 9" came out "vid 10" — a new
+     * major version for what is a variant of 9 — so a number with no dot gets ".1". And a step
+     * whose version folder ACT/ (`act`) already has is skipped: measured, after the sequence
+     * that owned v9.0 was renamed to vid 9.1 as the sentence said, the sentence went on
+     * suggesting "vid 9.1" for the other one. */
+    function nextSaid(said, act) {
+        var m = /^(.*?)(\d+(?:\.\d+)*)$/.exec(String(said || ""));
+        if (!m) return "";
+        var g = m[2].split(".");
+        if (g.length === 1) g.push("0");
+        for (var tries = 0; tries < 50; tries++) {
+            g[g.length - 1] = String(parseInt(g[g.length - 1], 10) + 1);
+            var v = "v" + g.join(".");
+            if (!act || !childDir(act, function (n) { return sameVersion(n, v); }, v)) {
+                return m[1] + g.join(".");
+            }
+        }
+        return "";
     }
 
-    /* RAW OR EDITED, one subfolder per kind of output.
-     *
-     * "make the timeline export into the edited folder, and source export into the raw folder"
-     * — and the reason it was asked for is a collision he hit: a source run and a timeline run
-     * of the same sequence landed in one folder, both numbering their output 01..N, so the
-     * second run's 01–06 overwrote the first's. Two folders make the two kinds of output
-     * un-collidable and say which is which without opening a file.
-     *
-     * ⚠️ This does NOT stop two runs of the SAME kind colliding — two timeline exports still
-     * both write into edited/ — which is a separate problem and still open.
-     *
-     * Read off state.cutFrom, which is the same value doExport() and renderSpec() branch on.
-     * There is deliberately no second way of asking "am I in render mode". */
-    function outKind() {
-        return state.cutFrom === "render" ? "edited" : "raw";
+    /* "v1", "v1.0" and "V1.0.0" are ONE version; "v1.2" and "v1.20" are two. Each group is
+     * an integer and trailing .0 groups are dropped, so a folder Tech made as "v1.0" is the
+     * one a sequence called "… v1 …" delivers into, instead of a second folder beside it.
+     * "" for anything that is not a version folder name at all. */
+    function versionKey(v) {
+        var m = /^\s*v(\d+(?:\.\d+)*)\s*$/i.exec(String(v === null || v === undefined ? "" : v));
+        if (!m) return "";
+        var g = m[1].split(".");
+        for (var i = 0; i < g.length; i++) g[i] = String(parseInt(g[i], 10));
+        while (g.length > 1 && g[g.length - 1] === "0") g.pop();
+        return g.join(".");
     }
 
-    /* Where THIS export writes. Empty until a sequence has been read, since the folder is
-     * named after it. Everything that touches the output — the argv, the manifest the
-     * report is built from, Show in Finder, the destination notice, renderDir() — goes
-     * through here so they cannot disagree. */
+    function sameVersion(a, b) {
+        var ka = versionKey(a);
+        return !!ka && ka === versionKey(b);
+    }
+
+    /* THE PRODUCT, when the open project says so: ".../SAMX_WORKSPACE/<Product>/Asset/
+     * project/<name>.prproj" -> ".../SAMX_WORKSPACE/<Product>". The segment after
+     * SAMX_WORKSPACE has to be a FOLDER, so a project saved loose in SAMX_WORKSPACE itself
+     * names no product. Case-insensitive, because the drive's spelling is Tech's to choose.
+     *
+     * ⚠️ THE PROJECT WINS OVER SAVE TO. It is the one fact about which product this edit
+     * belongs to that the editor did not have to set by hand; Save to is a remembered
+     * preference that was last pointed at whatever product he worked on before. */
+    function projectProduct(projectPath) {
+        var parts = String(projectPath || "").split("/");
+        for (var i = 0; i < parts.length - 2; i++) {
+            if (parts[i].toLowerCase() === "samx_workspace" && parts[i + 1]) {
+                return parts.slice(0, i + 2).join("/");
+            }
+        }
+        return "";
+    }
+
+    /* THE PRODUCT, from Save to. He points Save to at the product folder — but picking its
+     * Output/, its Output/ACT/ or a version folder inside ACT/ is the same intention and
+     * resolves to the same product, by name and case-insensitively, walking up. Anything else
+     * is taken as the product itself and then has to pass the Output/ test like any other. */
+    function saveToProduct(p) {
+        var at = String(p || "").replace(/\/+$/, "");
+        if (!at) return "";
+        var up1 = path.dirname(at), up2 = path.dirname(up1);
+        var low = function (x) { return path.basename(x).toLowerCase(); };
+        if (low(up1) === "act" && low(up2) === "output") return path.dirname(up2);
+        if (low(at) === "act" && low(up1) === "output") return up2;
+        if (low(at) === "output") return up1;
+        return at;
+    }
+
+    function isDir(p) {
+        try { return !!p && fs.statSync(p).isDirectory(); } catch (e) { return false; }
+    }
+
+    /* A child FOLDER by a rule rather than by a spelling — Tech's own example wrote "output"
+     * — returning its REAL name, so every path this panel builds carries the spelling that is
+     * on the drive (a case-sensitive volume would otherwise get a second folder). Sorted, so
+     * two candidates always resolve the same way; the preferred spelling wins outright. */
+    function childDir(dir, match, prefer) {
+        var names;
+        try { names = fs.readdirSync(dir); } catch (e) { return ""; }
+        names = names.map(String).sort();
+        var hit = "";
+        for (var i = 0; i < names.length; i++) {
+            if (!match(names[i]) || !isDir(path.join(dir, names[i]))) continue;
+            if (names[i] === prefer) return names[i];
+            if (!hit) hit = names[i];
+        }
+        return hit;
+    }
+
+    /* The name of a child that is NOT a folder but has the name a folder is about to be made
+     * under — any case, since the team drive, like the Mac's own disk, treats "act" and "ACT"
+     * as one name. "" when there is none. */
+    function blockingFile(dir, name) {
+        var names, want = String(name).toLowerCase();
+        try { names = fs.readdirSync(dir); } catch (e) { return ""; }
+        for (var i = 0; i < names.length; i++) {
+            var n = String(names[i]);
+            if (n.toLowerCase() === want && !isDir(path.join(dir, n))) return n;
+        }
+        return "";
+    }
+
+    /* Said after every refusal that is about the OPEN PROJECT's product. The project wins over
+     * Save to, so "point Save to at the product folder" — the fix for the Save-to refusals —
+     * would change nothing here, and the box beside it shows the project's product for the
+     * same reason (paintOutPath). The remedy for a product with no Output/ is also not the
+     * editor's: Tech sets up each product's Output/, which is why that sentence says to ask
+     * Tech rather than, as the spec's Save-to sentence does, to open another project. */
+    var NOT_SAVE_TO = "Save to is not used while a project from SAMX_WORKSPACE is open.";
+
+    /* The destination, and every reason there is none. `ok` false with an empty `why` means
+     * there is nothing to talk about yet (no read, or no folder at all — the lit Save to
+     * frame covers that); a `why` is the refusal, said on the dest row AND by doExport(). */
+    function resolveDest() {
+        var d = { ok: false, dir: "", product: "", from: "", output: "", act: "",
+                  actExists: false, version: "", versionDir: "", versionExists: false,
+                  why: "" };
+        if (!state.info) return d;
+        d.product = projectProduct(state.info.project_path);
+        d.from = d.product ? "project" : "saveto";
+        if (!d.product) d.product = saveToProduct(state.out);
+        if (!d.product) return d;
+        var why = [], at = shortPath(d.product, 44);
+        /* ⚠️ Output/ IS NEVER CREATED HERE, and that is the whole test of "is this a product
+         * folder". Making it would turn any folder Save to happens to point at — the default
+         * is ~/Desktop/xmlcut clips — into a fake product with a delivery tree in it. */
+        if (!isDir(d.product)) {
+            if (d.from === "project") {
+                why.push("The open project's product folder " + at + " isn’t reachable — "
+                    + "reconnect the shared drive, then press Read again. " + NOT_SAVE_TO);
+            } else if (!canCreate(d.product)) {
+                // The unmounted share: the sentence 3.89 said, for the same population.
+                why.push("Save to " + at + " isn’t there, and the export cannot create it. "
+                    + "Reconnect the drive or share it lives on, or choose another folder.");
+            } else {
+                why.push(at + " isn’t a product folder (it has no Output/), so nothing can "
+                    + "be exported there — open the product’s project from SAMX_WORKSPACE, "
+                    + "or point Save to at the product folder.");
+            }
+        } else {
+            var o = childDir(d.product, function (n) { return n.toLowerCase() === "output"; },
+                             "Output");
+            if (o) {
+                d.output = path.join(d.product, o);
+            } else if (d.from === "project") {
+                why.push("The open project's product folder " + at + " has no Output/, so "
+                    + "nothing can be exported there — ask Tech to set up its Output/ "
+                    + "folder; this panel never creates one. " + NOT_SAVE_TO);
+            } else {
+                why.push(at + " isn’t a product folder (it has no Output/), so nothing can "
+                    + "be exported there — open the product’s project from SAMX_WORKSPACE, "
+                    + "or point Save to at the product folder.");
+            }
+        }
+        var v = seqVersion(state.info.sequence);
+        if (v.why) why.push(v.why);
+        d.version = v.version;
+        if (why.length) {
+            d.why = why.join(" ");
+            return d;
+        }
+        /* ACT/ by its real spelling when it is there. When it is not, "ACT" — the one fixed
+         * name, the same for every product and every editor — and the engine's own
+         * mkdir(parents) makes it, which is safe only because Output/ was just seen above. */
+        var a = childDir(d.output, function (n) { return n.toLowerCase() === "act"; }, "ACT");
+        d.actExists = !!a;
+        d.act = path.join(d.output, a || "ACT");
+        var vd = d.actExists
+            ? childDir(d.act, function (n) { return sameVersion(n, d.version); }, d.version)
+            : "";
+        /* ⚠️ A FILE WHERE A FOLDER HAS TO GO IS A REFUSAL, NOT "WILL CREATE IT". childDir()
+         * asks for folders only, so a FILE called ACT (or act) read as "no ACT/ yet": the row
+         * said "Export will create it" and "Ready", and the export then died on the engine's
+         * mkdir (NotADirectoryError) or on Premiere's (ENOTDIR) — measured, with the false
+         * "will create it" still on the rail afterwards. The same for a file named like the
+         * version folder inside ACT/ (EEXIST, with the rail silent). Said before anything
+         * runs, naming the file, so it can be moved. */
+        var blocker = !d.actExists ? blockingFile(d.output, "ACT")
+                    : (!vd ? blockingFile(d.act, d.version) : "");
+        if (blocker) {
+            var holder = !d.actExists ? d.output : d.act;
+            d.why = path.basename(holder) + "/ in " + shortPath(path.dirname(holder), 44)
+                + " holds a FILE called “" + blocker + "” where the "
+                + (!d.actExists ? "ACT" : d.version) + "/ folder has to go, so nothing can be "
+                + "exported there — move or rename that file, then export again.";
+            return d;
+        }
+        d.versionExists = !!vd;
+        d.versionDir = vd || d.version;
+        d.dir = path.join(d.act, d.versionDir);
+        d.ok = true;
+        d.said = v.said || d.version;
+        /* ⚠️ A VERSION FOLDER ANOTHER EXPORT ALREADY OWNS IS A REFUSAL (the product owner, 24 Sep): another
+         * sequence's delivery, or this sequence's in the other mode. `taken` keeps `dir` so the
+         * box and Show in Finder still point at the folder the sentence is about, while
+         * `ok` false keeps outDir() — and so every door — shut. See folderTaken(). */
+        if (d.versionExists) {
+            var taken = folderTaken(d);
+            if (taken) {
+                d.ok = false;
+                d.taken = true;
+                d.why = taken;
+            }
+        }
+        return d;
+    }
+
+    /* Where THIS export writes, or "" when it may not write anywhere. Everything that
+     * touches the output goes through here — see the block above. */
     function outDir() {
-        if (!state.out) return "";
-        var f = seqFolder();
-        return f ? path.join(state.out, f, outKind()) : state.out;
+        var d = resolveDest();
+        return d.ok ? d.dir : "";
     }
 
-    function countIn(dir) {
+    /* "Brand 1.0/Output/ACT/v1.2" — the part of the path that says which product and which
+     * version, for sentences. The full path is on the boxes that can open. */
+    function destTail(d) {
+        if (!d || !d.ok) return "";
+        return path.basename(d.product) + "/" + path.relative(d.product, d.dir);
+    }
+
+    /* WHAT AN EARLIER EXPORT LEFT IN A FOLDER — its clips, counted, and the sequence its
+     * manifest says it cut. Both the dest row and the clash row count through here, so the
+     * two can no longer disagree about one folder.
+     *
+     * ⚠️ ONLY FILES, AND NOT THE ENGINE'S OWN. Measured on a folder holding 19 clips: the dest
+     * row said "already holds 23 file(s)" (manifest.json, manifest.csv, clips.csv and report/
+     * counted as files) and the clash row "21 clip(s)" (manifest.csv and report/). Folders —
+     * report/, _renders/, _earlier_export/ — are never clips, and neither is the bookkeeping
+     * the engine writes beside them.
+     *
+     * ⚠️ AND ONLY WHAT THE ENGINE NAMES A CLIP (3.90 round 3): its CUT_FILE_RE — "NN_…" with a
+     * media extension — and its two mixes. Everything else was counted, so a notes.txt or a
+     * Thumbs.db left behind after "move that folder's clips out first" kept another sequence's
+     * folder refused (measured: clipsIn=2, the full refusal, for a folder holding no clip at
+     * all). A name test and no stat, so this costs one readdir on the shared drive. */
+    var CLIP_FILE_RE = /^\d+_.*\.(?:mp4|mov|mkv|m4v|m4a|wav|mp3|aac)$/i;
+    var MIX_FILE_RE = /^_(?:timeline_audio|track_A\d+)\.(?:mp3|m4a|wav|aac)$/i;
+
+    function clipNames(dir) {
+        var names, out = [];
+        if (!dir) return out;
+        try { names = fs.readdirSync(dir); } catch (e) { return out; }
+        for (var i = 0; i < names.length; i++) {
+            var nm = String(names[i]);
+            if (CLIP_FILE_RE.test(nm) || MIX_FILE_RE.test(nm)) out.push(nm);
+        }
+        return out;
+    }
+
+    function clipsIn(dir) { return clipNames(dir).length; }
+
+    /* WHAT THE EXPORT ALREADY IN A FOLDER WAS, off its manifest.json: the sequence it was cut
+     * from (Premiere's id when the engine recorded one, and the name), the mode, and how many
+     * clips it ENCODED. null when there is no readable manifest.
+     *
+     * ⚠️ ENCODED, THE ENGINE'S OWN TEST (export_held_in): a row whose status is `ok` or
+     * `skipped_existing`. A manifest that lists only pending or dry-run rows — a scan, a
+     * preview — delivered nothing, so it owns nothing. Every field is optional: a manifest
+     * from before the engine recorded the id (3.90) has none, one from before cut_from has no
+     * mode, and a readable file of some other shape is simply no export. */
+    function folderExport(dir) {
+        var m;
         try {
-            return fs.readdirSync(dir).filter(function (n) {
-                return n.charAt(0) !== ".";
-            }).length;
+            m = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
         } catch (e) {
-            return 0;
+            return null;
+        }
+        if (!m || typeof m !== "object") return null;
+        var seq = (m.sequence && typeof m.sequence === "object") ? m.sequence : {};
+        var st = (m.settings && typeof m.settings === "object") ? m.settings : {};
+        var rows = Object.prototype.toString.call(m.clips) === "[object Array]" ? m.clips : [];
+        var enc = 0;
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            if (r && typeof r === "object"
+                && (r.status === "ok" || r.status === "skipped_existing")) enc++;
+        }
+        var id = seq.id;
+        return {
+            name: typeof seq.name === "string" ? seq.name : "",
+            id: (typeof id === "string" || typeof id === "number") ? String(id) : "",
+            cutFrom: (st.cut_from === "render" || st.cut_from === "source") ? st.cut_from : "",
+            encoded: enc
+        };
+    }
+
+    /* WHAT THE FOLDER'S LEDGER SAYS OF THE CLIPS STILL IN IT: for each file it records that is
+     * in `present` (the clips on disk now), the sequence it was cut from and its mode.
+     *
+     * ⚠️ WHY THE MANIFEST IS NOT ENOUGH (3.90 round 3). manifest.json describes ONE RUN, and a
+     * run can replace it with a record of nothing: MEASURED through the panel with the real
+     * engine, a Retry whose one clip failed again rewrote it as {missing_source: 1} while all 19
+     * delivered clips stayed — and the folder read as free, so the 4x5 twin was let in (one clip
+     * rewritten in place, 18 moved aside), and so was the other mode (the still replaced with
+     * no !! line, or two clips under one number). A Cancel on the first export (no manifest at
+     * all) and a truncated or deleted manifest did the same. The engine writes
+     * .xmlcut-ledger.json after every clip it puts in place and never lets a run erase an entry
+     * whose file is still there; since 3.90 each entry names its sequence (id and name) beside
+     * the cut_from it always carried. Entries an older engine wrote have no sequence and count
+     * for the mode only. [] for no ledger, an unreadable one, or one of another shape. */
+    function folderLedger(dir, present) {
+        var m, out = [];
+        try {
+            m = JSON.parse(fs.readFileSync(path.join(dir, ".xmlcut-ledger.json"), "utf8"));
+        } catch (e) {
+            return out;
+        }
+        var files = (m && typeof m === "object") ? m.files : null;
+        if (!files || typeof files !== "object"
+            || Object.prototype.toString.call(files) === "[object Array]") return out;
+        for (var name in files) {
+            if (!Object.prototype.hasOwnProperty.call(files, name) || !present[name]) continue;
+            var e = files[name];
+            if (!e || typeof e !== "object") continue;
+            var sq = (e.sequence && typeof e.sequence === "object") ? e.sequence : {};
+            var st = (e.settings && typeof e.settings === "object") ? e.settings : {};
+            out.push({
+                name: typeof sq.name === "string" ? sq.name : "",
+                id: (typeof sq.id === "string" || typeof sq.id === "number") ? String(sq.id) : "",
+                cutFrom: (st.cut_from === "render" || st.cut_from === "source") ? st.cut_from : ""
+            });
+        }
+        return out;
+    }
+
+    /* A sequence name as a person means it: the [..] handles gone (whole, and the broken
+     * "a.b]" / "[a.b" forms seqVersion() strips too), whitespace collapsed, case folded,
+     * trimmed. "Brand vid 9.0 [a.b][c.d] v3" and "brand  VID 9.0 [x.y] v3 " are one name. */
+    function normSeqName(name) {
+        return String(name === null || name === undefined ? "" : name)
+            .replace(/\x5B[^\x5D]*\x5D/g, " ")
+            .replace(/\S*\x5D/g, " ")
+            .replace(/\x5B\S*/g, " ")
+            .replace(/\s+/g, " ")
+            .replace(/^ | $/g, "")
+            .toLowerCase();
+    }
+
+    /* ⚠️ ANOTHER SEQUENCE'S DELIVERY, BY THE SAME VERSION — decided by the product owner on
+     * 24 Sep: REFUSED, and the other sequence is named. "Brand vid 9.0 [a.b][c.d] v3" and its
+     * "… v3 4x5" variant both give v9.0, and one flat folder cannot hold both: measured with
+     * the real engine, a Timeline Render of the 4x5 rewrote all 19 of the 9x16's files in
+     * place, and a Source one moved them to _earlier_export/.
+     *
+     * THE ID DECIDES whenever both ends have one — the manifest records Premiere's sequenceID
+     * (3.90), and the read carries it (state.info.sequence_id). The same id is the same
+     * sequence however it has been renamed since: a handle changed, V for v, a trailing
+     * space. Measured on the previous build, which compared names: every one of those renames
+     * read as "a different sequence". Only when an id is missing on either end (a folder an
+     * older engine wrote, a host that sent none) do the NORMALISED names decide; and a
+     * manifest that names no sequence at all cannot be said to be another's.
+     *
+     * Returns that sequence's name (its id when it has no name), or "". */
+    function otherSequence(fx) {
+        if (!fx) return "";
+        var nowId = readSeqId();
+        if (fx.id && nowId) return fx.id !== nowId ? (fx.name || fx.id) : "";
+        if (!fx.name) return "";
+        return normSeqName(fx.name) !== normSeqName(readSeqName()) ? fx.name : "";
+    }
+
+    var MODE_NAME = { source: "Source Render", render: "Timeline Render" };
+
+    /* THE TWO REASONS A VERSION FOLDER THAT EXISTS CANNOT TAKE THIS EXPORT, as the one
+     * sentence resolveDest() refuses with; "" when it can. Both need the folder to hold CLIPS
+     * (clipNames) and a RECORD of who made them: a folder that is empty, holds only non-clip
+     * files, or whose record delivered nothing is free — which is also what makes "move that
+     * folder's clips out first" a way out that works.
+     *
+     *   another sequence's delivery (otherSequence), and
+     *   ⚠️ THIS sequence's in the OTHER MODE — the product owner's call, 24 Sep: a version folder keeps the mode it
+     *   was delivered in. A Source Render and a Timeline Render name their files by different
+     *   clocks, so the second run's folder tidy decides the first run's fate — measured
+     *   (check_folder, "Source, then Timeline Render, then Source again"): a still keeps its
+     *   name across modes and was replaced with nothing said, and Source after Render left
+     *   the render-only clips at the top under numbers the Source clips also use. A record
+     *   from before cut_from was kept does not block.
+     *
+     * ⚠️ THE RECORD IS THE MANIFEST AND THE LEDGER (3.90 round 3; see folderLedger). What
+     * counts as evidence of who made the clips on disk:
+     *   - manifest.json, when it lists an ENCODED clip (its own run delivered one), or when the
+     *     ledger vouches for a clip on disk (a narrowed run over a delivery: a failed Retry, a
+     *     --pick that wrote nothing — the manifest then still names the sequence and the mode);
+     *   - every ledger entry whose file is on disk.
+     * Any of them naming another sequence refuses. The mode is the manifest's when it counts
+     * (the last delivered run), else the one mode the ledger's clips share; clips of both
+     * modes with no manifest to settle it (only a pre-3.90 folder) name none.
+     *
+     * Also leaves on `d`: clips (the count), mine (a record names this sequence, in this mode),
+     * so setOutDest() can tell this sequence's own folder from clips nothing claims. */
+    function folderTaken(d) {
+        var names = clipNames(d.dir);
+        d.clips = names.length;
+        d.mine = false;
+        if (!names.length) return "";
+        var present = {}, i;
+        for (i = 0; i < names.length; i++) present[names[i]] = 1;
+        var fx = folderExport(d.dir), led = folderLedger(d.dir, present);
+        var useFx = !!fx && (fx.encoded > 0 || led.length > 0);
+        var ev = useFx ? [fx] : [];
+        for (i = 0; i < led.length; i++) ev.push(led[i]);
+        if (!ev.length) return "";
+        var other = "", known = false;
+        for (i = 0; i < ev.length; i++) {
+            if (ev[i].id || ev[i].name) known = true;
+            if (!other) other = otherSequence(ev[i]);
+        }
+        var mode = useFx ? fx.cutFrom : "";
+        if (!mode) {
+            for (i = 0; i < led.length; i++) {
+                if (!led[i].cutFrom) continue;
+                if (!mode) mode = led[i].cutFrom;
+                else if (mode !== led[i].cutFrom) { mode = ""; break; }
+            }
+        }
+        var otherMode = !other && !!mode && mode !== state.cutFrom;
+        d.mine = known && !other && !otherMode;
+        if (!other && !otherMode) return "";
+        var leaf = path.basename(d.act) + "/" + d.versionDir + "/";
+        var next = nextSaid(d.said, d.act);
+        if (other) {
+            /* A different sequence of the SAME name (a duplicate: the ids differ) is said as
+             * that, or the sentence would name this very sequence as "another".
+             *
+             * ⚠️ "RENAME THIS SEQUENCE", NOT "ONE OF THE TWO" (3.90 round 3). Measured: renaming
+             * the sequence that OWNS the folder to "vid 9.1" and exporting it there leaves its
+             * v9.0 clips where they were, so this one was still refused — and the suggested
+             * "vid 9.1" was by then taken too. Renaming this one always works; the suggestion
+             * skips a version folder ACT/ already has (nextSaid). */
+            var twin = normSeqName(other) === normSeqName(readSeqName());
+            return leaf + " already holds the export of " + qn(other) + (twin
+                ? ", a different sequence with the same name (Premiere gives it another ID)"
+                : ", another sequence that gives the same version (" + d.version + ")")
+                + ", so nothing can be exported into it — rename this sequence to another "
+                + "version" + (next ? " (e.g. " + qn(next) + ")" : "") + ", or, if this "
+                + "sequence replaces that one, move that folder's clips out first.";
+        }
+        /* "of this sequence" only when a record says so: clips an older engine's ledger kept
+         * carry their mode and no sequence. */
+        return leaf + " already holds a " + MODE_NAME[mode] + " export"
+            + (known ? " of this sequence" : "") + " and "
+            + "this one is a " + (MODE_NAME[state.cutFrom] || state.cutFrom) + ", so nothing "
+            + "can be exported into it — switch back to " + MODE_NAME[mode] + ", or export "
+            + "this one under another version" + (next ? " (e.g. " + qn(next) + ")" : "") + ".";
+    }
+
+    /* THE DESTINATION LINE — the Save to row in the bar — names the folder that will
+     * actually be written, and says where the product came from. A root plus an invisible
+     * rule about what gets appended to it is worse than no rule, and that is doubly true now
+     * that the open project can overrule Save to altogether: the row showed Save to, and the
+     * export would have gone to the project's product.
+     *
+     * So after a read the box holds the resolved folder (shortened the way it always was)
+     * and the caption says whose it is: "Project" or "Save to". Before a read, or when
+     * there is no destination, it holds Save to, which is the only thing there is to show. */
+    /* ⚠️ THE VERSION HAS TO SURVIVE A DOCKED PANEL, SO IT COMES FIRST. The box first showed
+     * shortPath(dir, 40) — "…/Brand Name 1.0/Output/ACT/v1.2" — and the CSS ellipsis then cut
+     * its TAIL, which is exactly where the version is. Measured in headless Chrome at a 320px
+     * dock: the box is 67px beside "FROM PROJECT" and read "…/Brand…"; the version first
+     * showed at ~560px. The Ready line that also names it is hidden when everything is ready,
+     * so at a dock the version was on screen nowhere. So the closed box reads
+     * "v1.2 in Brand Name 1.0": the version folder, then the product — the two things that
+     * can be wrong, in the order a tail-cut keeps them. Click, hover and Copy still give the
+     * full path.
+     *
+     * AND THE CAPTION IS "Project", not "From project". Measured at 320px, "FROM PROJECT"
+     * left the box 42px of text, and an ellipsis needs about 8 of them: "v1.2" fitted but
+     * "v2.1.1" — a real name's version — came out "v2.1…". "PROJECT" is as wide as "SAVE TO",
+     * and still says the one thing the caption is for: whose folder this is.
+     *
+     * ⚠️ A REFUSAL ABOUT THE OPEN PROJECT SHOWS THE PROJECT'S PRODUCT. The project wins over
+     * Save to, so showing Save to's folder captioned "Save to" beside "The open project's
+     * product folder … has no Output/" named a folder the export would never touch. */
+    /* ⚠️ A FOLDER REFUSED BECAUSE ANOTHER EXPORT OWNS IT IS STILL THE FOLDER SHOWN (d.taken):
+     * the sentence is about that version folder, so the box names it and Show in Finder
+     * opens it — it exists, it holds the clips to move out. */
+    function destShown(d) {
+        if (d && (d.ok || d.taken) && d.dir) return d.dir;
+        return (d && d.from === "project" && d.product) ? d.product : state.out;
+    }
+
+    function paintOutPath(d) {
+        var fromProject = !!(d && d.from === "project" && d.product);
+        var full = destShown(d);
+        setPathLabel(el.outpath, full, 40,
+                     d && (d.ok || d.taken) ? (d.versionDir + " in " + path.basename(d.product))
+                                            : "");
+        if (el.destcap) el.destcap.textContent = fromProject ? "Project" : "Save to";
+    }
+
+    /* IS THERE ANYWHERE TO EXPORT INTO — Save to, or an open project inside SAMX_WORKSPACE,
+     * which names the product itself (and then Save to is not used at all).
+     *
+     * ⚠️ NOT state.out, which is what Export, Folder and the next line all gated on: with
+     * Save to empty and a SAMX project open, the box showed "From project …/ACT/v1.2" while
+     * Export and Folder were disabled and the line said "Choose a folder to save into." —
+     * measured, and pressing Export by hand then exported into that very folder. Whether the
+     * product found this way is a USABLE one is resolveDest()'s question, asked at every
+     * door; this one only asks whether there is a product to ask about. */
+    function haveDest() {
+        return !!state.out || !!(state.info && projectProduct(state.info.project_path));
+    }
+
+    /* The dest row on the rail: what about the destination needs attention before Export —
+     * a refusal, an Output/ACT that is not there yet, a folder that already holds files. */
+    function setOutDest() {
+        var d = resolveDest();
+        // Whether the row below is a refusal — the focus handler re-asks the disk only then,
+        // so a folder he has just emptied in Finder stops being refused when he comes back.
+        state.destRefused = !!(state.info && !d.ok && d.why);
+        paintOutPath(d);
+        paintDest();
+        if (!state.info) {
+            /* ⚠️ IS THE ROOT STILL THERE, AND CAN IT COME BACK BY ITSELF? Nothing ever stat'ed
+             * the saved root, so a destination on a share that is not mounted sat on screen
+             * with Export enabled and the rail silent — measured: exists=false, button
+             * "Export 19 clips", no dest row at all.
+             *
+             * NOT "the files land somewhere else". Measured: /Volumes is 0755 root:wheel, so
+             * the engine's mkdir raises PermissionError before it encodes anything. What this
+             * row buys is WHEN and in WHAT WORDS that arrives — at the button, in a sentence,
+             * instead of after the scan as a stack trace.
+             *
+             * ⚠️ A MISSING FOLDER IS NOT BY ITSELF A PROBLEM before a read, and warning about
+             * one would fire on every fresh install: defaultOutputFolder() hands back
+             * "~/Desktop/xmlcut clips", which does not exist. Whether it is a product folder
+             * cannot be asked yet either — the open project's path, which can overrule it,
+             * arrives with the read. So until then the only question is whether it CAN be
+             * created: walk up to the nearest folder that exists and ask whether we may write
+             * there (~/Desktop yes, /Volumes/<unmounted>/… no). After a read, resolveDest()
+             * asks the real question. */
+            if (state.out && !exists(state.out) && !canCreate(state.out)) {
+                say("dest", "warn", "Save to " + shortPath(state.out, 44) + " isn’t there, "
+                    + "and the export cannot create it. Reconnect the drive or share it lives "
+                    + "on, or choose another folder.", state.out);
+            } else {
+                say("dest", "info", "");
+            }
+            return;
+        }
+        /* ⚠️ A REFUSAL IS SAID HERE, BEFORE ANYONE PRESSES ANYTHING, and doExport() refuses
+         * with the very same sentence (refuseIfNoDest). No version in the name, two versions,
+         * no Output/: each would otherwise surface as an export that silently went somewhere
+         * wrong, or as a folder tree conjured into a place that is not a product. */
+        if (!d.ok) {
+            say("dest", "warn", d.why, d.taken ? d.dir : (d.product || state.out));
+            return;
+        }
+        var n = d.versionExists ? d.clips : 0;
+        var leaf = path.basename(d.act) + "/" + d.versionDir + "/";
+        /* ⚠️ SILENT WHEN THERE IS NOTHING TO SAY. The happy reading is already on the
+         * destination line — the folder, and whose it is — and saying it again here was the
+         * duplicate this rail was cleared of once already.
+         *
+         * An Output/ACT/ that is NOT THERE YET is said before the export, as a warning, because
+         * the export is about to create it: Tech sets ACT/ up per product, so its absence is
+         * the sign of a Save to pointed at the wrong product.
+         *
+         * ⚠️ A FOLDER THAT ALREADY HOLDS CLIPS IS INFORMATION, NOT A WARNING — since the
+         * refusals above took over the two cases that were problems (another sequence's
+         * delivery, the other mode). What is left is this sequence's own earlier export in this
+         * mode, or clips no manifest claims, and re-exporting over those is the ordinary thing
+         * to do. It was amber, and setRunning(false) re-paints this row after every run, so
+         * EVERY successful export ended on an amber "already holds 19 clip(s). Exporting into it
+         * replaces…" — a sentence about the NEXT export that read as a problem with this one.
+         *
+         * ⚠️ AND IT SAYS ONLY WHAT THE ENGINE DOES FOR CERTAIN. It said the export "moves earlier
+         * ones it does not make to _earlier_export/", which the folder tidy does not do to a
+         * clip that is merely unticked this time (left where it is — measured, CLAUDE.md 3.90
+         * round 2) and does not do to a renumbered clip it can vouch for (re-made, the old
+         * number deleted). What is certain: a clip made again replaces its file, or is kept
+         * with the tick; what is moved aside is named after the run, on the clash row and in
+         * the report's notes. */
+        /* ⚠️ AND CLIPS NO RECORD CLAIMS STAY AMBER (3.90 round 3). Round 2 made them info too,
+         * beyond spec E2 ("THIS sequence's … same mode"): with manifest.json truncated or
+         * deleted, another sequence's 19 clips read as an info row behind ⚙ Info, and the
+         * twin's export then rewrote all 19 in place — measured with the real engine. With the
+         * ledger that case is now a refusal (folderTaken); what is left here is clips nothing in
+         * the folder records at all, and whose they are is his to check. */
+        if (n > 0 && d.mine) {
+            say("dest", "info", leaf + " holds this sequence's last export (" + n + " clip(s)). "
+                + "Exporting again replaces the ones it makes again (or keeps them, with "
+                + "“skip clips already there”); anything it moves to _earlier_export/ instead "
+                + "is named after the run.", d.dir);
+        } else if (n > 0) {
+            say("dest", "warn", leaf + " already holds " + n + " clip(s). Nothing in it records "
+                + "which sequence made them, so make sure they are not another sequence's "
+                + "delivery: exporting into it replaces the ones it makes again (or keeps them, "
+                + "with “skip clips already there”); anything it moves to _earlier_export/ "
+                + "instead is named after the run.", d.dir);
+        } else if (!d.actExists) {
+            say("dest", "warn", path.basename(d.output) + "/ACT isn’t there yet — Export will "
+                + "create it, with " + d.versionDir + "/ inside, in "
+                + shortPath(d.output, 44) + ".", d.dir);
+        } else {
+            say("dest", "info", "");
         }
     }
 
-    /* Show the folder that will actually be written, before it is written. A root plus an
-     * invisible rule about what gets appended to it is worse than no rule. */
-    function setOutDest() {
-        if (!state.out) {
-            say("dest", "info", "");
-            return;
-        }
-        /* ⚠️ IS THE ROOT STILL THERE, AND CAN IT COME BACK BY ITSELF? Nothing ever stat'ed
-         * the saved root, so a destination on a share that is not mounted sat on screen with
-         * Export enabled and the rail silent — measured: exists=false, button "Export 19
-         * clips", no dest row at all.
-         *
-         * NOT "the files land somewhere else". Measured: /Volumes is 0755 root:wheel, so the
-         * engine's mkdir raises PermissionError before it encodes anything, the run exits 1
-         * and the panel prints the Python traceback. Nothing is written to the boot disk.
-         * What this row buys is WHEN and in WHAT WORDS that arrives — at the button, in a
-         * sentence, instead of after the scan as a stack trace.
-         *
-         * ⚠️ A MISSING FOLDER IS NOT BY ITSELF A PROBLEM, and warning about one would fire on
-         * every fresh install: defaultOutputFolder() hands back "~/Desktop/xmlcut clips",
-         * which does not exist until the first export creates it. The question is whether it
-         * CAN be created, so this walks up to the nearest folder that does exist and asks
-         * whether we may write there. Measured on this machine: ~/Desktop yes,
-         * /Volumes/<unmounted>/… no (EACCES on /Volumes), which is exactly the population
-         * the report is about.
-         *
-         * Not a refusal either. The answer is true for one process at one instant, a share
-         * can come back before Export, and this panel does not disable a control over a
-         * stat. Re-checked on every folder pick and every read. */
-        if (!exists(state.out) && !canCreate(state.out)) {
-            say("dest", "warn", "Save to " + shortPath(state.out, 44) + " isn’t there, and "
-                + "the export cannot create it. Reconnect the drive or share it lives on, "
-                + "or choose another folder.", state.out);
-            return;
-        }
-        if (!state.info) {
-            /* SILENT UNTIL THERE IS A FOLDER TO TALK ABOUT. This used to state the raw/edited
-             * rule here, which put a row on the rail before anything had happened — and the
-             * rail is for what needs attention, not for rules. The rule lives on the Save to
-             * field's own ? instead, which is where you look when you want to know where
-             * things land. What this branch has to say arrives after a read: whether the
-             * target folder already holds files. */
-            say("dest", "info", "");
-            return;
-        }
-        var d = outDir();
-        var n = countIn(d);
-        /* ⚠️ SILENT WHEN THERE IS NOTHING TO WARN ABOUT. The happy reading of this note was
-         * "→ PROMO_A_v3/", and renderNext() already ends with "…will be written into
-         * PROMO_A_v3/." — the same folder, named twice, two rows apart on the same rail.
-         *
-         * A folder that ALREADY HOLDS FILES is the reading nothing else covers, and it
-         * matters: a re-export overwrites the names it reproduces and leaves everything else,
-         * so a folder from a DIFFERENT version of this timeline ends up holding a mix of both.
-         * Tick "skip clips already there" to add only what is missing, or empty it first. */
-        say("dest", "warn", n > 0
-            ? (seqFolder() + "/" + outKind() + "/ already holds " + n
-               + " file(s). Names this export reproduces are overwritten; the rest are left.")
-            : "", d);
+    /* FAIL CLOSED, at each door an export goes through: the press (doExport), the start after
+     * the sequence check and any modal (beginExport), and the engine's argv after a render
+     * (runEngineExport). The destination is re-asked every time rather than trusted from the
+     * last paint, because each of those can be seconds or minutes after it. Nothing is
+     * created on a refusal — not Output/, not ACT/, not _renders/ — because nothing runs.
+     * Returns the destination, or null having said why. */
+    function refuseIfNoDest(where) {
+        var d = resolveDest();
+        if (d.ok) return d;
+        var why = d.why || (state.info ? "Choose a folder to save into first."
+                                       : "Read the timeline first.");
+        log("export refused (" + where + "): " + why);
+        state.destRefused = !!state.info;
+        /* ⚠️ A REFUSED RETRY IS NOT KEPT FOR THE NEXT PRESS (3.90 round 3). runEngineExport()
+         * consumes state.retryKeys, and a refusal never gets there — so the next ordinary
+         * "Export 19 clips" carried the retry's --pick. MEASURED with the real engine: a Retry
+         * refused after a mode switch, back to Source, Export → --pick of 1 clip, and a manifest
+         * of 1 row over the 19-clip delivery. */
+        state.retryKeys = [];
+        // Nothing of the folder is replaced or moved by an export that does not run.
+        state.clashHeld = 0;
+        say("clash", "warn", "");
+        say("dest", "warn", why, d.taken ? d.dir : (d.product || state.out));
+        paintOutPath(d);
+        return null;
+    }
+
+    /* AND AFTER THE RUN, WHETHER IT MADE Output/ACT. The dest row said "isn't there yet"
+     * before the export; once the folder exists that sentence is false, so it is replaced by
+     * what happened. Called from setRunning(false), which every end of a run passes through —
+     * a render that failed or was stopped can have made it too (Premiere creates _renders/
+     * inside the version folder). */
+    function settleAct() {
+        var act = state.actWanted;
+        state.actWanted = "";
+        if (!act || !isDir(act)) return;
+        state.actMade = true;
+        log("created " + act);
+        say("dest", "info", "Created " + path.basename(path.dirname(act)) + "/"
+            + path.basename(act) + " in " + shortPath(path.dirname(act), 44) + ".", act);
+        paintOutPath(resolveDest());
     }
 
     /* THE ONE CONTROL WITH NO CORRECT DEFAULT, so it is the one that lights up.
@@ -2675,7 +3465,9 @@
      * SET: everything goes quiet. Nothing about a folder that has been chosen needs
      * attention, and this panel has exactly one primary per screen. */
     function paintDest() {
-        var empty = !state.out;
+        // Lit only when an export has nowhere to go: an open project inside SAMX_WORKSPACE
+        // names the product itself, and then an empty Save to is nothing to fix.
+        var empty = !haveDest();
         if (el.destgroup) {
             el.destgroup.className = "group g-dest" + (empty ? " lit" : "");
         }
@@ -2683,7 +3475,7 @@
             el.pickout.className = empty ? "mini want" : "mini";
             /* The label says which of the two situations you are in, so the button is not
              * "Change" over a dash. */
-            el.pickout.textContent = empty ? "Choose folder" : "Change";
+            el.pickout.textContent = state.out ? "Change" : "Choose folder";
         }
         /* 3.89 · Copy is off the bar: clicking the path opens it to the full, selectable
          * text, and Open shows it in Finder — the two ways of checking it, which is the ask
@@ -2694,7 +3486,8 @@
 
     function setOut(p) {
         state.out = p || "";
-        setPathLabel(el.outpath, state.out, 40);
+        // The box itself is painted by setOutDest() below: after a read it shows the resolved
+        // destination, which may not be under Save to at all.
         try { window.localStorage.setItem("xmlcut.out", state.out); } catch (e) {}
         paintDest();
         setOutDest();
@@ -2770,6 +3563,46 @@
      * finite, because the alternative is a click that does nothing at all. */
     var SEQ_ANSWER_MS = 4000;
 
+    /* RENAMED SINCE READ, TO A DIFFERENT VERSION — a refusal, never a question.
+     *
+     * The destination's version comes from the sequence name as it was at Read. The sequence
+     * check compares IDs, so renaming "Brand v1.2" to "Brand v1.3" in Premiere and pressing
+     * Export passed it — measured: "sequence check passed — starting", and the engine went
+     * into ACT/v1.2/, which with the files flat means over v1.2's delivered clips. The refusal
+     * sentences themselves tell him to fix the name in Premiere, so this is the path a
+     * correction takes.
+     *
+     * Only a rename that CHANGES THE VERSION: adding or fixing a handle leaves the export's
+     * folder where it was, and refusing that would be a guard that cries wolf. A new name with
+     * no version, or two, is a change of version too — its own refusal waits for the re-read.
+     * Refused outright rather than put to a "Export anyway?" modal like a drifted timeline:
+     * the yes would be a choice of delivery folder made by the name he has just replaced. */
+    /* ⚠️ AND WITH NO SEQUENCE ID AT EITHER END (`weak`), THE SAME REFUSAL (3.90 round 2). The
+     * check then compares names, so the rename is a name mismatch and went to the "Export
+     * anyway?" modal — and a yes exported into the OLD version's folder (measured by the
+     * review round's verifier). With no id the panel cannot tell a rename from another
+     * sequence, and the sentence says so; but either way the open name no longer gives the
+     * version the destination was chosen by, and a yes would deliver under the replaced
+     * name. A different name that gives the SAME version still gets the modal: its folder is
+     * the one the read chose. */
+    function renamedAway(openName, weak) {
+        var read = readSeqName();
+        if (!openName || openName === read) return "";
+        var was = seqVersion(read).version, nv = seqVersion(openName), now = nv.version;
+        if (!was || (now && sameVersion(now, was))) return "";
+        if (weak) {
+            // "two versions", not "no version", for a name like "Brand v1.2 v1.3" (round 3).
+            return "Read “" + read + "”, but “" + openName + "” is open now and its name gives "
+                + (now || (nv.two ? "two versions" : "no version")) + ", not " + was
+                + " — the folder this export goes "
+                + "into comes from the name, so press Read again (Premiere gave no sequence "
+                + "ID, so the panel cannot tell a rename from another sequence).";
+        }
+        return "“" + read + "” was renamed to “" + openName + "” in Premiere since Read, "
+            + "and the folder this export goes into comes from the name (" + was
+            + (now ? ", now " + now : (nv.two ? ", now two versions" : "")) + ") — press Read again.";
+    }
+
     function checkSequence(when, cb) {
         // Nothing has been read, so there is no identity to compare against and no row.
         if (!state.info) { if (cb) cb(true); return; }
@@ -2830,8 +3663,8 @@
             if (!r || typeof r !== "object") {
                 /* THE CHECK COULD NOT BE MADE. Said out loud, because a guard that has
                  * silently stopped working is worse than no guard. The realistic cause is a
-                 * host.jsx older than this panel — reinstalling is the fix, and it is the
-                 * same remedy folderSafe() already documents for that mismatch.
+                 * host.jsx older than this panel — reinstalling is the fix, the same
+                 * remedy as for any panel newer than the host.jsx installed beside it.
                  *
                  * It does NOT block the export. Refusing to cut at all because a panel is
                  * newer than the script beside it would strand him mid-job over a check,
@@ -2874,6 +3707,18 @@
                 log("sequence check (" + when + "): NO SEQUENCE ID (read \"" + readId
                     + "\", open \"" + openId + "\") — comparing names, which cannot tell "
                     + "two sequences of the same name apart");
+            }
+            /* 3.90 · SAME SEQUENCE, OTHER VERSION — when the ids decided "same". And on a weak
+             * check, where a rename is a name mismatch, the same refusal whenever the open
+             * name gives another version (or none): see renamedAway(). */
+            state.seqRenamed = weak ? (same ? "" : renamedAway(openName, true))
+                                    : (same ? renamedAway(openName) : "");
+            if (state.seqRenamed) {
+                say("seq", "error", state.seqRenamed);
+                log("sequence check (" + when + "): RENAMED — read \"" + readSeqName()
+                    + "\", open \"" + openName + "\" [" + openId + "]");
+                if (cb) cb(false);
+                return;
             }
             if (same) {
                 /* SAME SEQUENCE — now ask the second question, which the id cannot answer:
@@ -3038,6 +3883,16 @@
          * than left for something else to notice, so this row can never be a stale reason
          * sitting over a run that is starting — the failure the "?" mismatch row was. */
         say("export", "warn", "");
+        /* 3.90 · NO DESTINATION, NO EXPORT — and nothing asked of Premiere either. Refused
+         * here, before the sequence check, with the same sentence the dest row already shows:
+         * no Output/ in the product, no version in the sequence name, or two of them. The
+         * press is logged above, so the log still tells a refused press from a lost one. */
+        if (!refuseIfNoDest("export")) return;
+        /* The folder may have changed since the row was painted — he may have moved the
+         * other export's clips out, as the refusal told him to — and the press has just
+         * re-asked the disk, so the row says what the press found rather than an old refusal
+         * over a run that is starting. */
+        if (state.destRefused) setOutDest();
         state.exportPending = true;
         /* THE AUTHORITATIVE CHECK, and the reason the rail row is not enough on its own: the
          * row can be up to SEQ_CHECK_MS old and he may never have looked at it. This one runs
@@ -3066,6 +3921,12 @@
                  * SAID ON THE RAIL, not only in the log. This is a press that produced no
                  * export, and the one place it was reported was Advanced — measured, the
                  * whole outcome of the click was three log lines. */
+                if (state.seqRenamed) {
+                    // Said on the seq row by checkSequence(); nothing to confirm, nothing runs.
+                    state.exportPending = false;
+                    log("export refused (renamed): " + state.seqRenamed);
+                    return;
+                }
                 if (!state.info) {
                     state.exportPending = false;
                     log("export dropped: the read was torn down while the sequence check "
@@ -3248,15 +4109,91 @@
          * change nothing stops that happening silently. The log line is what makes it
          * traceable afterwards. */
         var already = (!state.resume && !state.retryKeys.length) ? clashCount() : 0;
+        /* What the folder held, and how full its _earlier_export/ was, AS THIS EXPORT STARTS —
+         * so that when the engine is done settleClash() can say what it actually moved aside,
+         * measured on the disk, instead of predicting it. */
+        state.clashDir = already ? outDir() : "";
+        state.clashHeld = already;
+        state.clashAsideBefore = already ? asideCount(state.clashDir) : 0;
+        state.clashEngine = false;
         if (already) {
-            log("overwriting: " + already + " existing clip(s) in " + outDir()
-                + " will be replaced where the names match; anything else is left in place");
-            say("clash", "warn", already + " clip(s) in that folder are being overwritten. "
-                + "Files this export does not reproduce are left as they are.");
+            /* The COUNT is of what was there, not of what gets overwritten — measured, "21
+             * clip(s) … are being overwritten" before a run that overwrote 1 and moved 18.
+             *
+             * ⚠️ AND NO PREDICTION OF WHAT IS MOVED. This said "the others are moved to
+             * _earlier_export/" — untrue of a clip that is merely unticked this time (the
+             * folder tidy leaves it where it is) and of a renumbered clip the ledger vouches
+             * for (re-made, its old number deleted). Measured with the real engine, CLAUDE.md
+             * 3.90 round 2. With another sequence's folder and the other mode refused, what is
+             * left here is this sequence's own export in this mode, so it is information. */
+            log("overwriting: " + already + " existing clip(s) in " + state.clashDir
+                + " — the ones this run makes again are replaced; anything the engine moves "
+                + "to _earlier_export/ is named on its !! lines");
+            say("clash", "info", path.basename(state.clashDir) + "/ held " + already
+                + " clip(s) when this export started: the ones it makes again are replaced, "
+                + "and anything it moves to _earlier_export/ is said when it ends.");
         } else {
             say("clash", "warn", "");
         }
         beginExport();
+    }
+
+    /* Files directly inside <dir>/_earlier_export/ — the engine's move-aside folder, whose
+     * collisions get " (2)" rather than replacing anything, so a count that grew by M is M
+     * files moved there. */
+    function asideCount(dir) {
+        var names, n = 0;
+        if (!dir) return 0;
+        var a = path.join(dir, "_earlier_export");
+        try { names = fs.readdirSync(a); } catch (e) { return 0; }
+        for (var i = 0; i < names.length; i++) {
+            var nm = String(names[i]);
+            if (nm.charAt(0) === ".") continue;
+            try { if (fs.statSync(path.join(a, nm)).isFile()) n++; } catch (e) {}
+        }
+        return n;
+    }
+
+    /* AFTER THE RUN, WHAT THE ENGINE DID TO WHAT WAS THERE — measured, not predicted. Called
+     * from setRunning(false), like settleAct(); consumes the state, so a later call is a no-op.
+     * A run whose engine never started (refused at a later door, a render that failed)
+     * replaced and moved nothing, and says nothing here. */
+    function settleClash() {
+        var held = state.clashHeld, dir = state.clashDir;
+        state.clashHeld = 0;
+        state.clashDir = "";
+        if (!held || !dir) return;
+        if (!state.clashEngine) { say("clash", "warn", ""); return; }
+        var moved = Math.max(0, asideCount(dir) - (state.clashAsideBefore || 0));
+        /* ⚠️ "REPLACED" ONLY WHEN IT MADE SOMETHING (3.90 round 3). A re-export in which every
+         * clip failed said "the ones it made again were replaced" over a manifest of
+         * {failed: 19} — it made none. The count is this run's own manifest's `ok` rows; with no
+         * manifest from this run (a Cancel) the count is not known and the words say "any". */
+        var made = madeByRun(dir);
+        say("clash", moved ? "warn" : "info", path.basename(dir) + "/ held " + held
+            + " clip(s) when this export started: "
+            + (made > 0 ? "the ones it made again were replaced"
+                        : made === 0 ? "it made none of them again"
+                                     : "any it made again were replaced") + ", and "
+            + (moved ? moved + " earlier file(s) were moved to _earlier_export/ — the "
+                       + "report's notes say which."
+                     : "nothing was moved to _earlier_export/."));
+    }
+
+    /* How many clips the run that just ended ENCODED into `dir` (its manifest's `ok` rows), or
+     * -1 when that manifest is not this run's (unchanged since the spawn: a Cancel, a crash). */
+    function madeByRun(dir) {
+        var f = path.join(dir, "manifest.json"), m;
+        try {
+            if (fs.statSync(f).mtimeMs === state.manifestBefore) return -1;
+            m = JSON.parse(fs.readFileSync(f, "utf8"));
+        } catch (e) {
+            return -1;
+        }
+        var rows = (m && Object.prototype.toString.call(m.clips) === "[object Array]") ? m.clips : [];
+        var n = 0;
+        for (var i = 0; i < rows.length; i++) if (rows[i] && rows[i].status === "ok") n++;
+        return n;
     }
 
     /* HOW MANY CLIPS ARE ALREADY IN THE DESTINATION.
@@ -3268,30 +4205,30 @@
      * the second was then asked about "1 file(s)" that were never his. Only media counts,
      * because only media is what he stands to lose. */
     function clashCount() {
-        var dir = outDir();
-        if (!dir) return 0;
         /* _earlier_export is where the engine MOVES an earlier run's file that this run did
          * not reproduce (a clip that failed, went missing or was refused), rather than leave
          * it under a delivery name. It is a folder of files already moved out of the way,
-         * never one this export overwrites — counting it would announce one clip too many. */
-        var skip = { "manifest.json": 1, "clips.csv": 1, "pick.txt": 1,
-                     "_renders": 1, "_render_progress.json": 1, "_render_stop": 1,
-                     "_earlier_export": 1 };
-        var n = 0;
-        try {
-            var names = fs.readdirSync(dir);
-            for (var i = 0; i < names.length; i++) {
-                var nm = String(names[i]);
-                if (nm.charAt(0) === "." || skip[nm]) continue;
-                n++;
-            }
-        } catch (e) { return 0; }
-        return n;
+         * never one this export overwrites — counting it would announce one clip too many.
+         * clipsIn() counts files only, so it, _renders/ and report/ are never counted. */
+        return clipsIn(outDir());
     }
 
 
     function beginExport() {
         state.cancelled = false;
+        /* ⚠️ ASKED AGAIN, because the press was a sequence check and possibly a modal ago.
+         * This is the last point before Premiere is asked to render — and renderCuts()
+         * creates its folder with every missing parent, so a destination that stopped being
+         * valid in between would have had Output/ made for it by the host. */
+        var dest = refuseIfNoDest("start");
+        if (!dest) return;
+        // Whether THIS export is the one that creates Output/ACT — settled in settleAct().
+        state.actWanted = dest.actExists ? "" : dest.act;
+        state.actMade = false;
+        if (!dest.versionExists) log("destination: " + dest.versionDir + "/ is new in " + dest.act);
+        else if (dest.versionDir !== dest.version) {
+            log("destination: " + dest.version + " goes into the existing " + dest.versionDir + "/");
+        }
         clearRenderStop();
         if (state.cutFrom !== "render") return runEngineExport(null);
         renderThenExport();
@@ -3334,6 +4271,11 @@
             return;
         }
         var dir = renderDir();
+        /* What _renders/ held before Premiere renders into it — null when it is not there — so
+         * a run refused at the engine door can take back exactly what IT rendered (see
+         * dropRefusedRenders) and nothing a kept Retry scratch still needs. */
+        state.rendersPre = null;
+        try { state.rendersPre = fs.readdirSync(dir).map(String); } catch (e) {}
         clearError();
         showReport(false);
         show(el.prog, true);
@@ -3461,8 +4403,18 @@
         // …except anything the render phase found, which belongs to this run and has just
         // been thrown away by the line above.
         if (notes && notes.length) state.merge = notes.slice();
-        // The sequence's own folder inside the chosen root. xmlcut mkdir -p's whatever it
-        // is given, so there is nothing to create here.
+        /* The version folder. xmlcut mkdir -p's whatever it is given, so ACT/ and the version
+         * folder need nothing from here — which is exactly why this asks once more whether
+         * there IS a destination: an empty -o would put the clips in the engine's working
+         * folder, and a product that lost its Output/ during a render would get one made by
+         * the engine's mkdir. */
+        if (!refuseIfNoDest("engine")) {
+            if (renderDirPath) dropRefusedRenders(renderDirPath);
+            show(el.prog, false);
+            setRunning(false);
+            setBusy(false);
+            return;
+        }
         var args = argsFor(outDir(), false);
         if (renderDirPath) {
             args.push("--render-dir", renderDirPath);
@@ -3540,6 +4492,8 @@
             return;
         }
         state.proc = proc;
+        // The engine is the one thing that replaces or moves a file (settleClash).
+        state.clashEngine = true;
         // A real subprocess now exists, so Cancel can promise a real stop again.
         cancelLabel();
 
@@ -3760,6 +4714,15 @@
         if (!rescan) el.listnote.textContent = "";
 
         var scanDir = path.join(workDir(), "scan");
+        /* ⚠️ THE SCAN FOLDER IS EMPTIED FIRST — it is this panel's own scratch, and anything
+         * already in it can only lie. MEASURED on 3.89, 24 Sep: the test suite had left a
+         * fixture manifest (encoded clips) and a 1-byte "01_…_Shot_A.mp4" in the real
+         * $TMPDIR/xmlcut-panel/scan, and 3.89's own rule that a preview may not replace an
+         * EXPORT's record then refused every live read: exit 1, "--out … already holds an
+         * export (5 encoded clip(s) in its manifest.json)". A scan that exits 0 without writing
+         * would also have loaded the previous read's manifest as this one's. Nothing here is
+         * anyone's delivery: exports go to outDir(), never to this folder. */
+        rmTree(scanDir);
         var args = argsFor(scanDir, /* allTypes */ true);
         args.push("--manifest-only");
         /* ⚠️ NOT --render-dir. No render exists at scan time, and handing the engine a
@@ -3827,6 +4790,9 @@
         proc.on("error", function (e) {
             endRescan();
             setBusy(false);
+            // The bar goes as it does on a failed exit: node may send "error" with no
+            // "close" after it, and the bar was then left beside the restored Read button.
+            if (!rescan) readStage(-1);
             fail("Could not read the cut list:\n" + e
                  + (rescan ? "\nThe list shown is the one read before." : ""));
         });
@@ -3834,6 +4800,8 @@
             endRescan();
             if (errbuf) log("stderr: " + errbuf);
             if (code !== 0) {
+                // The engine's own zero-cut exit (sys.exit "No cuts found…") IS an answer.
+                state.readNoCuts = !rescan && /No cuts found/.test(errbuf);
                 setBusy(false);
                 readStage(-1);
                 /* ⚠️ ONLY OFFER AN EXPORT WHERE THERE IS ONE TO OFFER, which is exactly
@@ -3851,7 +4819,19 @@
                         : "\nNothing was read, so there is nothing to export yet."));
                 return;
             }
-            if (loadClips(scanDir)) {
+            var _loaded = loadClips(scanDir);
+            state.readNoCuts = _loaded && !state.clips.length;
+            /* ⚠️ AN EXIT 0 WITH NO CUT LIST IS A READ THAT DID NOT FINISH, AND THE RAIL SAYS SO
+             * (3.90 round 3). The next line tells him "the message above says why" — and here
+             * there was no message: only a log line, railText("err") empty, and the one row on the
+             * rail a destination refusal the line was never pointing at. Rare (the engine exits
+             * 0 only once it has written the manifest), but the line must not point at nothing. */
+            if (!_loaded && !rescan) {
+                fail("Reading the cut list failed: the engine finished but wrote no cut list "
+                     + "(no manifest.json in " + scanDir + ").\nNothing was read, so there is "
+                     + "nothing to export yet.");
+            }
+            if (_loaded) {
                 typesFromClips();
                 renderTypes();
                 // The Audio dropdown is built from what the scan just reported, so it is filled
@@ -5008,6 +5988,7 @@
                     // The cut list could not be produced without an engine. Now it can.
                     if (state.dump && !state.busy) {
                         setBusy(true, "Reading…");
+                        readStage(2);              // the bar, as a first read shows it
                         scanClips();
                     }
                 });
@@ -5485,8 +6466,9 @@
      * in this panel is made: through --pick, written from the cut list, gated in
      * trackPicked().
      * The alternative — teaching the panel to emit --tracks audio and run a second export —
-     * would produce a second folder with its own 01..N numbering, which is the collision the
-     * raw/ and edited/ split exists to avoid.
+     * would produce a second run with its own 01..N numbering into the same folder, which is
+     * the collision the raw/ and edited/ split once existed to avoid (3.90 made the version
+     * folder flat; see CLAUDE.md for what two kinds of run in one folder measurably do).
      *
      * Built from what the SCAN reported, like the mixdown menu and the master-track menu:
      * A2 on one project is not A2 on the next.
@@ -6299,7 +7281,7 @@
      *
      * ⚠️ THE SELECT IS GONE, THE STATE IS NOT. state.cutFrom is still the only place the
      * mode lives, and it is still written to xmlcut.cutfrom — so the 40-odd readers of
-     * state.cutFrom, the render branches in doExport(), outKind() and settings(), and a
+     * state.cutFrom, the render branches in doExport() and settings(), and a
      * saved value from any earlier build all keep working untouched. What changed is which
      * element the person clicks.
      *
@@ -6336,9 +7318,17 @@
     function setCutFrom(m) {
         var want = (m === "render") ? "render" : "source";
         if (want === state.cutFrom) return;   // clicking the lit one is not a change
+        // Locked while an export is starting or running — see LOCK_WHILE_RUNNING.
+        if (state.running || state.exportPending) {
+            log("mode not changed: an export is running");
+            return;
+        }
         state.cutFrom = want;
         try { window.localStorage.setItem("xmlcut.cutfrom", state.cutFrom); } catch (e) {}
         applyCutFrom();
+        /* 3.90 round 2 · A VERSION FOLDER KEEPS THE MODE IT WAS DELIVERED IN, so switching
+         * mode can make the destination refused, or free again (folderTaken). */
+        setOutDest();
         renderSettings();
         if (state.clips.length) renderClips();
         /* ⚠️ RE-READ THE LIST, because the mode changes what is IN it.
@@ -6438,8 +7428,10 @@
         say("rendermode", "info", out.join(" "));
     }
 
-    /* Where Premiere writes the rendered ranges: <sequence>/edited/_renders, composed out of
-     * outDir() so it follows the raw/edited split for free.
+    /* Where Premiere writes the rendered ranges: <version folder>/_renders, composed out of
+     * outDir() so it can never be anywhere the export is not. "" when there is no
+     * destination — path.join("", "_renders") is a RELATIVE path, and renderCuts() would
+     * create it wherever Premiere's working directory happens to be.
      *
      * Beside the clips rather than in a temp folder: these are large — Match Source High on a
      * 4K sequence is tens of MB a cut — and /tmp is on the system volume, which is not the
@@ -6457,7 +7449,8 @@
      * behind, they read as a second folder of the same clips WITH sound — which is exactly how
      * they were reported ("two folders, one with sound one without"). See cleanRenders(). */
     function renderDir() {
-        return path.join(outDir(), "_renders");
+        var d = outDir();
+        return d ? path.join(d, "_renders") : "";
     }
 
     /* Remove a directory tree, on whatever this runtime actually provides.
@@ -6517,9 +7510,15 @@
         }
         if (why) {
             /* Said out loud, because a folder that is sometimes there and sometimes not is a
-             * thing you go looking for an explanation of. */
-            say("renders", "info", "_renders/ kept for Retry: " + why
-                + ". Delete it by hand when you are done.");
+             * thing you go looking for an explanation of.
+             *
+             * 3.90 · AND WHERE IT IS: with the files flat, _renders/ sits INSIDE the delivery
+             * folder, Output/ACT/<version>/ on the team drive — measured, 18 renders left
+             * there by a run with one failed clip. Named, so nobody takes it for part of the
+             * delivery or wonders where the drive's space went. */
+            say("renders", "info", "_renders/ kept for Retry inside the delivery folder "
+                + path.basename(path.dirname(dir)) + "/: " + why
+                + ". It is not part of the delivery — delete it by hand when you are done.");
             return;
         }
         if (rmTree(dir)) {
@@ -6528,6 +7527,33 @@
         } else {
             say("renders", "info", "_renders/ could not be removed — safe to delete by hand.");
         }
+    }
+
+    /* ⚠️ A RENDER THE ENGINE DOOR REFUSED IS TAKEN BACK (3.90 round 3). The folder can become
+     * another export's while Premiere renders (it is re-asked at runEngineExport), and the
+     * refusal then left this run's _renders/ — measured, 19 render files — inside the other
+     * sequence's version folder. This run's own renders go: the whole folder when it was not
+     * there before the render, otherwise only the entries that were not (a scratch kept for
+     * someone's Retry stays as it was). Never a failure of its own. */
+    function dropRefusedRenders(dir) {
+        var pre = state.rendersPre, names;
+        state.rendersPre = null;
+        if (!dir || !exists(dir)) return;
+        if (pre === null || pre === undefined) {
+            if (rmTree(dir)) log("removed this run's renders from a refused folder: " + dir);
+            return;
+        }
+        try { names = fs.readdirSync(dir).map(String); } catch (e) { return; }
+        var gone = 0;
+        for (var i = 0; i < names.length; i++) {
+            if (pre.indexOf(names[i]) >= 0) continue;
+            var f = path.join(dir, names[i]);
+            try {
+                if (fs.statSync(f).isDirectory()) { if (rmTree(f)) gone++; }
+                else { fs.unlinkSync(f); gone++; }
+            } catch (e2) { log("could not remove " + f + ": " + e2); }
+        }
+        log("removed " + gone + " of this run's renders from a refused folder: " + dir);
     }
 
     /* The cuts a render phase has to produce, as the host's "label|in|out" records. Only
@@ -7269,8 +8295,11 @@
      * carries the numbers needed to check a clip without doing arithmetic: the frame
      * count, the native length, the speed, and the length it occupied on the timeline. */
     function manifestMtime() {
+        // Never a relative "manifest.json": with no destination that would stat the cwd's.
+        var d = outDir();
+        if (!d) return 0;
         try {
-            return fs.statSync(path.join(outDir(), "manifest.json")).mtimeMs;
+            return fs.statSync(path.join(d, "manifest.json")).mtimeMs;
         } catch (e) {
             return 0;
         }
@@ -7445,9 +8474,12 @@
      * earlier in this file's history, and this one runs while clips are still being written.
      */
     function reportDir() {
-        if (!fs || !path || !state.out) return "";
+        // outDir(), not state.out: with no destination there is no report folder to make, and
+        // a relative "report" would be made in the cwd.
+        var od = (fs && path) ? outDir() : "";
+        if (!od) return "";
         try {
-            var d = path.join(outDir(), "report");
+            var d = path.join(od, "report");
             if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
             return d;
         } catch (e) {
@@ -7505,6 +8537,7 @@
         }
         var data;
         try {
+            if (!outDir()) throw new Error("there is no destination to read a manifest from");
             data = JSON.parse(fs.readFileSync(path.join(outDir(), "manifest.json"),
                                               "utf8"));
         } catch (e) {
@@ -7704,15 +8737,14 @@
         sayAudioTracks(data.settings || {});
 
         // And WHERE it wrote, which the report never said despite having a Show button.
-        // Named in words too: the clips are in a folder called after the sequence, and
-        // anyone expecting the root folder finds it empty and calls the files missing.
-        var f = seqFolder();
-        // Names the SUBFOLDER too, since there are two now. A caption that said only
-        // "a folder named after the sequence" would send someone to the level above the
-        // clips, find it holding two folders, and be exactly as lost as before.
-        el.repdestlbl.textContent = f
-            ? ("Clips are in a folder named after the sequence — " + f + "/"
-               + outKind() + "/")
+        // Named in words too — the product and the version, the two things that can be wrong
+        // — and whether this export is the one that made Output/ACT, which the dest row said
+        // it would do before the run.
+        var rd = resolveDest();
+        el.repdestlbl.textContent = rd.ok
+            ? ("Clips are in " + destTail(rd) + "/"
+               + (state.actMade ? " — this export created " + path.basename(rd.output)
+                  + "/" + path.basename(rd.act) : ""))
             : "Clips are in:";
         show(el.repdestlbl, !!outDir());
         setPathLabel(el.repdest, outDir(), 60);
@@ -7922,6 +8954,7 @@
                 // run it instead of making him click Read again.
                 if (state.dump && !state.busy) {
                     setBusy(true, "Reading…");
+                    readStage(2);                  // the bar, as a first read shows it
                     scanClips();
                 }
                 checkUpdate(false);
@@ -7929,7 +8962,14 @@
         });
     });
 
-    el["export"].addEventListener("click", doExport);
+    /* The Export button exports what is TICKED. Only the Retry button's own press narrows a run
+     * to the failed rows (state.retryKeys), so a press of this one drops any a Retry that
+     * never ran left behind — refused by the sequence check, a "no" in the modal, a render that
+     * failed. See refuseIfNoDest() for the refusal that measured it. */
+    el["export"].addEventListener("click", function () {
+        state.retryKeys = [];
+        doExport();
+    });
 
     /* WHEN THE SEQUENCE CHECK FIRES. Two of the three moments are here; the third and
      * authoritative one is inside doExport().
@@ -7940,7 +8980,16 @@
      *    get a window focus event when the tab it lives in is brought forward — the
      *    visibility change does. Firing twice costs one round trip and the check is
      *    idempotent, so the overlap is not worth avoiding. */
-    window.addEventListener("focus", function () { checkSequence("focus"); });
+    window.addEventListener("focus", function () {
+        checkSequence("focus");
+        /* A REFUSED destination is asked again on focus: its remedy — move the other export's
+         * clips out — happens in Finder, and he comes back to a row that should say so. Only
+         * then, so a row that is not a refusal (the "Created Output/ACT" note) is left alone. */
+        if (state.destRefused && !state.busy && !state.running) {
+            setOutDest();
+            refreshExportEnabled();
+        }
+    });
     document.addEventListener("visibilitychange", function () {
         if (!document.hidden) checkSequence("focus");
     });
@@ -8075,8 +9124,12 @@
         });
     }
 
+    /* What the box beside it shows: the resolved destination after a read, Save to before. */
+    /* ⚠️ destShown(), THE SAME CALL THE BOX IS PAINTED WITH — it copied outDir() || Save to,
+     * so on a refusal about the open project it put Save to on the clipboard beside a box
+     * showing the project's product (measured by the 3.90 review round's verifier). */
     el.copyout.addEventListener("click", function () {
-        copyText(state.out, el.copyout, "Copy");
+        copyText(destShown(resolveDest()), el.copyout, "Copy");
     });
     el.copydest.addEventListener("click", function () {
         copyText(outDir(), el.copydest, "Copy");
@@ -8091,21 +9144,26 @@
         }
     }
 
-    // The sequence's folder, which is where the clips are. Falls back to the root if the
-    // export never got as far as creating it.
-    el.reveal.addEventListener("click", function () {
-        var d = outDir();
-        reveal(exists(d) ? d : state.out);
-    });
+    /* The version folder, which is where the clips are. It is not made until the export
+     * writes into it, so until then the nearest part of it that exists is the honest thing
+     * to open — ACT/, or Output/, which a destination always has. On a refusal about the
+     * open project, that project's product (or the nearest part of it that exists): it is
+     * the folder the refusal names and the one the box shows, and Save to is not used while
+     * the project is open. Save to only when there is no destination at all. */
+    function revealDest() {
+        var d = resolveDest();
+        var want = (d.ok || d.taken) ? d.dir
+                 : (d.from === "project" && d.product ? d.product : "");
+        var at = want;
+        while (at && !exists(at) && path.dirname(at) !== at) at = path.dirname(at);
+        reveal(want && exists(at) ? at : state.out);
+    }
+    el.reveal.addEventListener("click", revealDest);
     el.showsaved.addEventListener("click", function () { reveal(state.folder); });
 
-    /* The same folder as #reveal, reachable BEFORE a run instead of only from the report.
-     * Same fallback for the same reason: the sequence folder is not created until the engine
-     * writes into it, so until then the honest thing to open is the root he chose. */
-    el.openout.addEventListener("click", function () {
-        var d = outDir();
-        reveal(exists(d) ? d : state.out);
-    });
+    /* The same folder as #reveal, reachable BEFORE a run instead of only from the report,
+     * with the same fallback for the same reason. */
+    el.openout.addEventListener("click", revealDest);
 
     /* Re-measure. Deliberately a BUTTON rather than something that fires on its own after a
      * pause: it spawns a real encode of every clip, and a control that starts nineteen ffmpeg
@@ -8360,12 +9418,12 @@
             pocSay("No video clips on this timeline to render.", "warn");
             return;
         }
-        var dir = String(state.out || "").replace(/\/+$/, "");
-        if (!dir) {
-            pocSay("Set a destination folder first.", "warn");
-            return;
-        }
-        dir = dir + "/_render_poc";
+        /* 3.90 · IN THE PANEL'S OWN TEMP FOLDER, NOT UNDER SAVE TO. Save to is now meant to
+         * point at a product folder on the team drive — or at its Output/ACT/<version>/ — so
+         * <Save to>/_render_poc would drop this diagnostic's Premiere renders into the
+         * product's tree beside Asset/, Output/ and Sources/. It is a handful of short ranges,
+         * revealed in Finder when it finishes, so temp (workDir) is where it belongs. */
+        var dir = path.join(workDir(), "_render_poc");
 
         el.pocrender.disabled = true;
         pocSay("Rendering " + (ranges.length + 1) + " range(s)."
@@ -8617,7 +9675,11 @@
                 if (r.found) {
                     log("host found xmlcut.py: " + r.found);
                     setScript(r.found);
-                    if (state.dump && !state.busy) { setBusy(true, "Reading…"); scanClips(); }
+                    if (state.dump && !state.busy) {
+                        setBusy(true, "Reading…");
+                        readStage(2);              // the bar, as a first read shows it
+                        scanClips();
+                    }
                     // checkUpdate also sets the engine status line, so this is one
                     // subprocess rather than two saying overlapping things.
                     checkUpdate(false);

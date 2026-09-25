@@ -339,6 +339,25 @@ function ensureFolder(pathStr) {
     return f;
 }
 
+/* The open project's path as the platform spells it, or "" for an unsaved project.
+ *
+ * 3.90 · the panel reads the PRODUCT out of this path (…/SAMX_WORKSPACE/<Product>/…), so
+ * it has to be the same kind of string as every other path the panel handles — the one
+ * readFolderFor() below already gets by going through a File. app.project.path is passed on
+ * raw only if File cannot make sense of it. NOT MEASURED against a real Premiere read of a
+ * project saved on the drive: on this Mac no dump of a saved project was found, and the
+ * tests' stub is a plain POSIX path, which fsName returns unchanged. */
+function nativeProjectPath() {
+    var p = "";
+    try { p = String(app.project.path || ""); } catch (e) { return ""; }
+    if (!p) return "";
+    try {
+        var f = new File(p);
+        if (f.fsName) return String(f.fsName);
+    } catch (e2) {}
+    return p;
+}
+
 /* Next to the PROJECT, one folder per sequence:
  *
  *     <project folder>/xmlcut/<Sequence Name>/2026-08-12_134500.xml
@@ -762,7 +781,7 @@ function dumpActiveSequence() {
             format_version: 1,
             premiere_version: String(get(app, "version", "")),
             project_name: String(get(app.project, "name", "")),
-            project_path: String(get(app.project, "path", "")),
+            project_path: nativeProjectPath(),
             sequence: {
                 name: String(get(seq, "name", "")),
                 id: String(get(seq, "sequenceID", "")),
@@ -840,6 +859,13 @@ function dumpActiveSequence() {
         // to exist here to name the read folder, and two implementations of "what is a
         // legal folder name" would drift.
         result.safe_name = safeName(data.sequence.name);
+        /* 3.90 · WHERE THE PROJECT IS SAVED, because it can decide where the export goes: a
+         * project inside SAMX_WORKSPACE/<product>/ delivers into that product's
+         * Output/ACT/<version>/, whatever Save to says. It was already in the dump's own JSON
+         * (data.project_path), but the panel works from this summary, and reading the dump
+         * back off disk for one string would be a second copy of the same fact. "" for an
+         * unsaved project, which then leaves the product to Save to. */
+        result.project_path = data.project_path;
         result.fps = data.sequence.fps;
         // The sequence's own pixels. A render is made at these, not at any source clip's,
         // so the panel needs them to work out what bitrate a quality setting asks for.

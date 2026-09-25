@@ -46,7 +46,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.89"
+VERSION = "3.90"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -2053,6 +2053,9 @@ class Timeline:
         # flattened, nests that resolved to nothing, nesting too deep to follow.
         self.warnings: list[str] = []
         self.sequence_name = ""
+        # Premiere's sequenceID, when a panel dump names this timeline (see
+        # panel_sequence_id). An XML carries none of its own, so the CLI path leaves it "".
+        self.sequence_id = ""
         self.sequence_fps = 25.0
         # ⚠️ WHAT THE AUDIO A-NUMBERS ACTUALLY MEAN ON THIS PATH, and it
         # defaults to "unknown" ON PURPOSE. The manifest used to hardcode "premiere",
@@ -3541,6 +3544,7 @@ class DumpTimeline:
         self.warnings: list[str] = []
         self.available_sequences: list[dict] = []
         self.sequence_name = ""
+        self.sequence_id = ""
         self.sequence_fps = 25.0
         # ⚠️ WHAT THE AUDIO A-NUMBERS ACTUALLY MEAN ON THIS PATH, and it
         # defaults to "unknown" ON PURPOSE. The manifest used to hardcode "premiere",
@@ -3599,6 +3603,7 @@ class DumpTimeline:
 
         seq = data.get("sequence") or {}
         self.sequence_name = str(seq.get("name") or "Untitled Sequence")
+        self.sequence_id = _dump_sequence_id(seq)
         fps = seq.get("fps")
         if not isinstance(fps, (int, float)) or fps <= 0:
             tb = seq.get("timebase_ticks_per_frame") or 0
@@ -3830,6 +3835,61 @@ def match_dump_clip(buckets: dict, want_ticks: int, slack: float,
     return None, "ambiguous"
 
 
+def _dump_sequence_id(seq) -> str:
+    """The `id` a panel dump's sequence block carries — Premiere's sequenceID — or "".
+
+    Only a non-empty string or an integer counts: host.jsx writes String(sequenceID), and
+    anything else (null, a bool, a nested object from some other tool) is no identity."""
+    if not isinstance(seq, dict):
+        return ""
+    v = seq.get("id")
+    if isinstance(v, bool) or not isinstance(v, (str, int)):
+        return ""
+    return str(v).strip()
+
+
+def panel_sequence_id(tl, dump_path: Path) -> str:
+    """Premiere's sequenceID for this timeline, off the panel dump --panel names; "" if none.
+
+    ⚠️ 3.90 · WHICH SEQUENCE A VERSION FOLDER BELONGS TO. Two sequences can give one version
+    ("Brand vid 9.0 [a.b][c.d] v3" and its "… v3 4x5" variant are both v9.0), and the panel
+    refuses to export one into a folder the other already delivered into. Names cannot decide
+    that on their own: a rename keeps the sequence, and two sequences can share a name. So
+    the manifest records the ID the panel's own sequence check already compares on.
+
+    Only when the dump describes THIS timeline — the rule overlay_dump() merges by: a dump
+    of another sequence lends no identity. A missing, unreadable or foreign dump gives "",
+    and the manifest then simply has no `id` (readers must tolerate its absence)."""
+    try:
+        data = json.loads(Path(dump_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict) or data.get("generator") != DumpTimeline.GENERATOR:
+        return ""
+    seq = data.get("sequence")
+    if not isinstance(seq, dict):
+        return ""
+    if not same_sequence_name(seq.get("name"), tl.sequence_name):
+        return ""
+    return _dump_sequence_id(seq)
+
+
+def same_sequence_name(dump_name, xml_name) -> bool:
+    """Whether a panel dump's sequence name and the XML's are one timeline's name. True when
+    either is empty (there is nothing to compare).
+
+    ⚠️ STRIPPED AND CASE-FOLDED, the way `--sequence name:` matches (see _pick_sequence).
+    txt() strips every name it reads out of the XML, and the dump carries Premiere's name
+    exactly as typed — so a sequence called "Brand vid 9.0 v3 " (a trailing space, which
+    Premiere keeps) never matched itself. MEASURED on the 3.90 build: overlay_dump() dropped
+    the whole overlay ("not the same timeline, so nothing was merged") and panel_sequence_id()
+    recorded no id, so the panel's folder rules fell back to names and let a duplicate of
+    another id overwrite that sequence's delivery."""
+    a = str(dump_name or "").strip().casefold()
+    b = str(xml_name or "").strip().casefold()
+    return not a or not b or a == b
+
+
 def overlay_dump(tl, dump_path: Path) -> list[str]:
     """Overlay a panel dump onto an XML-parsed timeline. Returns notes to print.
 
@@ -3859,7 +3919,7 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
 
     notes: list[str] = []
     dseq = (data.get("sequence") or {}).get("name") or ""
-    if dseq and tl.sequence_name and dseq != tl.sequence_name:
+    if not same_sequence_name(dseq, tl.sequence_name):
         notes.append(f"the panel read {dseq!r} but the XML is {tl.sequence_name!r} "
                      f"— not the same timeline, so nothing was merged")
         return notes
@@ -7006,7 +7066,9 @@ ASIDE_DIR = "_earlier_export"
 # the identity and the settings it was made under, and --resume keeps a file only when this
 # record vouches for exactly that file, that cut and these settings. Hidden, because it is
 # the engine's bookkeeping and not a deliverable — the same reason partials are hidden — and
-# small: file names, cut ids, byte counts and eight settings, no paths.
+# small: file names, cut ids, byte counts, eight settings and (3.90) the sequence's name and
+# Premiere id, no paths. The panel reads it too, to tell whose clips a version folder holds
+# and in which mode (see ledger_sequence).
 LEDGER_NAME = ".xmlcut-ledger.json"
 LEDGER_SCHEMA = 1
 
@@ -7044,11 +7106,45 @@ def _manifest_record(out_dir: Path) -> tuple[dict, list]:
             [c for c in clips if isinstance(c, dict)] if isinstance(clips, list) else [])
 
 
+def _manifest_sequence(out_dir: Path) -> dict:
+    """The folder's manifest.json's sequence identity (ledger_sequence), or {}."""
+    try:
+        data = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return ledger_sequence(data.get("sequence")) if isinstance(data, dict) else {}
+
+
 def _known_bytes(v) -> int:
     """A recorded byte count, or 0 when the row carries none that can be trusted."""
     if isinstance(v, (int, float)) and not isinstance(v, bool) and int(v) > 0:
         return int(v)
     return 0
+
+
+def ledger_sequence(v) -> dict:
+    """A sequence identity as the ledger records it — {"name", "id"}, each only when it is a
+    non-empty string (or an integer id) — or {} for anything else.
+
+    ⚠️ 3.90 · WHICH SEQUENCE MADE EACH FILE, KEPT WHERE A RUN CANNOT ERASE IT. The panel
+    refuses to export one sequence into a version folder another sequence delivered into, or
+    in the other mode. It read both facts off manifest.json alone — and the manifest describes
+    ONE RUN (see LEDGER_NAME): MEASURED on the 3.90 build, a Retry whose one clip failed again
+    rewrote it as {missing_source: 1}, the folder still held all 19 delivered clips, and the
+    4x5 twin was let in and replaced or moved every one of them. A Cancel on the first export
+    (no manifest at all), a truncated or deleted manifest did the same. The ledger survives
+    all of those, and already carries each file's cut_from; this is the other half."""
+    if not isinstance(v, dict):
+        return {}
+    out = {}
+    for k in ("name", "id"):
+        x = v.get(k)
+        if isinstance(x, bool) or not isinstance(x, (str, int)):
+            continue
+        x = str(x).strip()
+        if x:
+            out[k] = x
+    return out
 
 
 class FolderLedger:
@@ -7076,6 +7172,10 @@ class FolderLedger:
         # never falls back to bare filenames here — see build_resume_index.
         self.had_record = had_record or existed or seeded
         self.now = now
+        # The sequence THIS run cuts, recorded with every file it writes (ledger_sequence).
+        # Set by main() once the timeline is known; {} leaves the entries without one, which
+        # is what an older version's entries look like too.
+        self.sequence: dict = {}
         self._lock = threading.Lock()
         self._warned = False
 
@@ -7112,8 +7212,15 @@ class FolderLedger:
                                        e.get("settings"), dict) else {})}
                     if e.get("seeded") is True:
                         files[name]["seeded"] = True
+                    # Kept across runs: a run that does not re-make this file must not erase
+                    # which sequence did (see ledger_sequence).
+                    _seq = ledger_sequence(e.get("sequence"))
+                    if _seq:
+                        files[name]["sequence"] = _seq
             return cls(out_dir, files, existed, False, now, aside=aside)
         settings, clips = _manifest_record(out_dir)
+        # The sequence that manifest's run cut, for the entries seeded from it below.
+        seq_was = _manifest_sequence(out_dir)
         # Only the fields that decide the pixels, and only those this manifest HAD: a field
         # an older version never recorded is absent, and absent is "not compared", which
         # is resume_settings_drift's rule for a folder written before the field existed.
@@ -7148,6 +7255,8 @@ class FolderLedger:
             # see vouches().
             files[out] = {"cut_id": cid, "bytes": size, "settings": dict(was),
                           "seeded": True}
+            if seq_was:
+                files[out]["sequence"] = dict(seq_was)
         # ⚠️ A MANIFEST WITH IDS IS A RECORD EVEN WHEN NOTHING IN IT COULD BE SEEDED. Without
         # this, a folder whose manifest held only `skipped_existing` rows — an older
         # version's resume that kept everything — seeded nothing, looked record-less, and
@@ -7162,6 +7271,8 @@ class FolderLedger:
         with self._lock:
             self.files[name] = {"cut_id": cut_id, "bytes": int(nbytes or 0),
                                 "settings": dict(self.now)}
+            if self.sequence:
+                self.files[name]["sequence"] = dict(self.sequence)
             self._save_locked()
 
     def vouches(self, name: str, cut_id: str) -> bool:
@@ -7212,9 +7323,11 @@ class FolderLedger:
         if not self.files and not self.aside and not self.existed:
             return
         doc = {"schema": LEDGER_SCHEMA, "tool": f"{NAME} {VERSION}",
-               "note": "What this tool wrote into this folder, for 'skip clips already "
-                       "there'. Safe to delete: the next export then keeps only what "
-                       "the last manifest.json says it encoded, and re-cuts the rest.",
+               "note": "What this tool wrote into this folder, and from which sequence, "
+                       "for 'skip clips already there' and for the panel's check of whose "
+                       "clips these are. If it is deleted, the next export keeps only what "
+                       "the last manifest.json says it encoded (and re-cuts the rest), and "
+                       "the panel has only manifest.json to tell whose the clips are.",
                "files": self.files, "set_aside": self.aside}
         tmp = self.out_dir / partial_name(LEDGER_NAME)
         try:
@@ -9115,6 +9228,9 @@ def export_summary(tl: Timeline, args) -> dict:
         "state": cut_state,
         "sequence": {
             "name": tl.sequence_name,
+            # Premiere's sequenceID — only when known (a panel run); the XML-only CLI path has
+            # none, and then the key is absent rather than "". See panel_sequence_id.
+            **({"id": str(tl.sequence_id)} if getattr(tl, "sequence_id", "") else {}),
             "fps": round(tl.sequence_fps, 6),
             "duration_frames": tl.sequence_duration_frames,
             "duration_tc": frames_to_tc(tl.sequence_duration_frames, tl.sequence_fps),
@@ -10085,6 +10201,9 @@ def main():
         # Skipped entirely for an audio-only run: the dump's video clips would all
         # "match" cuts that the --tracks filter is about to discard, and reporting
         # 18 matches on a run that cuts one audio clip describes work nobody asked for.
+        # The sequence's identity comes with any --panel, whatever --tracks does to the rest.
+        if args.panel:
+            tl.sequence_id = panel_sequence_id(tl, args.panel)
         if args.panel and args.tracks != "audio":
             merge_notes = overlay_dump(tl, args.panel)
         elif args.panel:
@@ -11232,6 +11351,8 @@ def main():
     # included, because a folder an older version wrote has only its manifest as a record,
     # and this run is about to replace that manifest — see FolderLedger.open.
     args.ledger = FolderLedger.open(args.out, args)
+    args.ledger.sequence = ledger_sequence({"name": tl.sequence_name,
+                                            "id": getattr(tl, "sequence_id", "")})
     if args.ledger.seeded:
         args.ledger.save()
 

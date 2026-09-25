@@ -394,7 +394,9 @@ ignores the crf setting and was slower on 640x360 stand-ins).
 ## 6. The manifest
 
 `manifest.csv` — one row per cut, 46 columns. `manifest.json` — the same plus sequence
-info, marker list, and run settings. Columns worth knowing:
+info, marker list, and run settings. Its `sequence` block carries Premiere's sequence ID as
+`id` when the run was given a panel dump (`--panel`, or a dump as the input); an XML-only run
+has no `id` key at all. Columns worth knowing:
 
 **Identity** — `index`, `clip_name`, `output_file`, `track_type`, `track_index`
 
@@ -445,8 +447,9 @@ proves this tool wrote it for that clip; otherwise that file is moved aside too.
 happens only once the re-encode is in place: if it fails, its source is offline or the
 export is cancelled, the old-numbered file stays where it was. A
 whole-timeline or per-track mix that fails is handled the same way. The hidden
-`.xmlcut-ledger.json` is the folder's record of what was written and with which settings;
-`--resume` reads it, and keeps a recorded clip even while its source media is offline.
+`.xmlcut-ledger.json` is the folder's record of what was written and with which settings
+(and, since 3.90, from which sequence: its name, and Premiere's ID when the run had a panel
+dump); `--resume` reads it, and keeps a recorded clip even while its source media is offline.
 
 Sequence markers land in `manifest.json` under `markers`, with name, comment, and timecode.
 
@@ -703,8 +706,7 @@ MY_SEQUENCE
 XML + Premiere · nests resolved, ramp keyframes read
 
 FILE TYPES     [x] .mp4 24   [x] .mov 3   [ ] .aep 1
-SAVE TO        …/Desktop/xmlcut clips           [Change]
-               → MY_SEQUENCE/
+PROJECT        v1.2 in Brand 1.0                [Open] [Change]
 
               [ Export 27 clips ]
 ```
@@ -712,22 +714,93 @@ SAVE TO        …/Desktop/xmlcut clips           [Change]
 Untick a type to skip it; project files like `.aep` start unticked because they can't be
 decoded.
 
-**Save to is a root you pick once.** Each export creates a folder named after the sequence
-inside it and writes there — `…/xmlcut clips/MY_SEQUENCE/`. That is not just tidiness: xmlcut
-numbers its output `01..N` **per run**, so cutting three sequences into one folder interleaved
-three sets of `01_`, `02_`, `03_` … and each run overwrote the previous one wherever a name
-collided. A folder per sequence means each run's numbering, `clips.csv` and manifest describe
-exactly one timeline.
+**Where the clips land: `<product>/Output/ACT/<version>/`** (since 3.90). The team drive
+`SAMX_WORKSPACE` holds one folder per product — `Asset/`, `Output/`, `Sources/` — and the
+export goes into that product's `Output/ACT/`, one folder per version of the edit, with the
+files flat inside it. There is no `raw/` or `edited/` any more: a Source export and a Timeline
+Render export of the same version share the folder.
 
-The line under the path shows the folder before it is created. If that folder already exists
-it says so in amber with a file count, because a re-export overwrites the names it reproduces
-and leaves the rest — so a folder from an older cut of the same timeline ends up holding a
-mixture. Tick **skip clips already in that folder** to add only what is missing, or empty it
-first.
+- **Which product.** If the open Premiere project is saved inside `SAMX_WORKSPACE`
+  (`…/SAMX_WORKSPACE/<Product>/Asset/project/x.prproj`), it is that `<Product>` — the row's
+  caption reads **Project** and Save to is not used (it may even be empty). Otherwise it is
+  **Save to**: point it at the product folder. Picking its `Output/`, its `Output/ACT/` or a
+  version folder inside `ACT/` comes to the same product. The box names the version folder
+  first and then the product — `v1.2 in Brand 1.0` — so a docked panel still shows the
+  version; click it, or hover, for the full path.
+- **It must already be a product.** The product needs an `Output/` folder (any case). Without
+  one the panel refuses to export — before anything runs — and says why; it never creates
+  `Output/`. So the default Save to, `~/Desktop/xmlcut clips`, is refused unless the project
+  is inside `SAMX_WORKSPACE`.
+- **`ACT/`** is used under the spelling it has on the drive. If it is not there yet the row
+  says so before you export (*Output/ACT isn't there yet — Export will create it*), the export
+  creates it, and the report says *this export created Output/ACT*. A FILE where `ACT/` or the
+  version folder has to go is refused, naming the file.
+- **Which version** comes from the **sequence name** only — never from a folder, since a
+  product can itself be called "Brand 2.0". Anything in `[...]` is an editor handle and is
+  ignored (a broken `a.b][c.d]` too); a `vid` number wins (`vid 13.0` → `v13.0`, `vid35.1` →
+  `v35.1`); otherwise a `v` number (`v3.2`, `V1.2` → `v1.2`, `v2.1.1`, `_v7`). It is always
+  written with a lowercase `v`. A name with no version (`S17`), or with two different ones, is
+  refused with a sentence naming what it found. The `v` must start a word and the number must
+  end one: `Rev3`, `2v3` and `Phởv1` hold no version, and neither does `v3.2a`. **A decimal
+  comma is not read** — `v1,2` is refused rather than read as `v1`; write `v1.2`. When a
+  refused name visibly holds a version (`V 1.2`, `v.1.2`, `[v1.2]`, `v1,2`), the sentence
+  says which forms are not read.
+- **Renaming the sequence after Read.** The version is read at Read. If the open sequence
+  has been renamed in Premiere to a different version since, Export refuses and asks for a
+  new Read; a rename that keeps the version (a handle added) exports as before. When Premiere
+  gives no sequence ID the panel cannot tell a rename from a different sequence, and it
+  refuses the same way whenever the open name gives another version (or none), rather than
+  asking "Export anyway?".
+- **A version folder that already exists is reused**: `v1`, `v1.0` and `V1.0` are one
+  version, so a sequence `… v1 …` delivers into the `v1.0/` Tech made rather than beside it
+  (`v1.2` and `v1.20` are two).
 
-Illegal characters in a sequence name are replaced, not stripped: `v2.0: final/cut` becomes
-`v2.0- final-cut`. `:` is the one that matters — HFS accepts it but Finder renders it as `/`,
-so a folder would appear under a name you never chose.
+The line above Export always shows the folder that will actually be written. xmlcut numbers
+its output `01..N` per run, and a re-export replaces the clips it makes again (or keeps them,
+with *skip clips already there*). A clip that is merely unticked this time is left where it
+is; a file the run cannot reuse is moved to `_earlier_export/` beside them, never deleted, and
+each move is a ⚠ note in the report. After the run the rail says how many files it moved
+there, counted on the disk. That a version folder already holds this sequence's clips is
+information (under ⚙ Info), not a warning. Clips that nothing in the folder records — no
+readable `manifest.json` and no `.xmlcut-ledger.json` naming who made them — are said in amber,
+because whose they are is for you to check. Only files named the way xmlcut names a clip
+(`NN_….mp4` and the other media it writes, and the two mixes) count; its own `manifest.*`,
+`clips.csv`, folders and anything else of yours (a `notes.txt`) do not.
+
+**A version folder belongs to the export it holds** (since 3.90). Export is refused —
+before anything runs, with one sentence saying what is there and what to do — when the version
+folder still holds clips, its record says who made them, and either:
+
+- **another sequence** delivered them. Two sequences whose names give the same version —
+  `Brand vid 9.0 … v3` and its `… v3 4x5` variant are both `v9.0` — cannot share one flat
+  folder. Rename this sequence to another version (the sentence suggests one that ACT/ does not
+  have yet, e.g. `vid 9.1`), or, if this sequence replaces that one, move that folder's clips
+  out first. Renaming the *other* sequence does not free the folder: its clips stay there. The
+  panel compares Premiere's sequence ID, which the manifest and the ledger record since 3.90,
+  so renaming a sequence (a handle changed, `V` for `v`, a space at the end) keeps its folder;
+  only when an ID is missing on either side does it compare the names, with handles, spacing
+  and case ignored.
+- **the other mode** delivered them. A Source Render and a Timeline Render name their files by
+  different times, so one after the other would replace or leave behind the first run's files.
+  Switch back to the folder's mode, or export this one under another version. A record from
+  before the mode was kept does not block.
+
+The record is two files. `manifest.json` describes the last run only, and a Retry or a
+narrowed re-export that writes nothing replaces it with a list of what failed — so the folder's
+hidden `.xmlcut-ledger.json`, which the engine updates after every clip it puts in place and
+never empties while the clip is there, names each clip's sequence and mode as well. Either one
+naming another sequence (or the other mode) for clips still in the folder is enough; a Cancel,
+a failed Retry, or a `manifest.json` cut short or deleted does not free it. A folder that is
+empty, holds no clips, or whose clips neither file claims is free.
+
+A Timeline Render that does not finish cleanly keeps its `_renders/` inside that version
+folder for Retry; the note says so, and it is not part of the delivery — delete it when you
+are done.
+
+The read folder beside the project (below) is still named after the sequence, with illegal
+characters replaced, not stripped: `v2.0: final/cut` becomes `v2.0- final-cut`. `:` is the
+one that matters — HFS accepts it but Finder renders it as `/`, so a folder would appear
+under a name you never chose.
 
 Step 2 also lists **every clip the export will make**, the same columns as the browser GUI:
 

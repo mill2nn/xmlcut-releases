@@ -674,8 +674,11 @@
          bar measured 155px. The frame still lights when no folder is chosen — see the
          .actionbar .g-dest rules, which keep the border for exactly that state. -->
 <div class="group g-dest" id="destgroup">
-        <div class="gcap">Save to
-        </div>
+        <!-- 3.90 · THE CAPTION SAYS WHOSE FOLDER THIS IS. After a read the box shows the
+             resolved <product>/Output/ACT/<version>/, and the product comes either from the
+             open project (inside SAMX_WORKSPACE) or from Save to — "Project" or
+             "Save to", set by paintOutPath() in main.js. -->
+        <div class="gcap" id="destcap">Save to</div>
         <div class="fields">
             <div class="field f-dest">
                 <div class="pathrow">
@@ -704,8 +707,8 @@
                  before pressing it: "Export 19 clips". -->
             <!-- Beside Export because "where did it go" gets asked in the same breath as
                  "go", and the report's own Show in Finder only exists AFTER a run. Opens the
-                 folder this export writes into — <sequence>/raw or <sequence>/edited — or the
-                 save-to root before the engine has created it. -->
+                 folder this export writes into — <product>/Output/ACT/<version>/ since 3.90 —
+                 or, before the export has created it, the nearest part of it that exists. -->
             <!-- "Folder", not "Open folder": the longer label pushed this row 9px past a
                  320px dock — measured, and the run/done rows were 0px over, which is how the
                  label rather than the layout was identified as the cause. -->
