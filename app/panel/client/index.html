@@ -677,7 +677,8 @@
         <!-- 3.90 · THE CAPTION SAYS WHOSE FOLDER THIS IS. After a read the box shows the
              resolved <product>/Output/ACT/<version>/, and the product comes either from the
              open project (inside SAMX_WORKSPACE) or from Save to — "Project" or
-             "Save to", set by paintOutPath() in main.js. -->
+             "Save to", set by paintOutPath() in main.js. 3.91 added "Matched" and "Picked",
+             3.92 "Chosen": a folder chosen with Change for this project. -->
         <div class="gcap" id="destcap">Save to</div>
         <div class="fields">
             <div class="field f-dest">
@@ -691,7 +692,9 @@
             <!-- 3.91 · THE PRODUCT MENU, only for a project saved on another shared drive: its
                  path is matched against SAMX_WORKSPACE's product folders, and when nothing
                  matches exactly (or to overrule a match) the product is picked here and
-                 remembered for that project. A plain select, filled by paintProductPick(). -->
+                 remembered for that project. A plain select, filled by paintProductPick().
+                 3.92 · also shown while a folder chosen with Change is active — for a project
+                 inside SAMX_WORKSPACE too — with "Back to …" to forget it. -->
             <div class="field f-product" id="productrow" hidden>
                 <select id="productpick" class="sel wide" title="Which SAMX_WORKSPACE product this project's clips go to"></select>
             </div>

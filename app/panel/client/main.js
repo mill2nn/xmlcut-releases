@@ -86,6 +86,10 @@
         info: null,          // summary returned by the ExtendScript
         types: {},           // ext -> {count, on}
         out: "",             // Save to — the product folder, unless the project names one
+        /* 3.92 · a folder chosen with Change while no read was in (it became Save to), and
+         * the destination the box last showed as ready — see doExport's destMoved(). */
+        outPickedUnread: "",
+        shownDir: "",
         /* 3.90 · the Output/ACT this export is about to create ("" when it already exists),
          * and whether the run that just ended did create it. See settleAct(). */
         actWanted: "",
@@ -724,7 +728,7 @@
      * row as "audionum" and "ramps". */
     var RAIL_KEYS = ["seq", "err", "failures", "audionum", "audio", "hear", "fps", "media",
                      "readmode",
-                     "ramps", "types", "preset", "dest", "stall", "sizes", "rendermode",
+                     "ramps", "types", "preset", "dest", "pickout", "stall", "sizes", "rendermode",
                      "complete", "renders", "exportwait", "scan", "saved"];
     var railRows = {};        // key -> {sev, text, title}
 
@@ -1077,7 +1081,24 @@
             "File 3.90 \u0111\u1ec3 th\u1eb3ng trong <version>/ \u0111\u01b0\u1ee3c gi\u1eef nguy\u00ean, panel nh\u1eafc d\u1ecdn tay. Retry ch\u1ea1y \u0111\u00fang th\u01b0 m\u1ee5c l\u1ed7i, d\u00f9ng l\u1ea1i render c\u00f2n gi\u1eef, ch\u1ec9 render l\u1ea1i clip thi\u1ebfu."
     ].concat(CL_390);
 
+    /* 3.92 · the hotfix for an editor's report the day 3.91 shipped: a team folder named
+     * "<Product> (…) - <description>" now matches its product; and (the product owner, the same
+     * day) Change takes ANY folder but SAMX_WORKSPACE itself — a SAMX_WORKSPACE product is
+     * picked, a product folder elsewhere keeps Output/ACT/, any other folder is a free folder,
+     * chosen for the project and winning — and Save to off the team drives is taken freely too.
+     * Five lines, the same limits as 3.91's; each scoped to the route it is true on (fix review,
+     * 29 Sep: "thư mục khác" also read as a product folder elsewhere, and the per-project line
+     * read as true off the team drives, where Change sets the one Save to every project uses). */
+    var CL_392 = [
+            "Project \u1edf shared drive kh\u00e1c: th\u01b0 m\u1ee5c c\u00f3 t\u00ean B\u1eaeT \u0110\u1ea6U b\u1eb1ng t\u00ean m\u1ed9t s\u1ea3n ph\u1ea9m tr\u00ean SAMX_WORKSPACE (vd \u201c<SP> (\u2026) - m\u00f4 t\u1ea3\u201d) nay t\u1ef1 kh\u1edbp, kh\u00f4ng c\u1ea7n ch\u1ecdn menu.",
+            "N\u00fat Change nh\u1eadn M\u1eccI th\u01b0 m\u1ee5c tr\u1eeb g\u1ed1c SAMX_WORKSPACE: trong s\u1ea3n ph\u1ea9m SAMX l\u00e0 ch\u1ecdn s\u1ea3n ph\u1ea9m \u0111\u00f3; th\u01b0 m\u1ee5c th\u01b0\u1eddng v\u00e0o <th\u01b0 m\u1ee5c>/<version>/raw ho\u1eb7c /edited.",
+            "Th\u01b0 m\u1ee5c th\u01b0\u1eddng = kh\u00f4ng c\u00f3 Output/, ngo\u00e0i SAMX_WORKSPACE; kh\u00f4ng t\u1ea1o Output/ACT trong n\u00f3. Th\u01b0 m\u1ee5c s\u1ea3n ph\u1ea9m \u1edf n\u01a1i kh\u00e1c (c\u00f3 Output/) v\u1eabn v\u00e0o Output/ACT/.",
+            "Project \u1edf shared drive, khi c\u00f3 SAMX_WORKSPACE: th\u01b0 m\u1ee5c ch\u1ecdn b\u1eb1ng Change sau Read nh\u1edb ri\u00eang t\u1eebng project, th\u1eafng c\u1ea3 s\u1ea3n ph\u1ea9m t\u1ef1 kh\u1edbp; menu c\u00f3 \u201cBack to \u2026\u201d.",
+            "Project ngo\u00e0i m\u1ecdi shared drive: Change \u0111\u1eb7t Save to (chung m\u1ecdi project), nh\u1eadn th\u01b0 m\u1ee5c b\u1ea5t k\u1ef3 nh\u01b0 tr\u00ean; th\u01b0 m\u1ee5c th\u01b0\u1eddng v\u00e0o <Save to>/<version>/raw|edited."
+    ].concat(CL_391);
+
     var CHANGELOG = {
+        "3.92": CL_392,
         "3.91": CL_391,
         "3.90": CL_390,
         "3.89": CL_389,
@@ -1748,6 +1769,8 @@
         say("sizes", "warn", "");
         say("renders", "info", "");
         say("failures", "error", "");
+        // 3.92 · what the last Change press said was about the project that was open then.
+        say("pickout", "info", "");
         /* And the mismatch row, which this read is about to settle one way or the other:
          * pressing Read is one of the two ways to resolve it (switching back is the other),
          * so leaving it up while the read runs would show an error about a state that has
@@ -1842,6 +1865,17 @@
                 log("project not saved — falling back to the Desktop");
             }
             say("saved", "info", note.join(" "));
+            /* 3.92 · A FOLDER CHOSEN WITH CHANGE BEFORE ANY READ became Save to — the project was
+             * not known yet — and a project inside SAMX_WORKSPACE or on a team drive does not use
+             * Save to, so the read dropped his folder without a word: the editor's "khi a chọn
+             * lại folder thì ko có gì xảy ra cả" by another door (fix review, 29 Sep). Said once. */
+            var early = state.outPickedUnread;
+            state.outPickedUnread = "";
+            if (early && state.out === early && resolveDest().from !== "saveto") {
+                say("pickout", "warn", "The folder chosen before Read, " + qn(path.basename(early)
+                    || early) + ", became Save to, which this project does not use — press Change "
+                    + "and choose it again to export this project there.", early, true);
+            }
             renderSequence();
             exportXML();
         });
@@ -2906,6 +2940,73 @@
         return at;
     }
 
+    /* 3.92 · WHAT A FOLDER CHOSEN BY HAND IS — Save to, or a folder chosen with Change for one
+     * project (xmlcut.freedest) — and so which layout its clips get. One place, asked by
+     * resolveDest() on every repaint, so a folder decides the same way wherever it came from:
+     *
+     *   "samx"      inside a SAMX_WORKSPACE product — the product folder or anything in it: that
+     *               product, the ACT layout. Nothing inside SAMX_WORKSPACE is ever a free folder;
+     *               a product there with no Output/ is refused as 3.91 refuses it ("ask Tech").
+     *   "product"   a product folder anywhere else: one with an Output/, or its Output/,
+     *               Output/ACT/, a version or mode folder inside (saveToProduct's walk) — 3.90's
+     *               "product folders outside SAMX with an Output/ still count". The ACT layout.
+     *   "samxroot"  SAMX_WORKSPACE itself: no product, and not a free folder either — a v1.2/ at
+     *               its top would read as a product called "v1.2" to every panel and to Tech.
+     *   "free"      anything else: <folder>/<version>/raw|edited, the same version and mode
+     *               folders with no Output/ACT above them (the product owner, 29 Sep).
+     *
+     * ⚠️ A FREE FOLDER'S OWN VERSION OR MODE FOLDER IS THE SAME INTENTION ONE LEVEL DOWN, as
+     * saveToProduct() walks up from ACT/<version>: choosing <folder>/v1.1/raw — the last export,
+     * opened in Finder — would otherwise give <folder>/v1.1/raw/v1.2/raw. Walked up only when
+     * the folder is recognisably this layout's: a raw/ or edited/ inside a version folder, or a
+     * version folder holding a raw/ or edited/. An empty "v2" made by hand stays the folder.
+     *
+     * ⚠️ WALKED ONCE, WHEN THE FOLDER IS CHOSEN (`walk`, from the Change press), and the folder
+     * walked to is what is remembered — never again at a repaint. The walk asks the disk what a
+     * version folder holds, so re-walking a remembered <folder>/v1.1 on every resolve moved the
+     * destination to <folder>/v1.1/v1.2/raw the day v1.1's raw/ was moved out: the menu then
+     * said "Chosen: v1.1", a folder nobody chose, and one version's delivery was split in two
+     * (fix review, 29 Sep). What the remembered folder IS (samx / product / free) is still
+     * asked at every resolve.
+     *
+     * {kind, product: the product folder (samx, product), base: the free folder (free)}. */
+    function chosenLayout(p, walk) {
+        var at = String(p || "").replace(/\/+$/, "");
+        var out = { kind: "", product: "", base: "" };
+        /* 3.92 fix review · "/" — Macintosh HD in the folder dialog — is no folder to export
+         * into (the system volume is read-only): "root", refused with a sentence naming it. It
+         * was kind "", so a chosen "/" gave ok false with no reason, a live Export button, and
+         * then "Choose a folder to save into first." right after he had chosen one. */
+        if (!at) { if (/^\/+$/.test(String(p || ""))) out.kind = "root"; return out; }
+        var sp = projectProduct(at + "/");
+        if (sp) { out.kind = "samx"; out.product = sp; return out; }
+        if (path.basename(at).toLowerCase() === "samx_workspace") { out.kind = "samxroot"; return out; }
+        var prod = saveToProduct(at);
+        if (prod !== at || childDir(at, function (n) { return n.toLowerCase() === "output"; }, "Output")) {
+            out.kind = "product";
+            out.product = prod;
+            return out;
+        }
+        out.kind = "free";
+        out.base = walk ? freeBase(at) : at;
+        return out;
+    }
+
+    /* The folder a Change press remembers (or makes Save to): the walked base of a free
+     * folder, else the folder as chosen — see chosenLayout(). */
+    function chosenFolder(at) {
+        var lay = chosenLayout(at, true);
+        return lay.kind === "free" ? lay.base : at;
+    }
+
+    function freeBase(at) {
+        var isMode = function (n) { var l = n.toLowerCase(); return l === "raw" || l === "edited"; };
+        var up = path.dirname(at);
+        if (isMode(path.basename(at)) && versionKey(path.basename(up))) return path.dirname(up);
+        if (versionKey(path.basename(at)) && childDir(at, isMode, "")) return up;
+        return at;
+    }
+
     /* ══════════ 3.91 · THE PRODUCT OF A PROJECT SAVED OUTSIDE SAMX_WORKSPACE — "auto-match,
      * else pick" (the product owner, 29 Sep 2026).
      *
@@ -3072,6 +3173,36 @@
         return hit;
     }
 
+    /* 3.92 · A FOLDER THAT STARTS WITH A PRODUCT'S NAME IS THAT PRODUCT'S (the product owner,
+     * 29 Sep 2026, after an editor's report the same afternoon: "tool sẽ ko detect được nếu tên
+     * folder gốc có tên khác với tên folder trên SAMX"). The team drives name a product's folder
+     * "<Product> (<brand> <earlier name>) - <description>", so 3.91's exact match found 73 of
+     * the 562 team folders on the live drives; this finds 15 more, none of them ambiguous.
+     *
+     *   The name must be followed by a separator — never a letter or a digit, so "Brandx" is
+     *   not "Brand" — and not by a version: "Brand 2 - …", "Brand v2" and "Brand v.B" may be
+     *   another product, so they go to the menu, where Brand is still listed first.
+     *   Used only when nothing matches exactly, and only when exactly ONE product leads a
+     *   folder; two ("Brand" and "Brand Two" both start "Brand Two - X") is a pick. */
+    var LEAD_VERSION_RE = /^[\s\-_.,:\u2013\u2014]*(?:\d|(?:v|ver|version)\.?\s*(?:\d|[a-z](?![a-z])))/;
+    function leadingProducts(names, below) {
+        var hit = [];
+        for (var i = 0; i < names.length; i++) {
+            var nk = nameKey(names[i]);
+            if (nk.length < 3) continue;
+            for (var j = 0; j < below.length; j++) {
+                var ck = nameKey(below[j]);
+                if (ck.length <= nk.length || ck.indexOf(nk) !== 0) continue;
+                var rest = ck.slice(nk.length);
+                if (/[a-z0-9\u00DF-\u00F6\u00F8-\u024F\u1E00-\u1EFF]/.test(rest.charAt(0))) continue;
+                if (LEAD_VERSION_RE.test(rest)) continue;
+                hit.push(names[i]);
+                break;
+            }
+        }
+        return hit;
+    }
+
     /* The likeliest products first: best score, then (3.91 review) the LONGER run of the path's
      * folder name it shares from the start, then name; the rest are not candidates. Without the
      * middle key a tier sorted by the alphabet, so a product that is a prefix of a more specific
@@ -3098,29 +3229,51 @@
         return scored.map(function (x) { return x.n; });
     }
 
-    function loadPicks() {
+    /* 3.92 · one JSON object of {project path: value} under a key — the Product menu's picks
+     * (PICK_KEY) and the folders chosen with Change (FREE_KEY) are kept the same way. */
+    function loadKeyed(key) {
         var o = null;
-        try { o = JSON.parse(window.localStorage.getItem(PICK_KEY) || "{}"); } catch (e) { o = null; }
+        try { o = JSON.parse(window.localStorage.getItem(key) || "{}"); } catch (e) { o = null; }
         return (o && typeof o === "object" && Object.prototype.toString.call(o) !== "[object Array]")
             ? o : {};
     }
 
-    function pickFor(projectPath) {
-        var v = loadPicks()[String(projectPath || "")];
+    function keyedFor(key, projectPath) {
+        var v = loadKeyed(key)[String(projectPath || "")];
         return typeof v === "string" ? v : "";
     }
 
     /* Remembered per project PATH, newest last, the oldest dropped past PICK_KEEP. "" forgets
-     * the pick (back to the match, or to nothing). */
-    function rememberPick(projectPath, name) {
-        var o = loadPicks(), k = String(projectPath || "");
+     * the value (back to the match, or to nothing). */
+    function rememberKeyed(key, projectPath, value) {
+        var o = loadKeyed(key), k = String(projectPath || "");
         if (!k) return;
         delete o[k];
-        if (name) o[k] = String(name);
+        if (value) o[k] = String(value);
         var keys = Object.keys(o);
         while (keys.length > PICK_KEEP) delete o[keys.shift()];
-        try { window.localStorage.setItem(PICK_KEY, JSON.stringify(o)); } catch (e) {}
+        try { window.localStorage.setItem(key, JSON.stringify(o)); } catch (e) {}
     }
+
+    function pickFor(projectPath) { return keyedFor(PICK_KEY, projectPath); }
+    function rememberPick(projectPath, name) { rememberKeyed(PICK_KEY, projectPath, name); }
+
+    /* ══════════ 3.92 · A FOLDER CHOSEN WITH CHANGE, FOR ONE PROJECT (the product owner,
+     * 29 Sep 2026: "also make the change to able to accept freely path that user choose too").
+     *
+     * On a project that decides its own destination — inside SAMX_WORKSPACE, or on another team
+     * drive with a SAMX_WORKSPACE to match in — Change onto any folder that is not a SAMX
+     * product is remembered for THAT project, here, and WINS: over an exact or a leading match,
+     * over a Product-menu pick, and over the project's own SAMX product. The last explicit
+     * choice wins, so a later menu pick, "Back to …" in the menu, or Change onto a SAMX product
+     * forgets it (changeTakenByProject, the menu's handler). Save to is never touched by it:
+     * the next project that does use Save to must not be sent to a folder chosen for this one.
+     *
+     * A NEW key, beside xmlcut.productpick and bounded the same way (PICK_KEEP): renaming or
+     * reusing an existing xmlcut.* key would drop what a released panel already remembers. */
+    var FREE_KEY = "xmlcut.freedest";
+    function freeFor(projectPath) { return keyedFor(FREE_KEY, projectPath); }
+    function rememberFree(projectPath, dir) { rememberKeyed(FREE_KEY, projectPath, dir); }
 
     /* THE ROUTE for the open project, or null when it is not this one (no project, a project
      * inside SAMX_WORKSPACE, one outside every shared drive, or no SAMX_WORKSPACE to be found).
@@ -3149,12 +3302,23 @@
         }
         if (!c.sd || !c.samx) return null;
         var matches = matchedProducts(c.names, c.sd.below);
+        // 3.92 · no exact match: the one product whose name starts a folder of the path.
+        var lead = matches.length ? [] : leadingProducts(c.names, c.sd.below);
+        /* 3.92 fix review · two or more leading products are listed likeliest first, by
+         * productCandidates' order (the longer shared lead first) — leadingProducts walks the
+         * alphabetical listing, which put "Brand" before "Brand Two" for "Brand Two - X": the
+         * order 3.91's review had fixed, undone for the menu and the sentence. */
+        if (lead.length > 1) {
+            var ord = productCandidates(c.names, c.sd.below);
+            var at = function (n) { var i = ord.indexOf(n); return i < 0 ? ord.length : i; };
+            lead.sort(function (a, b) { return (at(a) - at(b)) || (a < b ? -1 : a > b ? 1 : 0); });
+        }
         var pick = pickFor(pp);
         if (pick && c.names.indexOf(pick) < 0) pick = "";
-        var auto = matches.length === 1 ? matches[0] : "";
+        var auto = matches.length === 1 ? matches[0] : lead.length === 1 ? lead[0] : "";
         var chosen = pick || auto;
         return { samx: c.samx, names: c.names, below: c.sd.below, folder: productFolderOf(c.sd.below),
-                 matches: matches, auto: auto, pick: pick, project: pp,
+                 matches: matches, lead: lead, auto: auto, pick: pick, project: pp,
                  product: chosen ? path.join(c.samx, chosen) : "" };
     }
 
@@ -3185,6 +3349,14 @@
             return "The project's folders name " + r.matches.length + " SAMX_WORKSPACE products, "
                 + qn(r.matches[0]) + " and " + qn(r.matches[1]) + ", so nothing can be exported "
                 + "yet — pick the one this edit belongs to below.";
+        }
+        if (r.lead && r.lead.length > 1) {
+            // Every one of them, likeliest first — with three, the likeliest was left out.
+            var named = r.lead.map(qn);
+            return "The project's folders start with the names of " + r.lead.length
+                + " SAMX_WORKSPACE products, " + named.slice(0, -1).join(", ") + " and "
+                + named[named.length - 1]
+                + ", so nothing can be exported yet — pick the one this edit belongs to below.";
         }
         var near = productCandidates(r.names, r.below);
         if (!r.folder) {
@@ -3240,14 +3412,77 @@
      * same reason (paintOutPath). The remedy for a product with no Output/ is also not the
      * editor's: Tech sets up each product's Output/, which is why that sentence says to ask
      * Tech rather than, as the spec's Save-to sentence does, to open another project. */
-    var NOT_SAVE_TO = "Save to is not used while a project from SAMX_WORKSPACE is open.";
+    /* 3.92 · each ends with what Change does on this route now: it chooses a folder for THIS
+     * project (a SAMX product, or any other folder), never Save to. */
+    var NOT_SAVE_TO = "Save to is not used while a project from SAMX_WORKSPACE is open; Change "
+        + "chooses another folder for this project alone.";
     // 3.91 · the same for the matched / picked product of a project on another shared drive.
     var NOT_SAVE_TO_PICK = "Save to is not used while the open project's product is matched "
-        + "or picked here.";
+        + "or picked here; Change chooses another folder for this project alone.";
     /* 3.91 review · and while nothing is matched or picked yet: pointing Save to at the right
      * product changed nothing on this route, with "Change" live beside it and no word why. */
-    var NOT_SAVE_TO_UNMATCHED = "Save to is not used for this project: its product is matched "
-        + "or picked here.";
+    /* 3.92 · and it names the ways that DO work, since "Change" is the button beside it and the
+     * one an editor reaches for (the editor's report: "khi a chọn lại folder thì ko có gì xảy ra
+     * cả"): Change picks the product when the folder is one in SAMX_WORKSPACE, and since the
+     * free folders any other folder is taken for this project as it is. */
+    var NOT_SAVE_TO_UNMATCHED = "Save to is not used for this project: pick its product below, "
+        + "or choose a folder for it with Change — its product's folder in SAMX_WORKSPACE, or "
+        + "any other.";
+
+    /* 3.92 · THE REFUSALS OF A FOLDER CHOSEN BY HAND — Save to, or a folder chosen with Change
+     * for this project — each naming the folder and the way out. The panel never creates the
+     * folder it was pointed at: a chosen folder that has gone is a drive that is not mounted or
+     * a folder renamed in Finder, and making it again would put the clips where nobody looks. */
+    function handWhy(d, what) {
+        var at = shortPath(d.product || d.chosen || state.out, 44);
+        var chosen = d.from === "chosen";
+        var who = chosen ? "The folder chosen for this project, " + at + "," : "Save to " + at;
+        // The last of a list of ways out: "…, or choose another folder" / "…, choose another
+        // folder with Change, or go back to Brand in the menu below".
+        var other = chosen ? "choose another folder with Change, or go back to "
+            + backName(d) + " in the menu below" : "or choose another folder";
+        if (what === "root") {
+            return (chosen ? "The folder chosen for this project" : "Save to") + " is the top "
+                + "of the disk (/), which is not a folder to export into — " + (chosen
+                    ? "choose another folder with Change, or go back to " + backName(d)
+                      + " in the menu below" : "choose a folder inside it with Change") + ".";
+        }
+        if (what === "samxroot") {
+            return (chosen ? "The folder chosen for this project" : "Save to") + " is "
+                + "SAMX_WORKSPACE itself, which is not a product, so nothing can be exported "
+                + "there — choose the product's folder inside it, or any folder outside "
+                + "SAMX_WORKSPACE.";
+        }
+        /* A SAMX_WORKSPACE product that is not there is the team drive's or Tech's to fix: a
+         * product folder made by hand has no Output/ (refused again) and shows up as a product
+         * in every panel's menu, so "make the folder" is not said for it (fix review, 29 Sep). */
+        if (what === "gone" && d.kind === "samx") {
+            return who + " isn’t there — reconnect the team drive (ask Tech if the product was "
+                + "renamed or removed), " + other + ".";
+        }
+        if (what === "gone") {
+            return who + " isn’t there, and the panel never creates the folder it saves into — "
+                + "reconnect the drive or share it lives on, make the folder, " + other + ".";
+        }
+        // A SAMX product with no Output/ (Tech's to set up), or a product walked up to (from its
+        // Output/ or ACT/) whose Output/ is not there any more.
+        if (d.kind === "samx") {
+            return who + " is a SAMX_WORKSPACE product with no Output/, so nothing can be "
+                + "exported there — ask Tech to set up its Output/ folder, " + other
+                + "; this panel never creates one.";
+        }
+        return who + " has no Output/, so nothing can be exported there — "
+            + (chosen ? other : "choose another folder") + "; this panel never creates one.";
+    }
+
+    /* What "Back to …" in the menu goes back to, while a chosen folder is active: the project's
+     * own SAMX product, else its match or pick, else SAMX_WORKSPACE (nothing matched yet), else
+     * Save to (no SAMX_WORKSPACE found for it). */
+    function backName(d) {
+        if (d.own) return path.basename(d.own);
+        if (d.route) return d.route.product ? path.basename(d.route.product) : "SAMX_WORKSPACE";
+        return "Save to";
+    }
 
     /* 3.91 · THE MODE HAS ITS OWN FOLDER AGAIN, inside the version: <version>/raw/ for Source
      * Render and <version>/edited/ for Timeline Render (the product owner, 29 Sep: "vẫn giữ
@@ -3262,28 +3497,61 @@
      * 3.91 · d.dir is the MODE folder (<version>/raw or <version>/edited) — what outDir()
      * returns and every consumer writes into; d.versionPath is the version folder around it.
      * d.from is "project" (inside SAMX_WORKSPACE), "matched" / "picked" / "unmatched" (a
-     * project on another shared drive — productRoute), or "saveto". */
+     * project on another shared drive — productRoute), "chosen" (3.92, a folder chosen with
+     * Change for this project), or "saveto".
+     *
+     * 3.92 · TWO LAYOUTS, ONE WALK. d.free says which: false is <product>/Output/ACT/<version>/
+     * <mode>, true is <folder>/<version>/<mode> (chosenLayout). Everything after the product
+     * is the same walk over the same fields — d.act is the folder the VERSION folders are in
+     * (Output/ACT, or the free folder itself, which d.product then holds), so the version found
+     * by sameVersion, the mode folder, the FILE-in-the-way refusal, folderTaken(), legacyFlat(),
+     * outDir(), renderDir(), the box and every sentence follow without a case of their own. */
     function resolveDest() {
         var d = { ok: false, dir: "", product: "", from: "", output: "", act: "",
                   actExists: false, version: "", versionDir: "", versionExists: false,
                   versionPath: "", mode: "", modeDir: "", modeExists: false, legacy: null,
-                  samx: "", route: null, why: "" };
+                  samx: "", route: null, why: "",
+                  free: false, kind: "", chosen: "", own: "" };
         if (!state.info) return d;
-        d.product = projectProduct(state.info.project_path);
-        d.from = d.product ? "project" : "saveto";
-        var r = d.product ? null : productRoute();
+        var pp = String(state.info.project_path || "");
+        d.own = projectProduct(pp);
+        var r = d.own ? null : productRoute();
         if (r) {
             d.route = r;
             d.samx = r.samx;
+        }
+        /* 3.92 · THE ROUTE, ranked as the product owner decided: a folder chosen with Change for
+         * THIS project first — over the project's own SAMX product, a match, a leading match and
+         * a menu pick; then the project's product; then its matched or picked product; then
+         * Save to, which only a project outside every team drive uses. `hand` is the folder
+         * chosen by hand whose layout decides (chosenLayout): the chosen folder, or Save to. */
+        d.chosen = freeFor(pp);
+        var hand = "";
+        if (d.chosen) {
+            d.from = "chosen";
+            hand = d.chosen;
+        } else if (d.own) {
+            d.from = "project";
+            d.product = d.own;
+        } else if (r) {
             d.from = r.pick ? "picked" : r.auto ? "matched" : "unmatched";
             d.product = r.product;
-        } else if (!d.product) {
-            d.product = saveToProduct(state.out);
+        } else {
+            d.from = "saveto";
+            hand = state.out;
         }
-        var fromProject = d.from !== "saveto";
+        if (hand) {
+            var lay = chosenLayout(hand);
+            d.kind = lay.kind;
+            d.free = lay.kind === "free";
+            d.product = d.free ? lay.base : lay.product;
+        }
+        var fromProject = d.from !== "saveto" && d.from !== "chosen";
         var notSave = d.from === "project" ? NOT_SAVE_TO : NOT_SAVE_TO_PICK;
         var why = [];
         if (d.from === "unmatched") why.push(unmatchedWhy(r) + " " + NOT_SAVE_TO_UNMATCHED);
+        if (d.kind === "samxroot") why.push(handWhy(d, "samxroot"));
+        if (d.kind === "root") why.push(handWhy(d, "root"));
         if (!d.product && !why.length) return d;
         var at = shortPath(d.product, 44);
         var whose = d.from === "project" ? "The open project's product folder "
@@ -3292,23 +3560,19 @@
         var comma = d.from === "matched" || d.from === "picked" ? "," : "";
         /* ⚠️ Output/ IS NEVER CREATED HERE, and that is the whole test of "is this a product
          * folder". Making it would turn any folder Save to happens to point at — the default
-         * is ~/Desktop/xmlcut clips — into a fake product with a delivery tree in it. */
+         * is ~/Desktop/xmlcut clips — into a fake product with a delivery tree in it.
+         * 3.92 · and a free folder is never created either (handWhy "gone"): the engine's
+         * mkdir(parents) makes only the version and mode folders INSIDE a folder that is there. */
         if (!d.product) {
-            // unmatched: said above, nothing to look at on disk
+            // unmatched / SAMX_WORKSPACE itself: said above, nothing to look at on disk
         } else if (!isDir(d.product)) {
             if (fromProject) {
                 why.push(whose + at + comma + " isn’t reachable — "
                     + "reconnect the shared drive, then press Read again. " + notSave);
-            } else if (!canCreate(d.product)) {
-                // The unmounted share: the sentence 3.89 said, for the same population.
-                why.push("Save to " + at + " isn’t there, and the export cannot create it. "
-                    + "Reconnect the drive or share it lives on, or choose another folder.");
             } else {
-                why.push(at + " isn’t a product folder (it has no Output/), so nothing can "
-                    + "be exported there — open the product’s project from SAMX_WORKSPACE, "
-                    + "or point Save to at the product folder.");
+                why.push(handWhy(d, "gone"));
             }
-        } else {
+        } else if (!d.free) {
             var o = childDir(d.product, function (n) { return n.toLowerCase() === "output"; },
                              "Output");
             if (o) {
@@ -3322,9 +3586,7 @@
                                   : d.from === "matched" ? ", or pick the product below" : "")
                     + "; this panel never creates one. " + notSave);
             } else {
-                why.push(at + " isn’t a product folder (it has no Output/), so nothing can "
-                    + "be exported there — open the product’s project from SAMX_WORKSPACE, "
-                    + "or point Save to at the product folder.");
+                why.push(handWhy(d, "nooutput"));
             }
         }
         var v = seqVersion(state.info.sequence);
@@ -3334,12 +3596,18 @@
             d.why = why.join(" ");
             return d;
         }
-        /* ACT/ by its real spelling when it is there. When it is not, "ACT" — the one fixed
-         * name, the same for every product and every editor — and the engine's own
-         * mkdir(parents) makes it, which is safe only because Output/ was just seen above. */
-        var a = childDir(d.output, function (n) { return n.toLowerCase() === "act"; }, "ACT");
-        d.actExists = !!a;
-        d.act = path.join(d.output, a || "ACT");
+        if (d.free) {
+            // The free folder holds the version folders itself, and was just seen to be there.
+            d.actExists = true;
+            d.act = d.product;
+        } else {
+            /* ACT/ by its real spelling when it is there. When it is not, "ACT" — the one fixed
+             * name, the same for every product and every editor — and the engine's own
+             * mkdir(parents) makes it, which is safe only because Output/ was just seen above. */
+            var a = childDir(d.output, function (n) { return n.toLowerCase() === "act"; }, "ACT");
+            d.actExists = !!a;
+            d.act = path.join(d.output, a || "ACT");
+        }
         var vd = d.actExists
             ? childDir(d.act, function (n) { return sameVersion(n, d.version); }, d.version)
             : "";
@@ -3706,20 +3974,23 @@
     function destShown(d) {
         if (d && (d.ok || d.taken) && d.dir) return (d.taken && d.takenDir) || d.dir;
         if (d && d.from === "unmatched" && d.samx) return d.samx;
+        // 3.92 · a refused chosen folder is the folder the sentence names, never Save to.
+        if (d && d.from === "chosen") return d.product || d.chosen;
         return (d && d.from && d.from !== "saveto" && d.product) ? d.product : state.out;
     }
 
     // The folder a refusal row is about: the taken one, else the product, else SAMX_WORKSPACE.
     function refusalTitle(d) {
-        return d.taken ? (d.takenDir || d.dir) : (d.product || d.samx || state.out);
+        return d.taken ? (d.takenDir || d.dir) : (d.product || d.chosen || d.samx || state.out);
     }
 
     /* 3.91 · WHOSE FOLDER, IN ONE WORD: the project's (inside SAMX_WORKSPACE, or a project on
      * another drive with nothing matched yet), Matched (its path named exactly one product),
      * Picked (the Product menu), or Save to. The same width budget as "Project" and "Save to"
-     * — check_layout measures the box under every one of them. */
+     * — check_layout measures the box under every one of them. 3.92 · Chosen: a folder chosen
+     * with Change for this project, which wins over all of those but Save to's. */
     var DEST_CAPTION = { project: "Project", matched: "Matched", picked: "Picked",
-                         unmatched: "Project", saveto: "Save to" };
+                         unmatched: "Project", chosen: "Chosen", saveto: "Save to" };
 
     function paintOutPath(d) {
         var full = destShown(d);
@@ -3732,6 +4003,8 @@
             label = "no product yet — pick one below";
         }
         setPathLabel(el.outpath, full, 40, label);
+        // What the box now names as the place an export goes — destMoved() holds the doors to it.
+        state.shownDir = d && d.ok ? d.dir : "";
         if (el.destcap) el.destcap.textContent = DEST_CAPTION[(d && d.from) || "saveto"] || "Save to";
         paintProductPick(d);
     }
@@ -3739,13 +4012,22 @@
     /* 3.91 · THE PRODUCT MENU — shown only on the matched / picked / unmatched route. The first
      * entry is the match (or "Pick the product…"), which forgets a pick; then the likeliest
      * products; then, after a rule, every other product folder in SAMX_WORKSPACE. */
+    /* 3.92 · AND WHILE A FOLDER CHOSEN WITH CHANGE IS ACTIVE — for a project on another drive
+     * AND for one inside SAMX_WORKSPACE, which otherwise has no menu — it is shown with that
+     * folder first ("Chosen: …") and an entry that goes back to what the project decides
+     * without it ("Back to Brand", "Back to SAMX_WORKSPACE"), which forgets the folder; on
+     * another drive the products follow, and picking one replaces the folder. The two entries'
+     * values start with "/", which no folder name can. */
+    var MENU_CHOSEN = "/chosen", MENU_BACK = "/back";
     function paintProductPick(d) {
         var sel = el.productpick;
         if (!sel) return;
         var r = d && d.route;
-        show(el.productrow, !!r);
-        if (!r) return;
-        var sig = r.samx + "|" + r.project + "|" + r.names.join("/") + "|" + r.auto + "|" + r.pick;
+        var chosen = !!(d && d.from === "chosen");
+        show(el.productrow, !!r || chosen);
+        if (!r && !chosen) return;
+        var sig = (r ? r.samx + "|" + r.project + "|" + r.names.join("/") + "|" + r.auto + "|"
+                       + r.pick : "") + "|" + (chosen ? d.chosen + "|" + d.product + "|" + d.own : "");
         if (sel._sig === sig) return;
         sel._sig = sig;
         sel.innerHTML = "";
@@ -3756,9 +4038,22 @@
             if (disabled) o.disabled = true;
             sel.appendChild(o);
         };
-        add("", r.auto ? "Matched: " + r.auto : (r.matches.length > 1 ? "Pick one of the matches…"
-                                                                      : "Pick the product…"));
-        var near = r.matches.length > 1 ? r.matches.slice() : [];
+        if (chosen) {
+            add(MENU_CHOSEN, "Chosen: " + (path.basename(d.product || d.chosen) || d.chosen));
+            add(MENU_BACK, "Back to " + backName(d));
+            if (r && r.names.length) add("-", "──────────", true);
+        }
+        if (!r) {
+            sel.value = MENU_CHOSEN;
+            return;
+        }
+        var several = r.matches.length > 1 ? r.matches : (r.lead && r.lead.length > 1) ? r.lead : [];
+        // "Back to …" stands for this entry while a chosen folder is active.
+        if (!chosen) {
+            add("", r.auto ? "Matched: " + r.auto : (several.length ? "Pick one of the matches…"
+                                                                    : "Pick the product…"));
+        }
+        var near = several.slice();
         var cands = productCandidates(r.names, r.below);
         // The match is the first entry already; listing it again as a candidate is clutter.
         for (var i = 0; i < cands.length; i++) {
@@ -3767,13 +4062,14 @@
         for (i = 0; i < near.length; i++) add(near[i], near[i]);
         if (near.length) add("-", "──────────", true);
         for (i = 0; i < r.names.length; i++) if (near.indexOf(r.names[i]) < 0) add(r.names[i], r.names[i]);
-        sel.value = r.pick || "";
+        sel.value = chosen ? MENU_CHOSEN : (r.pick || "");
     }
 
     /* IS THERE ANYWHERE TO EXPORT INTO — Save to, or an open project inside SAMX_WORKSPACE,
      * which names the product itself (and then Save to is not used at all), or (3.91) an open
      * project on another shared drive with a SAMX_WORKSPACE to match or pick its product in:
-     * its refusal, until something is matched or picked, says what to do.
+     * its refusal, until something is matched or picked, says what to do. 3.92 · or a folder
+     * chosen with Change for the open project.
      *
      * ⚠️ NOT state.out, which is what Export, Folder and the next line all gated on: with
      * Save to empty and a SAMX project open, the box showed "From project …/ACT/v1.2" while
@@ -3783,7 +4079,8 @@
      * door; this one only asks whether there is a product to ask about. */
     function haveDest() {
         return !!state.out || !!(state.info && (projectProduct(state.info.project_path)
-                                                 || productRoute()));
+                                                 || productRoute()
+                                                 || freeFor(state.info.project_path)));
     }
 
     /* The dest row on the rail: what about the destination needs attention before Export —
@@ -3919,6 +4216,31 @@
         return null;
     }
 
+    /* 3.92 · THE BOX NAMED ONE FOLDER, THE PRESS RESOLVES ANOTHER (fix review, 29 Sep). What a
+     * folder IS is asked at every resolve (chosenLayout), so an Output/ moved away in Finder
+     * after the paint — or made in a free folder — changes the layout with nothing repainted:
+     * measured, the box said …/Output/ACT/v1.2/raw while the engine wrote …/v1.2/raw, and a free
+     * folder's first export created Output/ACT with no "isn’t there yet" before it. The same
+     * for a version folder a colleague made since. So when the last paint showed a ready
+     * destination and a door now resolves a different one, nothing runs: the box is repainted
+     * and the press is refused once, naming the new folder — the next press is for what the
+     * box shows. A paint that was a refusal is not held to (the remedy of a refusal is exactly
+     * such a change), and the render door has its own check (runEngineExport). */
+    function destMoved(d, where) {
+        var was = state.shownDir;
+        if (!was || !d || d.dir === was) return false;
+        log("export refused (" + where + "): the destination changed since it was shown — "
+            + was + " is now " + d.dir);
+        state.retryKeys = [];
+        state.clashHeld = 0;
+        say("clash", "warn", "");
+        setOutDest();
+        say("export", "warn", "The destination changed since the box showed it — it is now "
+            + shortPath(d.dir, 44) + " — so nothing was exported; check it, then press Export "
+            + "again.", d.dir);
+        return true;
+    }
+
     /* AND AFTER THE RUN, WHETHER IT MADE Output/ACT. The dest row said "isn't there yet"
      * before the export; once the folder exists that sentence is false, so it is replaced by
      * what happened. Called from setRunning(false), which every end of a run passes through —
@@ -3977,6 +4299,10 @@
         try { window.localStorage.setItem("xmlcut.out", state.out); } catch (e) {}
         paintDest();
         setOutDest();
+        /* 3.92 fix review · a Retry belongs to its folder: after Change moves Save to, the last
+         * run's Retry is of a folder Export no longer goes to (changeTakenByProject and the
+         * Product menu repaint it; this route did not, and its press was then refused). */
+        paintRetry();
         refreshExportEnabled();
     }
 
@@ -4375,7 +4701,8 @@
          * here, before the sequence check, with the same sentence the dest row already shows:
          * no Output/ in the product, no version in the sequence name, or two of them. The
          * press is logged above, so the log still tells a refused press from a lost one. */
-        if (!refuseIfNoDest("export")) return;
+        var pressed = refuseIfNoDest("export");
+        if (!pressed || destMoved(pressed, "export")) return;
         /* The folder may have changed since the row was painted — he may have moved the
          * other export's clips out, as the refusal told him to — and the press has just
          * re-asked the disk, so the row says what the press found rather than an old refusal
@@ -4716,7 +5043,7 @@
          * creates its folder with every missing parent, so a destination that stopped being
          * valid in between would have had Output/ made for it by the host. */
         var dest = refuseIfNoDest("start");
-        if (!dest) return;
+        if (!dest || destMoved(dest, "start")) return;
         // Whether THIS export is the one that creates Output/ACT — settled in settleAct().
         state.actWanted = dest.actExists ? "" : dest.act;
         state.actMade = false;
@@ -4929,7 +5256,26 @@
          * there IS a destination: an empty -o would put the clips in the engine's working
          * folder, and a product that lost its Output/ during a render would get one made by
          * the engine's mkdir. */
-        if (!refuseIfNoDest("engine")) {
+        /* 3.92 · AND THE RENDERS MUST BE FOR THIS DESTINATION. Since free folders, what a folder
+         * IS decides its layout at every ask (chosenLayout): a product folder outside
+         * SAMX_WORKSPACE whose Output/ is moved away while Premiere renders is, at this door, a
+         * free folder — and the engine would have cut into <product>/<version>/edited, a
+         * place the press never named, from renders made for another. The render cache is keyed
+         * by the destination (renderDir), so a key that no longer matches is exactly that. */
+        var moved = !!renderDirPath && renderDir() !== renderDirPath && !!outDir();
+        if (moved) {
+            var nowAt = outDir();
+            log("export refused (engine): the destination changed during the render, now " + nowAt);
+            state.retryKeys = [];
+            state.clashHeld = 0;
+            say("clash", "warn", "");
+            // On the error row, as the free-space refusal is: setRunning(false) below repaints
+            // the dest row from the destination as it is now.
+            fail("The destination changed while Premiere rendered — it is now "
+                + shortPath(nowAt, 44) + " — so nothing was exported; check it, then export "
+                + "again.");
+        }
+        if (moved || !refuseIfNoDest("engine")) {
             if (renderDirPath) dropRefusedRenders(renderDirPath);
             show(el.prog, false);
             setRunning(false);
@@ -9641,11 +9987,140 @@
     });
 
     el.pickout.addEventListener("click", function () {
-        cs.evalScript("pickFolder(" + jsStr(state.out || "") + ")",
+        // 3.92 · the dialog opens at the folder chosen for this project, when there is one.
+        var from = (state.info && freeFor(state.info.project_path)) || state.out || "";
+        cs.evalScript("pickFolder(" + jsStr(from) + ")",
             function (p) {
-                if (p && p !== "null" && p !== "undefined") setOut(p);
+                if (!(p && p !== "null" && p !== "undefined")) return;
+                if (changeTakenByProject(String(p))) return;
+                /* 3.92 · Save to takes a free folder walked once, as a chosen folder does
+                 * (chosenLayout). With no read in, the project is not known yet, so the folder
+                 * becomes Save to — and the read says so if its project does not use Save to. */
+                var chosen = chosenFolder(String(p).replace(/\/+$/, "") || "/");
+                state.outPickedUnread = state.info ? "" : chosen;
+                setOut(chosen);
             });
     });
+
+    /* 3.92 · "CHANGE" WHILE THE OPEN PROJECT DECIDES THE DESTINATION — the editor's report,
+     * 29 Sep: "anh phải chọn lại folder => nhưng khi a chọn lại folder thì ko có gì xảy ra cả".
+     * Save to is not used on the project and team-drive routes, so the folder he chose became a
+     * Save to that nothing read, and the refusal beside it stayed exactly as it was. The hotfix
+     * made a SAMX_WORKSPACE folder pick its product and said "Nothing changed" for any other;
+     * the product owner then asked for any folder to be taken ("also make the change to able to
+     * accept freely path that user choose too"), and decided how:
+     *
+     *   A project on another team drive: a folder in SAMX_WORKSPACE — the product folder or
+     *   anything inside it — PICKS that product, exactly as the Product menu does, and forgets a
+     *   folder chosen earlier. ANY OTHER folder is chosen for this project (xmlcut.freedest):
+     *   a product folder elsewhere gets its Output/ACT/, anything else is a free folder,
+     *   <folder>/<version>/raw|edited (chosenLayout). It wins over the match and the pick.
+     *   A project inside SAMX_WORKSPACE: a folder in its own product goes back to it (forgets a
+     *   chosen one); any other folder — another SAMX product included — is chosen, and wins.
+     *   SAMX_WORKSPACE itself is no product and no free folder: nothing changes, and the rail
+     *   says so. Nothing changes either while an export starts or runs (every choice here moves
+     *   outDir() under it) — on every route, Save to's included.
+     *   No read, or a project outside every team drive: false, and Save to is set as before.
+     *
+     * Save to is left alone whenever this answers, so the next project that does use it is not
+     * sent to a folder chosen for this one. Returns true when the press was answered here. */
+    function changeTakenByProject(p) {
+        say("pickout", "info", "");
+        if (!state.info) return false;
+        var at = String(p).replace(/\/+$/, "") || "/";
+        if (state.running || state.exportPending) {
+            log("destination not changed: an export is starting or running");
+            /* Worded to stay true once the export has ended: the row outlives the run on
+             * purpose, as the reminder to choose the folder again (fix review, 29 Sep — it said
+             * "an export is running" beside the next Ready line). */
+            say("pickout", "warn", "Nothing changed: " + qn(path.basename(at) || at) + " was "
+                + "chosen while an export was starting or running. Choose it again once that "
+                + "export has finished.", "", true);
+            return true;
+        }
+        var pp = String(state.info.project_path || "");
+        var own = projectProduct(pp);
+        dropSamxCache();                  // a product folder Tech has just made is in the list
+        var r = own ? null : productRoute();
+        // A project outside every team drive (or with no SAMX_WORKSPACE to be found, and no
+        // folder chosen for it yet): Save to, as it always has been.
+        if (!own && !r && !freeFor(pp)) return false;
+        var lay = chosenLayout(at, true);
+        if (lay.kind === "root") {
+            say("pickout", "warn", "Nothing changed: the top of the disk (/) is not a folder to "
+                + "export into. Choose a folder inside it.", "", true);
+            return true;
+        }
+        if (lay.kind === "samxroot") {
+            say("pickout", "warn", "Nothing changed: SAMX_WORKSPACE itself is not a product. "
+                + "Choose the product's folder inside it, or any folder outside SAMX_WORKSPACE.",
+                "", true);
+            return true;
+        }
+        var name = r ? samxProductIn(r, at) : "";
+        /* ⚠️ THE PROJECT'S OWN PRODUCT IS A FOLDER, NOT A NAME (fix review, 29 Sep). A project
+         * inside a stale copy of SAMX_WORKSPACE — the dated copy macOS keeps beside the Drive
+         * mount after a Drive reset, or a product copied to a local disk — has an "own" product
+         * that shares its name with the live one; comparing names took Change onto the LIVE
+         * product as "back to its own", and the clips kept going to the copy. */
+        if (own && lay.kind === "samx" && sameFolder(lay.product, own)) {
+            rememberFree(pp, "");
+            log("Change: back to the project's own product, " + path.basename(own) + ", for " + pp);
+        } else if (name) {
+            rememberPick(pp, name);
+            rememberFree(pp, "");
+            log("product picked with Change: " + name + " for " + pp);
+        } else {
+            // A free folder is remembered as walked (chosenLayout): never re-walked later.
+            var keep = lay.kind === "free" ? lay.base : at;
+            rememberFree(pp, keep);
+            log("folder chosen with Change: " + keep + " for " + pp);
+        }
+        el.productpick._sig = "";
+        setOutDest();
+        paintRetry();
+        refreshExportEnabled();
+        return true;
+    }
+
+    /* The SAMX_WORKSPACE product a chosen folder is, or is inside, by its real spelling from the
+     * listing — found by the SAMX_WORKSPACE segment of the chosen path, any case. "" for
+     * SAMX_WORKSPACE itself, a folder outside it, or a name the listing does not hold.
+     *
+     * ⚠️ AND ONLY IN THE ROUTE'S OWN SAMX_WORKSPACE (fix review, 29 Sep). The pick is kept as a
+     * NAME and turned back into <r.samx>/<name>, so a product of the same name in ANOTHER
+     * SAMX_WORKSPACE — the live one, chosen from a project in the dated copy macOS keeps after
+     * a Drive reset — was picked in the copy, whose clips never reach the team. The two roots
+     * are compared as folders (sameFolder), so another spelling of the same mount still counts;
+     * a folder in any other SAMX_WORKSPACE is chosen for the project as it is. */
+    function samxProductIn(r, p) {
+        var parts = String(p || "").replace(/\/+$/, "").split("/");
+        for (var i = 0; i < parts.length - 1; i++) {
+            if (parts[i].toLowerCase() !== "samx_workspace" || !parts[i + 1]) continue;
+            if (!sameFolder(parts.slice(0, i + 1).join("/"), r.samx)) return "";
+            var want = nameKey(parts[i + 1]);
+            for (var j = 0; j < r.names.length; j++) if (nameKey(r.names[j]) === want) return r.names[j];
+            return "";
+        }
+        return "";
+    }
+
+    /* ONE FOLDER, HOWEVER IT IS SPELT: the same device and inode (a symlinked or differently
+     * cased spelling of the Drive mount is still the same folder; a copy of it is not). When
+     * either cannot be stat'ed, their real paths are compared as names. */
+    function sameFolder(a, b) {
+        if (!a || !b) return false;
+        try {
+            var sa = fs.statSync(a), sb = fs.statSync(b);
+            if (sa.ino && sb.ino) return sa.dev === sb.dev && sa.ino === sb.ino;
+        } catch (e) {}
+        var real = function (x) {
+            var t = String(x).replace(/\/+$/, "");
+            try { t = String(fs.realpathSync(t)); } catch (e2) {}
+            return nameKey(t);
+        };
+        return real(a) === real(b);
+    }
 
     el.pickscript.addEventListener("click", function () {
         cs.evalScript("pickScript()", function (p) {
@@ -9857,14 +10332,24 @@
              * unchanged _sig), and picking that product again then fired no change at all.
              * Measured: the engine wrote into the matched product, the box said so, the menu said
              * the other one. Only the menu is repainted here: the rail is the running export's. */
-            if (!state.info || state.running || state.exportPending || v === "-") {
+            if (!state.info || state.running || state.exportPending || v === "-"
+                || v === MENU_CHOSEN) {
                 el.productpick._sig = "";
                 if (state.info) paintProductPick(resolveDest());
                 return;
             }
-            rememberPick(state.info.project_path, v);
-            log("product " + (v ? "picked: " + v : "pick cleared") + " for "
-                + state.info.project_path);
+            /* 3.92 · THE LAST EXPLICIT CHOICE WINS: "Back to …" forgets the folder chosen with
+             * Change (the match or the pick stands again), and picking a product forgets it too. */
+            var pp = state.info.project_path;
+            if (v === MENU_BACK) {
+                rememberFree(pp, "");
+                log("chosen folder forgotten (back to " + backName(resolveDest()) + ") for " + pp);
+            } else {
+                rememberFree(pp, "");
+                rememberPick(pp, v);
+                log("product " + (v ? "picked: " + v : "pick cleared") + " for " + pp);
+            }
+            say("pickout", "info", "");
             el.productpick._sig = "";
             setOutDest();
             paintRetry();

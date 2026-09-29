@@ -732,6 +732,13 @@ version folder*, below.)
   account under `~/Library` that has one) and matches the folders of the project's path
   against its product folders, ignoring case and extra spaces:
   - **exactly one match** — that product, captioned **Matched**;
+  - **no exact match, but a folder that starts with one product's name** (since 3.92) — the
+    team drives name a product's folder `<Product> (<brand> <earlier name>) - <description>`,
+    so a folder whose name starts with exactly one product's name, followed by a space, a
+    bracket or a dash and not by a version (`Brand 2 - …` or `Brand v2` may be another product),
+    is that product, captioned **Matched** too; when two or more products lead the folder
+    (`Brand` and `Brand Two` both start `Brand Two - …`), all of them are named, the one sharing
+    most of the folder's name first, and the menu asks for one;
   - **no exact match, or two** — nothing is exported until you choose the product in the
     **Product** menu under the box, which lists the likeliest first (a folder that starts or
     contains the product's name, or has the same letters and digits) and then every other
@@ -741,16 +748,20 @@ version folder*, below.)
     nothing in `SAMX_WORKSPACE`, the row names it: *SAMX_WORKSPACE has no folder for “Brand” yet — ask
     Tech to create it, or pick the product below.*
 
-  Save to is not used on either of these routes. A project outside any shared drive (the
-  Desktop, say) — or a Mac with no `SAMX_WORKSPACE` at all — uses **Save to**: point it at the
-  product folder. Picking its `Output/`, its `Output/ACT/`, a version folder inside `ACT/` or a
-  mode folder inside that comes to the same product. The box names the version and mode
-  folders first and then the product — `v1.2/raw in Brand 1.0` — so a docked panel still shows
-  the version; click it, or hover, for the full path.
-- **It must already be a product.** The product needs an `Output/` folder (any case). Without
-  one the panel refuses to export — before anything runs — and says why; it never creates
-  `Output/`. So the default Save to, `~/Desktop/xmlcut clips`, is refused unless the project
-  is inside `SAMX_WORKSPACE`.
+  Save to is not used on either of these routes — **Change** chooses a folder for that project
+  instead (see *Any folder, with Change*, below). A project outside any shared drive (the
+  Desktop, say) — or any project on a Mac where no `SAMX_WORKSPACE` is found — uses **Save
+  to**, and there Change sets Save to: point it at the product folder. Picking its `Output/`, its `Output/ACT/`, a version folder inside `ACT/` or a
+  mode folder inside that comes to the same product; since 3.92 any other folder is taken as it
+  is, below. The box names the version and mode folders first and then the product —
+  `v1.2/raw in Brand 1.0` — so a docked panel still shows the version; click it, or hover, for
+  the full path.
+- **A product must have its `Output/`.** A product folder — in `SAMX_WORKSPACE`, or elsewhere
+  with an `Output/` (any case) — without one is refused before anything runs, saying why; the
+  panel never creates `Output/`. Anything inside a `SAMX_WORKSPACE` product counts as that
+  product, never as a free folder. (Until 3.92 a folder that was no product was refused too; it
+  is now a *free folder*, below.) The panel never creates the folder it saves into either, so
+  the default Save to, `~/Desktop/xmlcut clips`, is refused until it exists.
 - **`ACT/`** is used under the spelling it has on the drive. If it is not there yet the row
   says so before you export (*Output/ACT isn't there yet — Export will create it*), the export
   creates it, and the report says *this export created Output/ACT*. A FILE where `ACT/`, the
@@ -786,6 +797,57 @@ readable `manifest.json` and no `.xmlcut-ledger.json` naming who made them — a
 because whose they are is for you to check. Only files named the way xmlcut names a clip
 (`NN_….mp4` and the other media it writes, and the two mixes) count; its own `manifest.*`,
 `clips.csv`, folders and anything else of yours (a `notes.txt`) do not.
+
+**Any folder, with Change** (since 3.92). Once a read is in, for a project inside
+`SAMX_WORKSPACE` or on another shared drive where a `SAMX_WORKSPACE` is found, the **Change**
+button beside the box takes any folder but `SAMX_WORKSPACE` itself:
+
+- **A folder in `SAMX_WORKSPACE`** — a product folder or anything inside it — picks that
+  product, exactly as the Product menu does, for a project on another shared drive. For a
+  project inside `SAMX_WORKSPACE`, a folder in its own product goes back to that product, and
+  another product is chosen for the project. Both mean the very folder: a product of the same
+  name in ANOTHER `SAMX_WORKSPACE` — the dated copy macOS keeps beside the Drive mount after a
+  Drive reset, or a product copied to a local disk — is chosen as the folder it is, so the
+  clips go where you pointed, never to its namesake.
+- **Any other folder is chosen for the open project.** A product folder elsewhere (it has an
+  `Output/`) gets its `Output/ACT/<version>/raw|edited` as above; anything else is a **free
+  folder**: the clips go to `<folder>/<version>/raw/` (Source Render) or
+  `<folder>/<version>/edited/` (Timeline Render) — the same version and mode folders, with no
+  `Output/` or `ACT/` above them; nothing of that name is ever created in it. Everything else
+  is as in a product: the version from the sequence name (refused with the same sentences when
+  there is none, or two), an existing version folder reused however it is spelt, manifests,
+  `clips.csv` and `report/` inside the mode folder, the renders on this Mac, the refusal when
+  another sequence's clips are in the version, and Retry only in its own folder. Choosing the
+  folder's own `v1.1/raw/` or `v1.1/` (holding a `raw/` or `edited/`) is the folder above it —
+  worked out when you choose it and remembered that way, so moving `v1.1/raw/` out later does
+  not move the destination.
+- **The chosen folder wins, for that project** — over a match, a folder that starts with a
+  product's name, a Product-menu pick, and a project inside `SAMX_WORKSPACE` — and is
+  remembered for that project's path. The caption reads **Chosen** and the box
+  `v1.2/raw in <folder>`. The Product menu is shown while it is active (for a project inside
+  `SAMX_WORKSPACE` too) with **Back to …** — its product, its match or pick, or
+  `SAMX_WORKSPACE` — which forgets the folder. The last choice wins: picking a product in the
+  menu, or Change onto a `SAMX_WORKSPACE` product, replaces it.
+- **Save to is never changed** by any of this. Change sets Save to instead, as before, for a
+  project outside every shared drive, for a project on a Mac where no `SAMX_WORKSPACE` is
+  found (unless a folder was chosen for it earlier, which Change then replaces), and before any
+  Read — the project is not known yet, so if the project you then read
+  does not use Save to, the rail says the folder became Save to and that pressing Change again
+  chooses it for that project. Save to is taken the same way as a chosen folder: a product
+  folder gets `Output/ACT/`, any other folder is a free folder.
+- **The panel never creates the chosen folder.** If it has gone (a drive not connected, a
+  folder renamed) the export is refused, naming it — and for a `SAMX_WORKSPACE` product, saying
+  to reconnect the drive or ask Tech. `SAMX_WORKSPACE` itself is not a product and not a free
+  folder, and neither is the top of the disk (`/`, *Macintosh HD* in the dialog): where Change
+  chooses for the project it changes nothing and says why; where Change sets Save to, Save to
+  becomes it and every export is refused, saying why. Nothing changes
+  while an export is starting or running, and the rail says to choose the folder again once
+  that export has finished.
+- **What the box shows is where the press goes.** What a folder is — a product with an
+  `Output/`, or a free folder — is asked again at every press, so if it changes after the box
+  was painted (an `Output/` moved away or made in Finder, a colleague's new version folder),
+  Export runs nothing, the box shows the new folder, and the rail says so; the next press
+  exports there.
 
 **A version belongs to the sequence whose export it holds** (since 3.90). Export is refused —
 before anything runs, with one sentence saying what is there and what to do — when **another

@@ -1,6 +1,6 @@
 {
-  "version": "3.91",
-  "notes": "TH\u01af M\u1ee4C raw/ V\u00c0 edited/ TR\u1ede L\u1ea0I trong <s\u1ea3n ph\u1ea9m>/Output/ACT/<version>/. Render t\u1ea1m c\u1ee7a Premiere l\u01b0u tr\u00ean m\u00e1y, kh\u00f4ng c\u00f2n _renders/ trong th\u01b0 m\u1ee5c giao, h\u1ebft treo khi render l\u00ean Drive. Project ngo\u00e0i SAMX_WORKSPACE: panel t\u1ef1 kh\u1edbp s\u1ea3n ph\u1ea9m, kh\u00f4ng kh\u1edbp th\u00ec ch\u1ecdn trong menu. Retry ch\u1ec9 l\u00e0m l\u1ea1i clip l\u1ed7i, d\u00f9ng l\u1ea1i render c\u00f2n gi\u1eef.",
+  "version": "3.92",
+  "notes": "Project \u1edf team drive: th\u01b0 m\u1ee5c c\u00f3 t\u00ean B\u1eaeT \u0110\u1ea6U b\u1eb1ng t\u00ean s\u1ea3n ph\u1ea9m tr\u00ean SAMX_WORKSPACE nay t\u1ef1 kh\u1edbp, kh\u00f4ng c\u1ea7n ch\u1ecdn menu. N\u00fat Change nh\u1eadn M\u1eccI th\u01b0 m\u1ee5c: th\u01b0 m\u1ee5c trong SAMX_WORKSPACE l\u00e0 ch\u1ecdn s\u1ea3n ph\u1ea9m \u0111\u00f3; th\u01b0 m\u1ee5c kh\u00e1c th\u00ec clip v\u00e0o <th\u01b0 m\u1ee5c>/<version>/raw ho\u1eb7c /edited, nh\u1edb ri\u00eang t\u1eebng project; menu c\u00f3 Back to \u2026 \u0111\u1ec3 quay l\u1ea1i s\u1ea3n ph\u1ea9m SAMX.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
