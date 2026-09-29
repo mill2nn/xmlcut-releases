@@ -688,6 +688,13 @@
                     <button id="pickout" class="mini">Change</button>
                 </div>
             </div>
+            <!-- 3.91 · THE PRODUCT MENU, only for a project saved on another shared drive: its
+                 path is matched against SAMX_WORKSPACE's product folders, and when nothing
+                 matches exactly (or to overrule a match) the product is picked here and
+                 remembered for that project. A plain select, filled by paintProductPick(). -->
+            <div class="field f-product" id="productrow" hidden>
+                <select id="productpick" class="sel wide" title="Which SAMX_WORKSPACE product this project's clips go to"></select>
+            </div>
         </div>
     </div>
 

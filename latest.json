@@ -1,6 +1,6 @@
 {
-  "version": "3.90",
-  "notes": "XU\u1ea4T V\u00c0O TH\u01af M\u1ee4C ACT: clip ra th\u1eb3ng <s\u1ea3n ph\u1ea9m>/Output/ACT/<version>/, version l\u1ea5y t\u1eeb t\u00ean sequence (v1.2, vid 13.0 ho\u1eb7c 1.1). Ch\u01b0a c\u00f3 ACT th\u00ec t\u1ef1 t\u1ea1o; kh\u00f4ng xu\u1ea5t n\u1ebfu thi\u1ebfu Output/, t\u00ean kh\u00f4ng c\u00f3 version, ho\u1eb7c folder version \u0111\u00e3 c\u00f3 clip c\u1ee7a sequence kh\u00e1c hay ch\u1ebf \u0111\u1ed9 kh\u00e1c. S\u1eeda 2 l\u1ed7i 3.89: read h\u1ecfng th\u00ec n\u00fat Read timeline hi\u1ec7n l\u1ea1i \u0111\u1ec3 th\u1eed l\u1ea1i; kh\u00f4ng c\u00f2n b\u00e1o nh\u1ea7m 'kh\u00f4ng c\u00f3 cut'.",
+  "version": "3.91",
+  "notes": "TH\u01af M\u1ee4C raw/ V\u00c0 edited/ TR\u1ede L\u1ea0I trong <s\u1ea3n ph\u1ea9m>/Output/ACT/<version>/. Render t\u1ea1m c\u1ee7a Premiere l\u01b0u tr\u00ean m\u00e1y, kh\u00f4ng c\u00f2n _renders/ trong th\u01b0 m\u1ee5c giao, h\u1ebft treo khi render l\u00ean Drive. Project ngo\u00e0i SAMX_WORKSPACE: panel t\u1ef1 kh\u1edbp s\u1ea3n ph\u1ea9m, kh\u00f4ng kh\u1edbp th\u00ec ch\u1ecdn trong menu. Retry ch\u1ec9 l\u00e0m l\u1ea1i clip l\u1ed7i, d\u00f9ng l\u1ea1i render c\u00f2n gi\u1eef.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",

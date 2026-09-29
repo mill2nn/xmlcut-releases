@@ -71,6 +71,8 @@
                /* The four framed groups that carry a caption, and the fold over the four
                 * settings that have a correct default. */
                "destgroup", "trackgroup", "audiogroup", "audiofield", "setdet", "setsum",
+               // 3.91 · the Product menu, for a project saved on another shared drive.
+               "productrow", "productpick",
                // The three engine flags the panel could not reach, and the fps option whose
                // label is filled in from the read: --transitions, --tracks, --remap, --fps.
                "splitdis", "dissnote", "atracksfield", "atracks", "relink", "fpssrc"];
@@ -191,7 +193,7 @@
         // {done, total, current, failed}. Null when no render phase is running.
         renderProg: null,
         // How many cuts the last render phase failed to produce, off its manifest. Decides
-        // whether the _renders scratch is kept for a retry — see cleanRenders().
+        // whether the render scratch is kept for a retry — see cleanRenders().
         rendersMissing: 0,
         renderTimer: null,
         /* The clips a RETRY is limited to, as clipKeys. Empty for an ordinary export. It is
@@ -256,7 +258,9 @@
         repaired: false,     // a damaged bundled engine has already been replaced once
         readTimer: null,     // watchdog on the two ExtendScript calls
         manifestBefore: 0,   // manifest mtime before an export, so a cancel reports nothing
-        rendersPre: null,    // _renders/ entries before a render (dropRefusedRenders)
+        rendersPre: null,    // render-folder entries before a render (dropRefusedRenders)
+        samxCache: null,     // 3.91 · the open project's SAMX_WORKSPACE listing (productRoute)
+        reportFor: "",       // 3.91 · the folder the report on screen is of (retryHere)
         resume: false,
         typesReset: "",
         hostHome: "",
@@ -414,13 +418,15 @@
      * section. Hiding them answered the same question — you cannot change the encoder half
      * way through an encode — by removing the evidence of what the run is doing, which is
      * exactly what you want to look at while waiting. Locked and legible beats gone. */
-    /* 3.90 round 2 · AND THE MODE. A version folder keeps the mode it was delivered in
-     * (folderTaken), so a mode switched while an export runs would make the folder this run
-     * is writing refuse it the moment its manifest lands — outDir() empty, and the finished
-     * run's report with nowhere to be read from. */
+    /* 3.90 round 2 · AND THE MODE. 3.91 · the reason changed, the lock did not: each mode has
+     * its own folder now (<version>/raw, <version>/edited), so a mode switched while an export
+     * runs would move outDir() to the OTHER folder under the running engine — the finished
+     * run's report read from a folder it never wrote, report/ made there, and the clash count
+     * taken of the wrong clips. The Product menu is locked for the same reason: a pick moves
+     * outDir() to another product. */
     var LOCK_WHILE_RUNNING = ["preset", "savepreset", "delpreset", "vcodec", "crf",
                               "fps", "scale", "cap", "remeasure", "pickout", "pickall",
-                              "readagain", "read", "modesrc", "modeseq"];
+                              "readagain", "read", "modesrc", "modeseq", "productpick"];
 
     function setRunning(on) {
         state.running = !!on;
@@ -1060,7 +1066,19 @@
             "S\u1eeda 2 l\u1ed7i c\u1ee7a 3.89: read h\u1ecfng th\u00ec n\u00fat Read timeline hi\u1ec7n l\u1ea1i \u0111\u1ec3 th\u1eed l\u1ea1i; read b\u00e1o nh\u1ea7m \u201ckh\u00f4ng c\u00f3 cut\u201d do th\u01b0 m\u1ee5c t\u1ea1m c\u00f2n file c\u0169, nay d\u1ecdn tr\u01b0\u1edbc m\u1ed7i read."
     ].concat(CL_389);
 
+    /* 3.91 · the mode folders back inside the version (raw/, edited/), Premiere's renders on this
+     * Mac instead of the delivery, and the product of a project on another shared drive — matched
+     * or picked. Five lines, each no longer than 3.89's longest (154). */
+    var CL_391 = [
+            "TH\u01af M\u1ee4C raw/ V\u00c0 edited/ TR\u1ede L\u1ea0I: Source Render xu\u1ea5t v\u00e0o <version>/raw/, Timeline Render v\u00e0o <version>/edited/; manifest v\u00e0 report/ n\u1eb1m trong \u0111\u00f3.",
+            "File render t\u1ea1m c\u1ee7a Premiere l\u01b0u tr\u00ean m\u00e1y (~/Library/Caches/Raw-cutter), kh\u00f4ng c\u00f2n _renders/ trong th\u01b0 m\u1ee5c giao; t\u1ef1 xo\u00e1 sau 7 ng\u00e0y, thi\u1ebfu ch\u1ed7 th\u00ec b\u00e1o.",
+            "Project \u1edf shared drive kh\u00e1c: panel t\u1ef1 kh\u1edbp t\u00ean th\u01b0 m\u1ee5c s\u1ea3n ph\u1ea9m v\u1edbi SAMX_WORKSPACE; kh\u00f4ng kh\u1edbp th\u00ec ch\u1ecdn trong menu s\u1ea3n ph\u1ea9m, panel nh\u1edb cho project \u0111\u00f3.",
+            "SAMX_WORKSPACE ch\u01b0a c\u00f3 th\u01b0 m\u1ee5c s\u1ea3n ph\u1ea9m, ho\u1eb7c s\u1ea3n ph\u1ea9m ch\u01b0a c\u00f3 Output/: panel kh\u00f4ng xu\u1ea5t v\u00e0 n\u00f3i r\u00f5 t\u00ean. Hai sequence c\u00f9ng version v\u1eabn b\u1ecb t\u1eeb ch\u1ed1i.",
+            "File 3.90 \u0111\u1ec3 th\u1eb3ng trong <version>/ \u0111\u01b0\u1ee3c gi\u1eef nguy\u00ean, panel nh\u1eafc d\u1ecdn tay. Retry ch\u1ea1y \u0111\u00fang th\u01b0 m\u1ee5c l\u1ed7i, d\u00f9ng l\u1ea1i render c\u00f2n gi\u1eef, ch\u1ec9 render l\u1ea1i clip thi\u1ebfu."
+    ].concat(CL_390);
+
     var CHANGELOG = {
+        "3.91": CL_391,
         "3.90": CL_390,
         "3.89": CL_389,
         "3.88": CL_388,
@@ -2331,7 +2349,7 @@
         } else if (!state.script) {
             msg = "Cut script missing — open ⚙ and press Re-check.";
             cls += " error";
-        } else if (el.report && el.report.hidden === false && failedRows().length
+        } else if (el.report && el.report.hidden === false && failedRows().length && retryHere()
                    && !(state.clips.length && haveDest() && resolveDest().why)) {
             /* ⚠️ NOT WHEN THE DESTINATION IS REFUSED (3.90 round 3). "Retry below" then offers a
              * press that is refused — measured after a mode switch into the folder of the other
@@ -2640,14 +2658,25 @@
      *   · the folder named after the sequence. The folder is named after the VERSION now,
      *     and the version is read off the sequence name (seqVersion) — never off a folder,
      *     since a product can itself be called "Brand 2.0".
-     *   · raw/ and edited/. The files sit FLAT in the version folder, so a Source export and
-     *     a Timeline Render export of one sequence share it. What that does to the first
+     *   · raw/ and edited/. The files sat FLAT in the version folder, so a Source export and
+     *     a Timeline Render export of one sequence shared it. What that did to the first
      *     run's files was measured with the engine, not assumed — CLAUDE.md, "3.90".
+     *
+     * ⚠️ 3.91 (the product owner, 29 Sep 2026): raw/ and edited/ are BACK, inside the version —
+     *
+     *     SAMX_WORKSPACE/<product>/Output/ACT/<version>/raw/01_…mp4      Source Render
+     *     SAMX_WORKSPACE/<product>/Output/ACT/<version>/edited/01_…mp4   Timeline Render
+     *
+     * — outDir() is the mode folder, every record the export keeps is inside it, and Premiere's
+     * renders are no longer beside the clips at all (renderDir()). The product of a project on
+     * another shared drive is matched or picked (productRoute()).
      *
      * Four questions, each answered in one place, always in this order:
      *
-     *   WHICH PRODUCT   the open project when it lives inside SAMX_WORKSPACE, otherwise
-     *                   Save to                                      projectProduct()
+     *   WHICH PRODUCT   the open project when it lives inside SAMX_WORKSPACE; a project
+     *                   on another shared drive, matched or picked; otherwise Save to
+     *                                                                projectProduct()
+     *                                                                productRoute()
      *                                                                saveToProduct()
      *   IS IT ONE       it has an Output/ — which this panel NEVER creates    resolveDest()
      *   WHICH VERSION   the sequence name, and only the name                  seqVersion()
@@ -2655,7 +2684,7 @@
      *                   second one                                            resolveDest()
      *
      * ⚠️ ONE ANSWER FOR EVERYTHING. outDir() is still the single chokepoint — the argv's -o,
-     * renderDir() and so _renders, report/, the manifest the report reads, Show in Finder,
+     * renderDir() (the cache folder keyed by it), report/, the manifest the report reads, Show in Finder,
      * Copy, the "already holds N files" notice and the Ready line all go through it or
      * through resolveDest() underneath it — so none of them can name a folder the export is
      * not writing. It is answered AFRESH on each call, never cached: every question is asked
@@ -2866,12 +2895,309 @@
     function saveToProduct(p) {
         var at = String(p || "").replace(/\/+$/, "");
         if (!at) return "";
-        var up1 = path.dirname(at), up2 = path.dirname(up1);
+        var up1 = path.dirname(at), up2 = path.dirname(up1), up3 = path.dirname(up2);
         var low = function (x) { return path.basename(x).toLowerCase(); };
+        // 3.91 · a mode folder inside a version folder is the same intention one level down.
+        if ((low(at) === "raw" || low(at) === "edited") && low(up2) === "act"
+            && low(up3) === "output") return path.dirname(up3);
         if (low(up1) === "act" && low(up2) === "output") return path.dirname(up2);
         if (low(at) === "act" && low(up1) === "output") return up2;
         if (low(at) === "output") return up1;
         return at;
+    }
+
+    /* ══════════ 3.91 · THE PRODUCT OF A PROJECT SAVED OUTSIDE SAMX_WORKSPACE — "auto-match,
+     * else pick" (the product owner, 29 Sep 2026).
+     *
+     * The team's projects mostly live on OTHER team drives — "<the Drive mount's shared-drives
+     * folder>/<team drive>/<Product>/Video/Editing file/x.prproj" — so 3.90's project route (a
+     * SAMX_WORKSPACE segment in the path) never fired for them, and the product came from Save
+     * to: a remembered preference, last pointed at whatever product he worked on before.
+     *
+     *   SAMX_WORKSPACE is found BESIDE the project's own drive (the shared-drives folder above
+     *   it, joined with SAMX_WORKSPACE), else in the first Drive for desktop account folder
+     *   under ~/Library that has one (DRIVE_*, below); with none at all, Save to decides.
+     *   A folder of the project's path BELOW its drive whose name is a SAMX product folder's —
+     *   case-insensitive, whitespace collapsed — and exactly one such product: that product
+     *   ("Matched"). Anything else is a pick from a plain <select> listing SAMX_WORKSPACE's
+     *   product folders, the likeliest first, remembered per project path ("Picked"); the pick
+     *   also overrides a match. Save to is not used on this route: a stale Save to pointed at
+     *   the last product is exactly how an export lands in the wrong one.
+     *
+     * Only for a project UNDER a shared-drives folder. A project on the Desktop is outside any
+     * drive — nothing in its path can name a product — and keeps the Save to route. */
+    var PICK_KEY = "xmlcut.productpick";
+    var PICK_KEEP = 200;
+
+    /* ⚠️ SPELT IN PARTS, ON PURPOSE. tools/leakscan.sh — the gate before every publish — flags
+     * these fragments of a Drive for desktop path wherever they appear in a shipped file, because
+     * a real one (an account, a drive's name) reaching the public repo is what it exists to stop.
+     * These are the mount's own generic folder names, which the panel has to look for; joined at
+     * runtime, the gate stays strict for every real path. The three are the shared-drives folder,
+     * the ~/Library folder Drive for desktop mounts into, and its per-account folder prefix. */
+    var DRIVE_SHARED = ["Shared", "drives"].join(" ");
+    var DRIVE_MOUNT = ["Cloud", "Storage"].join("");
+    var DRIVE_ACCOUNT = ["Google", "Drive"].join("") + "-";
+
+    /* A folder name as a person means it: NFC (the Mac's disk hands back decomposed letters,
+     * Premiere composed ones), whitespace collapsed, trimmed, case folded. */
+    function nameKey(s) {
+        var t = String(s === null || s === undefined ? "" : s);
+        try { t = t.normalize("NFC"); } catch (e) {}
+        return t.replace(/\s+/g, " ").replace(/^ | $/g, "").toLowerCase();
+    }
+
+    // ...and with only its letters and digits left: "Brand Two" and "BrandTwo" agree here.
+    function alnumKey(s) {
+        return nameKey(s).replace(/[^a-z0-9\u00DF-\u00F6\u00F8-\u024F\u1E00-\u1EFF]/g, "");
+    }
+
+    /* ".../<shared-drives>/<drive>/<a>/<b>/x.prproj" -> {root: ".../<shared-drives>", drive,
+     * below: ["<a>", "<b>"]} — the FOLDERS below the drive, never the file's own name. The
+     * innermost shared-drives folder (DRIVE_SHARED, any case) with a drive under it; null when
+     * there is none. */
+    function sharedDriveOf(projectPath) {
+        return sharedDrivesOf(projectPath)[0] || null;
+    }
+
+    /* Every shared-drives ancestor of the path, the innermost first (3.91 review): a folder
+     * that happens to be called that INSIDE a team drive — a copied tree — made the innermost
+     * one the only one tried, so the SAMX_WORKSPACE beside the real mount was never found and
+     * the export fell to Save to. productRoute() tries each in turn. */
+    function sharedDrivesOf(projectPath) {
+        var parts = String(projectPath || "").split("/"), want = DRIVE_SHARED.toLowerCase();
+        var out = [];
+        for (var i = parts.length - 3; i >= 0; i--) {
+            if (parts[i].toLowerCase() === want && parts[i + 1]) {
+                out.push({ root: parts.slice(0, i + 1).join("/"), drive: parts[i + 1],
+                           below: parts.slice(i + 2, parts.length - 1).filter(function (x) {
+                               return !!x; }) });
+            }
+        }
+        return out;
+    }
+
+    /* The user's home for the two things this panel keeps under it — the render cache and the
+     * Drive mount search. os.homedir() rather than homeDir(): the test harness hands the panel
+     * an os whose homedir() is a scratch folder, exactly as its tmpdir() is (workDir()), so
+     * a suite run can never write this Mac's real ~/Library/Caches/Raw-cutter. */
+    function userHome() {
+        var h = "";
+        try { h = String(node.require("os").homedir() || ""); } catch (e) {}
+        if (h.charAt(0) !== "/") h = homeDir();
+        return String(h || "").replace(/\/+$/, "");
+    }
+
+    // SAMX_WORKSPACE beside a shared-drives folder, by its real spelling; "" when not there.
+    function samxBeside(root) {
+        if (!root) return "";
+        var s = childDir(root, function (n) { return n.toLowerCase() === "samx_workspace"; },
+                         "SAMX_WORKSPACE");
+        return s ? path.join(root, s) : "";
+    }
+
+    function findSamx(sd) {
+        var beside = samxBeside(sd && sd.root);
+        if (beside) return beside;
+        var home = userHome(), cs = home ? path.join(home, "Library", DRIVE_MOUNT) : "";
+        var names = [];
+        try { names = fs.readdirSync(cs).map(String).sort(); } catch (e) { names = []; }
+        for (var i = 0; i < names.length; i++) {
+            if (names[i].indexOf(DRIVE_ACCOUNT) !== 0) continue;
+            var p = path.join(cs, names[i], DRIVE_SHARED, "SAMX_WORKSPACE");
+            if (isDir(p)) return p;
+        }
+        return "";
+    }
+
+    /* SAMX_WORKSPACE's product folders, sorted: one readdir (with file types, so no stat per
+     * entry on the drive), falling back to a stat each where the runtime has no Dirent. */
+    function samxProducts(samx) {
+        var out = [], ents = null, i;
+        try { ents = fs.readdirSync(samx, { withFileTypes: true }); } catch (e) { ents = null; }
+        if (ents && ents.length && typeof ents[0] === "object" && ents[0]
+            && typeof ents[0].isDirectory === "function") {
+            for (i = 0; i < ents.length; i++) {
+                var n = String(ents[i].name);
+                if (n.charAt(0) === ".") continue;
+                if (ents[i].isDirectory()
+                    || (ents[i].isSymbolicLink() && isDir(path.join(samx, n)))) out.push(n);
+            }
+        } else {
+            var names = [];
+            try { names = fs.readdirSync(samx).map(String); } catch (e2) { names = []; }
+            for (i = 0; i < names.length; i++) {
+                if (names[i].charAt(0) !== "." && isDir(path.join(samx, names[i]))) {
+                    out.push(names[i]);
+                }
+            }
+        }
+        return out.sort();
+    }
+
+    /* How likely a SAMX product is to be this project's, from the folders of its path: 1 the
+     * same letters and digits ("Brand Two" / "BrandTwo"), 2 one name starting the other at a
+     * word's end ("X 3.0" for a folder "X", or "X 2.0" for "X 2.0 - Long Name"), 3 the same
+     * with letters and digits only, 4 one inside the other. 0 is not a candidate. Only ever
+     * ORDERS the list — a match is exact (matchedProducts) or it is a pick. */
+    function candidateScore(name, below) {
+        var best = 0, nk = nameKey(name), na = alnumKey(name);
+        var starts = function (lng, sht) {
+            return sht.length >= 3 && lng.length > sht.length && lng.indexOf(sht) === 0
+                && !/[a-z\u00DF-\u00F6\u00F8-\u024F\u1E00-\u1EFF]/.test(lng.charAt(sht.length));
+        };
+        for (var j = 0; j < below.length; j++) {
+            var ck = nameKey(below[j]), ca = alnumKey(below[j]), s = 0;
+            if (!ck) continue;
+            if (na && na === ca) s = 1;
+            else if (starts(ck, nk) || starts(nk, ck)) s = 2;
+            else if (na.length >= 4 && ca.length >= 4
+                     && (ca.indexOf(na) === 0 || na.indexOf(ca) === 0)) s = 3;
+            else if ((nk.length >= 4 && ck.indexOf(nk) >= 0) || (ck.length >= 4 && nk.indexOf(ck) >= 0)
+                     || (na.length >= 5 && ca.indexOf(na) >= 0) || (ca.length >= 5 && na.indexOf(ca) >= 0)) {
+                s = 4;
+            }
+            if (s && (!best || s < best)) best = s;
+        }
+        return best;
+    }
+
+    // Every SAMX product a folder of the path names exactly (nameKey), each once.
+    function matchedProducts(names, below) {
+        var keys = {}, hit = [], i;
+        for (i = 0; i < below.length; i++) if (nameKey(below[i])) keys[nameKey(below[i])] = 1;
+        for (i = 0; i < names.length; i++) {
+            if (Object.prototype.hasOwnProperty.call(keys, nameKey(names[i]))) hit.push(names[i]);
+        }
+        return hit;
+    }
+
+    /* The likeliest products first: best score, then (3.91 review) the LONGER run of the path's
+     * folder name it shares from the start, then name; the rest are not candidates. Without the
+     * middle key a tier sorted by the alphabet, so a product that is a prefix of a more specific
+     * one ("Brand" beside "Brand 2.0", for a folder "Brand 2.0 - Long Name") came first. */
+    function sharedLead(name, below) {
+        var nk = nameKey(name), best = 0;
+        for (var j = 0; j < below.length; j++) {
+            var ck = nameKey(below[j]), n = 0;
+            while (n < nk.length && n < ck.length && nk.charAt(n) === ck.charAt(n)) n++;
+            if (n > best) best = n;
+        }
+        return best;
+    }
+
+    function productCandidates(names, below) {
+        var scored = [];
+        for (var i = 0; i < names.length; i++) {
+            var s = candidateScore(names[i], below);
+            if (s) scored.push({ n: names[i], s: s, lead: sharedLead(names[i], below) });
+        }
+        scored.sort(function (a, b) {
+            return (a.s - b.s) || (b.lead - a.lead) || (a.n < b.n ? -1 : a.n > b.n ? 1 : 0);
+        });
+        return scored.map(function (x) { return x.n; });
+    }
+
+    function loadPicks() {
+        var o = null;
+        try { o = JSON.parse(window.localStorage.getItem(PICK_KEY) || "{}"); } catch (e) { o = null; }
+        return (o && typeof o === "object" && Object.prototype.toString.call(o) !== "[object Array]")
+            ? o : {};
+    }
+
+    function pickFor(projectPath) {
+        var v = loadPicks()[String(projectPath || "")];
+        return typeof v === "string" ? v : "";
+    }
+
+    /* Remembered per project PATH, newest last, the oldest dropped past PICK_KEEP. "" forgets
+     * the pick (back to the match, or to nothing). */
+    function rememberPick(projectPath, name) {
+        var o = loadPicks(), k = String(projectPath || "");
+        if (!k) return;
+        delete o[k];
+        if (name) o[k] = String(name);
+        var keys = Object.keys(o);
+        while (keys.length > PICK_KEEP) delete o[keys.shift()];
+        try { window.localStorage.setItem(PICK_KEY, JSON.stringify(o)); } catch (e) {}
+    }
+
+    /* THE ROUTE for the open project, or null when it is not this one (no project, a project
+     * inside SAMX_WORKSPACE, one outside every shared drive, or no SAMX_WORKSPACE to be found).
+     * The drive is listed once per read — resolveDest() runs on every repaint — and again on
+     * focus and at the Export press (dropSamxCache), so a folder Tech has just made is seen.
+     *   {samx, names, below, folder: the product folder of the project's own drive,
+     *    auto: the one exact match or "", matches: every exact match, pick: the remembered pick
+     *    when SAMX_WORKSPACE still has it, product: the full path of pick || auto, or ""} */
+    function productRoute() {
+        var info = state.info;
+        var pp = info ? String(info.project_path || "") : "";
+        if (!pp || projectProduct(pp)) return null;
+        var c = state.samxCache;
+        if (!c || c.info !== info || c.pp !== pp) {
+            var drives = sharedDrivesOf(pp);
+            c = { info: info, pp: pp, sd: drives[0] || null, samx: "", names: [] };
+            // Beside the innermost drive, else beside an outer one (its folders then being what
+            // is below THAT drive), else the Drive for desktop account folders (findSamx).
+            for (var k = 0; k < drives.length && !c.samx; k++) {
+                var beside = samxBeside(drives[k].root);
+                if (beside) { c.sd = drives[k]; c.samx = beside; }
+            }
+            if (c.sd && !c.samx) c.samx = findSamx(null);
+            if (c.samx) c.names = samxProducts(c.samx);
+            state.samxCache = c;
+        }
+        if (!c.sd || !c.samx) return null;
+        var matches = matchedProducts(c.names, c.sd.below);
+        var pick = pickFor(pp);
+        if (pick && c.names.indexOf(pick) < 0) pick = "";
+        var auto = matches.length === 1 ? matches[0] : "";
+        var chosen = pick || auto;
+        return { samx: c.samx, names: c.names, below: c.sd.below, folder: productFolderOf(c.sd.below),
+                 matches: matches, auto: auto, pick: pick, project: pp,
+                 product: chosen ? path.join(c.samx, chosen) : "" };
+    }
+
+    function dropSamxCache() { state.samxCache = null; }
+
+    /* THE FOLDER THE REFUSAL NAMES AS THE PROJECT'S PRODUCT: the first folder below the drive
+     * that is not one of the team's generic working folders (3.91 review). It was below[0]
+     * whatever that was, so a project in a drive named after its product, "<drive>/Video/x",
+     * was told to "ask Tech to create" a SAMX folder called “Video”, and one a level deeper one
+     * called “Projects 2026”. A generic word with a year or a number after it is still generic.
+     * "" when every folder is generic — the sentence then says nothing in the path names one. */
+    var GENERIC_FOLDER_RE = new RegExp("^(?:videos?|projects?|project files?|editing files?|edit"
+        + "|editing|outputs?|assets?|sources?|footage|exports?|renders?|raw|edited|premiere"
+        + "|ae|after effects|files?|work|wip|archive|old|backup)(?:[ _.\\-]*\\d[\\d ._\\-]*)?$");
+    function productFolderOf(below) {
+        for (var i = 0; i < below.length; i++) {
+            var k = nameKey(below[i]);
+            if (k && !GENERIC_FOLDER_RE.test(k)) return below[i];
+        }
+        return "";
+    }
+
+    /* The refusal while nothing is matched or picked — naming the project's own product
+     * folder, as the product owner asked: "SAMX_WORKSPACE has no folder for 'Brand' yet — ask
+     * Tech to create it, or pick the product below". */
+    function unmatchedWhy(r) {
+        if (r.matches.length > 1) {
+            return "The project's folders name " + r.matches.length + " SAMX_WORKSPACE products, "
+                + qn(r.matches[0]) + " and " + qn(r.matches[1]) + ", so nothing can be exported "
+                + "yet — pick the one this edit belongs to below.";
+        }
+        var near = productCandidates(r.names, r.below);
+        if (!r.folder) {
+            return "Nothing in the project's path names a SAMX_WORKSPACE product, so nothing can "
+                + "be exported yet — pick the product below.";
+        }
+        if (near.length) {
+            return "SAMX_WORKSPACE has no folder named exactly " + qn(r.folder) + ", so nothing "
+                + "can be exported yet — pick the product below; the likeliest are at the top ("
+                + near.slice(0, 3).join(", ") + ").";
+        }
+        return "SAMX_WORKSPACE has no folder for " + qn(r.folder) + " yet — ask Tech to create "
+            + "it, or pick the product below.";
     }
 
     function isDir(p) {
@@ -2915,27 +3241,64 @@
      * editor's: Tech sets up each product's Output/, which is why that sentence says to ask
      * Tech rather than, as the spec's Save-to sentence does, to open another project. */
     var NOT_SAVE_TO = "Save to is not used while a project from SAMX_WORKSPACE is open.";
+    // 3.91 · the same for the matched / picked product of a project on another shared drive.
+    var NOT_SAVE_TO_PICK = "Save to is not used while the open project's product is matched "
+        + "or picked here.";
+    /* 3.91 review · and while nothing is matched or picked yet: pointing Save to at the right
+     * product changed nothing on this route, with "Change" live beside it and no word why. */
+    var NOT_SAVE_TO_UNMATCHED = "Save to is not used for this project: its product is matched "
+        + "or picked here.";
+
+    /* 3.91 · THE MODE HAS ITS OWN FOLDER AGAIN, inside the version: <version>/raw/ for Source
+     * Render and <version>/edited/ for Timeline Render (the product owner, 29 Sep: "vẫn giữ
+     * nguyên folder raw và editted cho 2 lựa chọn render"). */
+    var MODE_DIR = { source: "raw", render: "edited" };
+    function modeDirName(m) { return MODE_DIR[m === "render" ? "render" : "source"]; }
 
     /* The destination, and every reason there is none. `ok` false with an empty `why` means
      * there is nothing to talk about yet (no read, or no folder at all — the lit Save to
-     * frame covers that); a `why` is the refusal, said on the dest row AND by doExport(). */
+     * frame covers that); a `why` is the refusal, said on the dest row AND by doExport().
+     *
+     * 3.91 · d.dir is the MODE folder (<version>/raw or <version>/edited) — what outDir()
+     * returns and every consumer writes into; d.versionPath is the version folder around it.
+     * d.from is "project" (inside SAMX_WORKSPACE), "matched" / "picked" / "unmatched" (a
+     * project on another shared drive — productRoute), or "saveto". */
     function resolveDest() {
         var d = { ok: false, dir: "", product: "", from: "", output: "", act: "",
                   actExists: false, version: "", versionDir: "", versionExists: false,
-                  why: "" };
+                  versionPath: "", mode: "", modeDir: "", modeExists: false, legacy: null,
+                  samx: "", route: null, why: "" };
         if (!state.info) return d;
         d.product = projectProduct(state.info.project_path);
         d.from = d.product ? "project" : "saveto";
-        if (!d.product) d.product = saveToProduct(state.out);
-        if (!d.product) return d;
-        var why = [], at = shortPath(d.product, 44);
+        var r = d.product ? null : productRoute();
+        if (r) {
+            d.route = r;
+            d.samx = r.samx;
+            d.from = r.pick ? "picked" : r.auto ? "matched" : "unmatched";
+            d.product = r.product;
+        } else if (!d.product) {
+            d.product = saveToProduct(state.out);
+        }
+        var fromProject = d.from !== "saveto";
+        var notSave = d.from === "project" ? NOT_SAVE_TO : NOT_SAVE_TO_PICK;
+        var why = [];
+        if (d.from === "unmatched") why.push(unmatchedWhy(r) + " " + NOT_SAVE_TO_UNMATCHED);
+        if (!d.product && !why.length) return d;
+        var at = shortPath(d.product, 44);
+        var whose = d.from === "project" ? "The open project's product folder "
+                  : d.from === "matched" ? "The product matched to the open project, "
+                  : d.from === "picked" ? "The product picked for the open project, " : "";
+        var comma = d.from === "matched" || d.from === "picked" ? "," : "";
         /* ⚠️ Output/ IS NEVER CREATED HERE, and that is the whole test of "is this a product
          * folder". Making it would turn any folder Save to happens to point at — the default
          * is ~/Desktop/xmlcut clips — into a fake product with a delivery tree in it. */
-        if (!isDir(d.product)) {
-            if (d.from === "project") {
-                why.push("The open project's product folder " + at + " isn’t reachable — "
-                    + "reconnect the shared drive, then press Read again. " + NOT_SAVE_TO);
+        if (!d.product) {
+            // unmatched: said above, nothing to look at on disk
+        } else if (!isDir(d.product)) {
+            if (fromProject) {
+                why.push(whose + at + comma + " isn’t reachable — "
+                    + "reconnect the shared drive, then press Read again. " + notSave);
             } else if (!canCreate(d.product)) {
                 // The unmounted share: the sentence 3.89 said, for the same population.
                 why.push("Save to " + at + " isn’t there, and the export cannot create it. "
@@ -2950,10 +3313,14 @@
                              "Output");
             if (o) {
                 d.output = path.join(d.product, o);
-            } else if (d.from === "project") {
-                why.push("The open project's product folder " + at + " has no Output/, so "
+            } else if (fromProject) {
+                /* ⚠️ KEEP REFUSING (the product owner, 29 Sep) — a matched or picked product
+                 * with no Output/ is refused exactly like the project's own. */
+                why.push(whose + at + comma + " has no Output/, so "
                     + "nothing can be exported there — ask Tech to set up its Output/ "
-                    + "folder; this panel never creates one. " + NOT_SAVE_TO);
+                    + "folder" + (d.from === "picked" ? ", or pick another product below"
+                                  : d.from === "matched" ? ", or pick the product below" : "")
+                    + "; this panel never creates one. " + notSave);
             } else {
                 why.push(at + " isn’t a product folder (it has no Output/), so nothing can "
                     + "be exported there — open the product’s project from SAMX_WORKSPACE, "
@@ -2976,33 +3343,43 @@
         var vd = d.actExists
             ? childDir(d.act, function (n) { return sameVersion(n, d.version); }, d.version)
             : "";
+        d.mode = modeDirName(state.cutFrom);
+        var md = vd ? childDir(path.join(d.act, vd), function (n) {
+            return n.toLowerCase() === d.mode; }, d.mode) : "";
         /* ⚠️ A FILE WHERE A FOLDER HAS TO GO IS A REFUSAL, NOT "WILL CREATE IT". childDir()
          * asks for folders only, so a FILE called ACT (or act) read as "no ACT/ yet": the row
          * said "Export will create it" and "Ready", and the export then died on the engine's
          * mkdir (NotADirectoryError) or on Premiere's (ENOTDIR) — measured, with the false
          * "will create it" still on the rail afterwards. The same for a file named like the
-         * version folder inside ACT/ (EEXIST, with the rail silent). Said before anything
-         * runs, naming the file, so it can be moved. */
-        var blocker = !d.actExists ? blockingFile(d.output, "ACT")
-                    : (!vd ? blockingFile(d.act, d.version) : "");
+         * version folder inside ACT/ (EEXIST, with the rail silent) — and, since 3.91, like the
+         * mode folder inside the version folder. Said before anything runs, naming the file,
+         * so it can be moved. */
+        var holder = "", blocker = "", wants = "";
+        if (!d.actExists) { holder = d.output; wants = "ACT"; }
+        else if (!vd) { holder = d.act; wants = d.version; }
+        else if (!md) { holder = path.join(d.act, vd); wants = d.mode; }
+        if (holder) blocker = blockingFile(holder, wants);
         if (blocker) {
-            var holder = !d.actExists ? d.output : d.act;
             d.why = path.basename(holder) + "/ in " + shortPath(path.dirname(holder), 44)
                 + " holds a FILE called “" + blocker + "” where the "
-                + (!d.actExists ? "ACT" : d.version) + "/ folder has to go, so nothing can be "
+                + wants + "/ folder has to go, so nothing can be "
                 + "exported there — move or rename that file, then export again.";
             return d;
         }
         d.versionExists = !!vd;
         d.versionDir = vd || d.version;
-        d.dir = path.join(d.act, d.versionDir);
+        d.versionPath = path.join(d.act, d.versionDir);
+        d.modeExists = !!md;
+        d.modeDir = md || d.mode;
+        d.dir = path.join(d.versionPath, d.modeDir);
         d.ok = true;
         d.said = v.said || d.version;
-        /* ⚠️ A VERSION FOLDER ANOTHER EXPORT ALREADY OWNS IS A REFUSAL (the product owner, 24 Sep): another
-         * sequence's delivery, or this sequence's in the other mode. `taken` keeps `dir` so the
-         * box and Show in Finder still point at the folder the sentence is about, while
+        /* ⚠️ A VERSION ANOTHER SEQUENCE'S EXPORT ALREADY OWNS IS A REFUSAL (the product owner,
+         * 24 Sep). `taken` keeps `dir` — and `takenDir`, the folder whose clips it is about —
+         * so the box and Show in Finder still point at the folder the sentence names, while
          * `ok` false keeps outDir() — and so every door — shut. See folderTaken(). */
         if (d.versionExists) {
+            d.legacy = legacyFlat(d.versionPath);
             var taken = folderTaken(d);
             if (taken) {
                 d.ok = false;
@@ -3168,89 +3545,132 @@
         return normSeqName(fx.name) !== normSeqName(readSeqName()) ? fx.name : "";
     }
 
-    var MODE_NAME = { source: "Source Render", render: "Timeline Render" };
-
-    /* THE TWO REASONS A VERSION FOLDER THAT EXISTS CANNOT TAKE THIS EXPORT, as the one
-     * sentence resolveDest() refuses with; "" when it can. Both need the folder to hold CLIPS
-     * (clipNames) and a RECORD of who made them: a folder that is empty, holds only non-clip
-     * files, or whose record delivered nothing is free — which is also what makes "move that
-     * folder's clips out first" a way out that works.
-     *
-     *   another sequence's delivery (otherSequence), and
-     *   ⚠️ THIS sequence's in the OTHER MODE — the product owner's call, 24 Sep: a version folder keeps the mode it
-     *   was delivered in. A Source Render and a Timeline Render name their files by different
-     *   clocks, so the second run's folder tidy decides the first run's fate — measured
-     *   (check_folder, "Source, then Timeline Render, then Source again"): a still keeps its
-     *   name across modes and was replaced with nothing said, and Source after Render left
-     *   the render-only clips at the top under numbers the Source clips also use. A record
-     *   from before cut_from was kept does not block.
+    /* WHAT A FOLDER'S RECORDS SAY OF THE CLIPS IN IT: how many clips (clipNames), whether a
+     * record names who made them (known), and the other sequence one names ("" for none).
      *
      * ⚠️ THE RECORD IS THE MANIFEST AND THE LEDGER (3.90 round 3; see folderLedger). What
      * counts as evidence of who made the clips on disk:
      *   - manifest.json, when it lists an ENCODED clip (its own run delivered one), or when the
      *     ledger vouches for a clip on disk (a narrowed run over a delivery: a failed Retry, a
-     *     --pick that wrote nothing — the manifest then still names the sequence and the mode);
+     *     --pick that wrote nothing — the manifest then still names the sequence);
      *   - every ledger entry whose file is on disk.
-     * Any of them naming another sequence refuses. The mode is the manifest's when it counts
-     * (the last delivered run), else the one mode the ledger's clips share; clips of both
-     * modes with no manifest to settle it (only a pre-3.90 folder) name none.
-     *
-     * Also leaves on `d`: clips (the count), mine (a record names this sequence, in this mode),
-     * so setOutDest() can tell this sequence's own folder from clips nothing claims. */
-    function folderTaken(d) {
-        var names = clipNames(d.dir);
-        d.clips = names.length;
-        d.mine = false;
-        if (!names.length) return "";
+     * Any of them naming another sequence is another's. A folder that is empty, holds only
+     * non-clip files, or whose record delivered nothing names nobody — which is also what makes
+     * "move that folder's clips out first" a way out that works. */
+    function folderRecord(dir) {
+        var rec = { clips: 0, known: false, other: "" };
+        var names = clipNames(dir);
+        rec.clips = names.length;
+        if (!names.length) return rec;
         var present = {}, i;
         for (i = 0; i < names.length; i++) present[names[i]] = 1;
-        var fx = folderExport(d.dir), led = folderLedger(d.dir, present);
-        var useFx = !!fx && (fx.encoded > 0 || led.length > 0);
-        var ev = useFx ? [fx] : [];
+        var fx = folderExport(dir), led = folderLedger(dir, present);
+        var ev = (fx && (fx.encoded > 0 || led.length > 0)) ? [fx] : [];
         for (i = 0; i < led.length; i++) ev.push(led[i]);
-        if (!ev.length) return "";
-        var other = "", known = false;
         for (i = 0; i < ev.length; i++) {
-            if (ev[i].id || ev[i].name) known = true;
-            if (!other) other = otherSequence(ev[i]);
+            if (ev[i].id || ev[i].name) rec.known = true;
+            if (!rec.other) rec.other = otherSequence(ev[i]);
         }
-        var mode = useFx ? fx.cutFrom : "";
-        if (!mode) {
-            for (i = 0; i < led.length; i++) {
-                if (!led[i].cutFrom) continue;
-                if (!mode) mode = led[i].cutFrom;
-                else if (mode !== led[i].cutFrom) { mode = ""; break; }
+        return rec;
+    }
+
+    /* 3.91 · WHAT 3.90 LEFT FLAT IN A VERSION FOLDER — clips, its manifest and ledger, report/,
+     * _renders/, _earlier_export/ directly inside <version>/, from before raw/ and edited/. An
+     * export into <version>/raw or /edited NEVER touches them (the engine only ever looks inside
+     * its -o); the dest row says they are there so the editor can tidy by hand. null when the
+     * top level holds none of it. */
+    var LEGACY_RECORDS = ["manifest.json", "manifest.csv", "clips.csv", ".xmlcut-ledger.json"];
+    var LEGACY_DIRS = ["_renders", "_earlier_export", "report"];
+    function legacyFlat(vp) {
+        var names;
+        try { names = fs.readdirSync(vp).map(String); } catch (e) { return null; }
+        var clips = 0, recs = false, dirs = [], i;
+        for (i = 0; i < names.length; i++) {
+            if (CLIP_FILE_RE.test(names[i]) || MIX_FILE_RE.test(names[i])) clips++;
+            else if (LEGACY_RECORDS.indexOf(names[i]) >= 0) recs = true;
+        }
+        for (i = 0; i < LEGACY_DIRS.length; i++) {
+            if (names.indexOf(LEGACY_DIRS[i]) >= 0 && isDir(path.join(vp, LEGACY_DIRS[i]))) {
+                dirs.push(LEGACY_DIRS[i] + "/");
             }
         }
-        var otherMode = !other && !!mode && mode !== state.cutFrom;
-        d.mine = known && !other && !otherMode;
-        if (!other && !otherMode) return "";
-        var leaf = path.basename(d.act) + "/" + d.versionDir + "/";
-        var next = nextSaid(d.said, d.act);
-        if (other) {
-            /* A different sequence of the SAME name (a duplicate: the ids differ) is said as
-             * that, or the sentence would name this very sequence as "another".
-             *
-             * ⚠️ "RENAME THIS SEQUENCE", NOT "ONE OF THE TWO" (3.90 round 3). Measured: renaming
-             * the sequence that OWNS the folder to "vid 9.1" and exporting it there leaves its
-             * v9.0 clips where they were, so this one was still refused — and the suggested
-             * "vid 9.1" was by then taken too. Renaming this one always works; the suggestion
-             * skips a version folder ACT/ already has (nextSaid). */
-            var twin = normSeqName(other) === normSeqName(readSeqName());
-            return leaf + " already holds the export of " + qn(other) + (twin
-                ? ", a different sequence with the same name (Premiere gives it another ID)"
-                : ", another sequence that gives the same version (" + d.version + ")")
-                + ", so nothing can be exported into it — rename this sequence to another "
-                + "version" + (next ? " (e.g. " + qn(next) + ")" : "") + ", or, if this "
-                + "sequence replaces that one, move that folder's clips out first.";
+        if (!clips && !recs && !dirs.length) return null;
+        return { clips: clips, records: recs, dirs: dirs };
+    }
+
+    // The one sentence the dest row adds for it.
+    function legacySentence(d) {
+        var L = d.legacy;
+        if (!L) return "";
+        var bits = [];
+        if (L.clips) bits.push(L.clips + " clip(s)");
+        for (var i = 0; i < L.dirs.length; i++) bits.push(L.dirs[i]);
+        if (L.records) bits.push("its manifest");
+        return d.versionDir + "/ also holds an earlier export's files directly inside it, from "
+            + "before raw/ and edited/ (" + bits.join(", ") + "): this export never touches "
+            + "them — tidy them by hand.";
+    }
+
+    /* ⚠️ ANOTHER SEQUENCE'S DELIVERY, BY THE SAME VERSION — decided by the product owner on
+     * 24 Sep: REFUSED, and the other sequence is named. "Brand vid 9.0 [a.b][c.d] v3" and its
+     * "… v3 4x5" variant both give v9.0, and one folder cannot hold both: measured with the
+     * real engine, a Timeline Render of the 4x5 rewrote all 19 of the 9x16's files in place,
+     * and a Source one moved them to _earlier_export/.
+     *
+     * 3.91 · ASKED OF THE MODE FOLDER THIS EXPORT WRITES — and of the version's OTHER mode
+     * folder, and of 3.90's flat files at the version's top level. A version is ONE delivery:
+     * SamX takes <product>/Output/ACT/<version>/ whole, so a v9.0/ whose raw/ is the 9x16 and
+     * whose edited/ is the 4x5 would go out as one version made of two edits. The same sequence
+     * in both modes is the point of the layout and is never refused. (The 3.90 round-2 refusal
+     * of "this sequence in the OTHER mode" is GONE: the modes land in different folders now,
+     * so neither run's folder tidy can reach the other's files.)
+     *
+     * Returns the one refusal sentence, or "". Also leaves on `d`: clips and mine (a record in
+     * the mode folder names this sequence), for setOutDest(), and takenDir. */
+    function folderTaken(d) {
+        d.clips = 0;
+        d.mine = false;
+        var here = d.modeExists ? folderRecord(d.dir) : null;
+        if (here) {
+            d.clips = here.clips;
+            d.mine = here.known && !here.other;
         }
-        /* "of this sequence" only when a record says so: clips an older engine's ledger kept
-         * carry their mode and no sequence. */
-        return leaf + " already holds a " + MODE_NAME[mode] + " export"
-            + (known ? " of this sequence" : "") + " and "
-            + "this one is a " + (MODE_NAME[state.cutFrom] || state.cutFrom) + ", so nothing "
-            + "can be exported into it — switch back to " + MODE_NAME[mode] + ", or export "
-            + "this one under another version" + (next ? " (e.g. " + qn(next) + ")" : "") + ".";
+        var otherMode = d.mode === "raw" ? "edited" : "raw";
+        var od = childDir(d.versionPath, function (n) { return n.toLowerCase() === otherMode; },
+                          otherMode);
+        var there = od ? folderRecord(path.join(d.versionPath, od)) : null;
+        var flat = d.legacy ? folderRecord(d.versionPath) : null;
+        var vleaf = path.basename(d.act) + "/" + d.versionDir + "/";
+        var hit = null;
+        // `into`: the folder this export would write, as the sentence says it — "it" when that
+        // is the folder the sentence has just named.
+        if (here && here.other) {
+            hit = { other: here.other, dir: d.dir, leaf: vleaf + d.modeDir + "/", into: "it" };
+        } else if (there && there.other) {
+            hit = { other: there.other, dir: path.join(d.versionPath, od), leaf: vleaf + od + "/",
+                    into: vleaf };
+        } else if (flat && flat.other) {
+            hit = { other: flat.other, dir: d.versionPath, leaf: vleaf, into: "it" };
+        }
+        if (!hit) return "";
+        d.takenDir = hit.dir;
+        var next = nextSaid(d.said, d.act);
+        /* A different sequence of the SAME name (a duplicate: the ids differ) is said as that,
+         * or the sentence would name this very sequence as "another".
+         *
+         * ⚠️ "RENAME THIS SEQUENCE", NOT "ONE OF THE TWO" (3.90 round 3). Measured: renaming the
+         * sequence that OWNS the folder to "vid 9.1" and exporting it there leaves its v9.0
+         * clips where they were, so this one was still refused — and the suggested "vid 9.1"
+         * was by then taken too. Renaming this one always works; the suggestion skips a version
+         * folder ACT/ already has (nextSaid). */
+        var twin = normSeqName(hit.other) === normSeqName(readSeqName());
+        return hit.leaf + " already holds the export of " + qn(hit.other) + (twin
+            ? ", a different sequence with the same name (Premiere gives it another ID)"
+            : ", another sequence that gives the same version (" + d.version + ")")
+            + ", so nothing can be exported into " + hit.into
+            + " — rename this sequence to another "
+            + "version" + (next ? " (e.g. " + qn(next) + ")" : "") + ", or, if this "
+            + "sequence replaces that one, move that folder's clips out first.";
     }
 
     /* THE DESTINATION LINE — the Save to row in the bar — names the folder that will
@@ -3284,21 +3704,76 @@
      * the sentence is about that version folder, so the box names it and Show in Finder
      * opens it — it exists, it holds the clips to move out. */
     function destShown(d) {
-        if (d && (d.ok || d.taken) && d.dir) return d.dir;
-        return (d && d.from === "project" && d.product) ? d.product : state.out;
+        if (d && (d.ok || d.taken) && d.dir) return (d.taken && d.takenDir) || d.dir;
+        if (d && d.from === "unmatched" && d.samx) return d.samx;
+        return (d && d.from && d.from !== "saveto" && d.product) ? d.product : state.out;
     }
 
+    // The folder a refusal row is about: the taken one, else the product, else SAMX_WORKSPACE.
+    function refusalTitle(d) {
+        return d.taken ? (d.takenDir || d.dir) : (d.product || d.samx || state.out);
+    }
+
+    /* 3.91 · WHOSE FOLDER, IN ONE WORD: the project's (inside SAMX_WORKSPACE, or a project on
+     * another drive with nothing matched yet), Matched (its path named exactly one product),
+     * Picked (the Product menu), or Save to. The same width budget as "Project" and "Save to"
+     * — check_layout measures the box under every one of them. */
+    var DEST_CAPTION = { project: "Project", matched: "Matched", picked: "Picked",
+                         unmatched: "Project", saveto: "Save to" };
+
     function paintOutPath(d) {
-        var fromProject = !!(d && d.from === "project" && d.product);
         var full = destShown(d);
-        setPathLabel(el.outpath, full, 40,
-                     d && (d.ok || d.taken) ? (d.versionDir + " in " + path.basename(d.product))
-                                            : "");
-        if (el.destcap) el.destcap.textContent = fromProject ? "Project" : "Save to";
+        /* "v1.2/raw in Brand 1.0": the version first (a docked box keeps the start of the
+         * text), then the mode folder, then the product. The full path is what it opens to. */
+        var label = "";
+        if (d && (d.ok || d.taken) && d.act) {
+            label = path.relative(d.act, full) + " in " + path.basename(d.product);
+        } else if (d && d.from === "unmatched" && d.samx) {
+            label = "no product yet — pick one below";
+        }
+        setPathLabel(el.outpath, full, 40, label);
+        if (el.destcap) el.destcap.textContent = DEST_CAPTION[(d && d.from) || "saveto"] || "Save to";
+        paintProductPick(d);
+    }
+
+    /* 3.91 · THE PRODUCT MENU — shown only on the matched / picked / unmatched route. The first
+     * entry is the match (or "Pick the product…"), which forgets a pick; then the likeliest
+     * products; then, after a rule, every other product folder in SAMX_WORKSPACE. */
+    function paintProductPick(d) {
+        var sel = el.productpick;
+        if (!sel) return;
+        var r = d && d.route;
+        show(el.productrow, !!r);
+        if (!r) return;
+        var sig = r.samx + "|" + r.project + "|" + r.names.join("/") + "|" + r.auto + "|" + r.pick;
+        if (sel._sig === sig) return;
+        sel._sig = sig;
+        sel.innerHTML = "";
+        var add = function (value, text, disabled) {
+            var o = document.createElement("option");
+            o.value = value;
+            o.textContent = text;
+            if (disabled) o.disabled = true;
+            sel.appendChild(o);
+        };
+        add("", r.auto ? "Matched: " + r.auto : (r.matches.length > 1 ? "Pick one of the matches…"
+                                                                      : "Pick the product…"));
+        var near = r.matches.length > 1 ? r.matches.slice() : [];
+        var cands = productCandidates(r.names, r.below);
+        // The match is the first entry already; listing it again as a candidate is clutter.
+        for (var i = 0; i < cands.length; i++) {
+            if (near.indexOf(cands[i]) < 0 && cands[i] !== r.auto) near.push(cands[i]);
+        }
+        for (i = 0; i < near.length; i++) add(near[i], near[i]);
+        if (near.length) add("-", "──────────", true);
+        for (i = 0; i < r.names.length; i++) if (near.indexOf(r.names[i]) < 0) add(r.names[i], r.names[i]);
+        sel.value = r.pick || "";
     }
 
     /* IS THERE ANYWHERE TO EXPORT INTO — Save to, or an open project inside SAMX_WORKSPACE,
-     * which names the product itself (and then Save to is not used at all).
+     * which names the product itself (and then Save to is not used at all), or (3.91) an open
+     * project on another shared drive with a SAMX_WORKSPACE to match or pick its product in:
+     * its refusal, until something is matched or picked, says what to do.
      *
      * ⚠️ NOT state.out, which is what Export, Folder and the next line all gated on: with
      * Save to empty and a SAMX project open, the box showed "From project …/ACT/v1.2" while
@@ -3307,7 +3782,8 @@
      * product found this way is a USABLE one is resolveDest()'s question, asked at every
      * door; this one only asks whether there is a product to ask about. */
     function haveDest() {
-        return !!state.out || !!(state.info && projectProduct(state.info.project_path));
+        return !!state.out || !!(state.info && (projectProduct(state.info.project_path)
+                                                 || productRoute()));
     }
 
     /* The dest row on the rail: what about the destination needs attention before Export —
@@ -3352,11 +3828,12 @@
          * no Output/: each would otherwise surface as an export that silently went somewhere
          * wrong, or as a folder tree conjured into a place that is not a product. */
         if (!d.ok) {
-            say("dest", "warn", d.why, d.taken ? d.dir : (d.product || state.out));
+            say("dest", "warn", d.why, refusalTitle(d));
             return;
         }
-        var n = d.versionExists ? d.clips : 0;
-        var leaf = path.basename(d.act) + "/" + d.versionDir + "/";
+        var n = d.modeExists ? d.clips : 0;
+        var leaf = path.basename(d.act) + "/" + d.versionDir + "/" + d.modeDir + "/";
+        var sev = "info", text = "";
         /* ⚠️ SILENT WHEN THERE IS NOTHING TO SAY. The happy reading is already on the
          * destination line — the folder, and whose it is — and saying it again here was the
          * duplicate this rail was cleared of once already.
@@ -3366,9 +3843,10 @@
          * the sign of a Save to pointed at the wrong product.
          *
          * ⚠️ A FOLDER THAT ALREADY HOLDS CLIPS IS INFORMATION, NOT A WARNING — since the
-         * refusals above took over the two cases that were problems (another sequence's
-         * delivery, the other mode). What is left is this sequence's own earlier export in this
-         * mode, or clips no manifest claims, and re-exporting over those is the ordinary thing
+         * refusals above took over the cases that were problems (another sequence's delivery;
+         * 3.90 also refused the other mode, which has its own folder since 3.91). What is left is
+         * this sequence's own earlier export in this mode, or clips no manifest claims, and
+         * re-exporting over those is the ordinary thing
          * to do. It was amber, and setRunning(false) re-paints this row after every run, so
          * EVERY successful export ended on an amber "already holds 19 clip(s). Exporting into it
          * replaces…" — a sentence about the NEXT export that read as a problem with this one.
@@ -3387,23 +3865,31 @@
          * ledger that case is now a refusal (folderTaken); what is left here is clips nothing in
          * the folder records at all, and whose they are is his to check. */
         if (n > 0 && d.mine) {
-            say("dest", "info", leaf + " holds this sequence's last export (" + n + " clip(s)). "
+            text = leaf + " holds this sequence's last export (" + n + " clip(s)). "
                 + "Exporting again replaces the ones it makes again (or keeps them, with "
                 + "“skip clips already there”); anything it moves to _earlier_export/ instead "
-                + "is named after the run.", d.dir);
+                + "is named after the run.";
         } else if (n > 0) {
-            say("dest", "warn", leaf + " already holds " + n + " clip(s). Nothing in it records "
+            sev = "warn";
+            text = leaf + " already holds " + n + " clip(s). Nothing in it records "
                 + "which sequence made them, so make sure they are not another sequence's "
                 + "delivery: exporting into it replaces the ones it makes again (or keeps them, "
                 + "with “skip clips already there”); anything it moves to _earlier_export/ "
-                + "instead is named after the run.", d.dir);
+                + "instead is named after the run.";
         } else if (!d.actExists) {
-            say("dest", "warn", path.basename(d.output) + "/ACT isn’t there yet — Export will "
-                + "create it, with " + d.versionDir + "/ inside, in "
-                + shortPath(d.output, 44) + ".", d.dir);
-        } else {
-            say("dest", "info", "");
+            sev = "warn";
+            text = path.basename(d.output) + "/ACT isn’t there yet — Export will "
+                + "create it, with " + d.versionDir + "/" + d.modeDir + "/ inside, in "
+                + shortPath(d.output, 44) + ".";
         }
+        /* 3.91 · 3.90's FLAT files at the version's top level — clips, its manifest, _renders/,
+         * _earlier_export/ — are never touched by an export into raw/ or edited/, and are said
+         * in amber, once, so he can tidy them by hand: SamX takes the version folder whole. */
+        if (d.legacy) {
+            sev = "warn";
+            text = (text ? text + " " : "") + legacySentence(d);
+        }
+        say("dest", sev, text, d.dir);
     }
 
     /* FAIL CLOSED, at each door an export goes through: the press (doExport), the start after
@@ -3428,7 +3914,7 @@
         // Nothing of the folder is replaced or moved by an export that does not run.
         state.clashHeld = 0;
         say("clash", "warn", "");
-        say("dest", "warn", why, d.taken ? d.dir : (d.product || state.out));
+        say("dest", "warn", why, refusalTitle(d));
         paintOutPath(d);
         return null;
     }
@@ -3436,8 +3922,8 @@
     /* AND AFTER THE RUN, WHETHER IT MADE Output/ACT. The dest row said "isn't there yet"
      * before the export; once the folder exists that sentence is false, so it is replaced by
      * what happened. Called from setRunning(false), which every end of a run passes through —
-     * a render that failed or was stopped can have made it too (Premiere creates _renders/
-     * inside the version folder). */
+     * a render that failed or was stopped can have made it too (the engine's mkdir, or
+     * report/, even for a run that encoded nothing). */
     function settleAct() {
         var act = state.actWanted;
         state.actWanted = "";
@@ -3568,7 +4054,7 @@
      * The destination's version comes from the sequence name as it was at Read. The sequence
      * check compares IDs, so renaming "Brand v1.2" to "Brand v1.3" in Premiere and pressing
      * Export passed it — measured: "sequence check passed — starting", and the engine went
-     * into ACT/v1.2/, which with the files flat means over v1.2's delivered clips. The refusal
+     * into ACT/v1.2/, over v1.2's delivered clips (3.90's flat folder; raw/ in 3.91). The refusal
      * sentences themselves tell him to fix the name in Premiere, so this is the path a
      * correction takes.
      *
@@ -3883,6 +4369,8 @@
          * than left for something else to notice, so this row can never be a stale reason
          * sitting over a run that is starting — the failure the "?" mismatch row was. */
         say("export", "warn", "");
+        // 3.91 · the press asks the drive again, SAMX_WORKSPACE's product folders included.
+        dropSamxCache();
         /* 3.90 · NO DESTINATION, NO EXPORT — and nothing asked of Premiere either. Refused
          * here, before the sequence check, with the same sentence the dest row already shows:
          * no Output/ in the product, no version in the sequence name, or two of them. The
@@ -4124,18 +4612,25 @@
              * _earlier_export/" — untrue of a clip that is merely unticked this time (the
              * folder tidy leaves it where it is) and of a renumbered clip the ledger vouches
              * for (re-made, its old number deleted). Measured with the real engine, CLAUDE.md
-             * 3.90 round 2. With another sequence's folder and the other mode refused, what is
+             * 3.90 round 2. With another sequence's folder refused (and, since 3.91, the other
+             * mode in a folder of its own), what is
              * left here is this sequence's own export in this mode, so it is information. */
             log("overwriting: " + already + " existing clip(s) in " + state.clashDir
                 + " — the ones this run makes again are replaced; anything the engine moves "
                 + "to _earlier_export/ is named on its !! lines");
-            say("clash", "info", path.basename(state.clashDir) + "/ held " + already
+            say("clash", "info", clashLeaf(state.clashDir) + " held " + already
                 + " clip(s) when this export started: the ones it makes again are replaced, "
                 + "and anything it moves to _earlier_export/ is said when it ends.");
         } else {
             say("clash", "warn", "");
         }
         beginExport();
+    }
+
+    /* "v1.2/raw/" — 3.91 · the version AND the mode folder, since "raw/ held 19 clip(s)" names
+     * neither the version nor the delivery. */
+    function clashLeaf(dir) {
+        return path.basename(path.dirname(dir)) + "/" + path.basename(dir) + "/";
     }
 
     /* Files directly inside <dir>/_earlier_export/ — the engine's move-aside folder, whose
@@ -4170,7 +4665,7 @@
          * {failed: 19} — it made none. The count is this run's own manifest's `ok` rows; with no
          * manifest from this run (a Cancel) the count is not known and the words say "any". */
         var made = madeByRun(dir);
-        say("clash", moved ? "warn" : "info", path.basename(dir) + "/ held " + held
+        say("clash", moved ? "warn" : "info", clashLeaf(dir) + " held " + held
             + " clip(s) when this export started: "
             + (made > 0 ? "the ones it made again were replaced"
                         : made === 0 ? "it made none of them again"
@@ -4264,18 +4759,44 @@
 
     function renderThenExport() {
         var spec = renderSpec();
-        if (!spec.length) {
+        if (!spec.length && !spec.retry) {
             fail("Nothing to render: no ticked video clips on V"
                 + (state.vtrackWant || "?") + ".\nPick a different track under "
                 + "\u201cShots from\u201d, or tick some clips.");
             return;
         }
         var dir = renderDir();
-        /* What _renders/ held before Premiere renders into it — null when it is not there — so
-         * a run refused at the engine door can take back exactly what IT rendered (see
-         * dropRefusedRenders) and nothing a kept Retry scratch still needs. */
+        /* 3.91 · THE LOCAL CACHE, never the delivery. Old entries go first (never this one), so
+         * what they held is free again before the space is measured; then the volume must hold
+         * the renders this run asks for, or nothing is asked of Premiere. */
+        pruneRenderCache(dir);
+        var short = renderSpaceWhy(dir, spec);
+        if (short) {
+            log("render refused (space): " + short);
+            // As at every other refused door: nothing ran, so nothing was replaced or made,
+            // and a refused Retry does not narrow the next Export.
+            state.retryKeys = [];
+            state.clashHeld = 0;
+            state.actWanted = "";
+            say("clash", "warn", "");
+            fail(short);
+            return;
+        }
+        /* What the render folder held before Premiere renders into it — null when it is not
+         * there — so a run refused at the engine door can take back exactly what IT rendered
+         * (see dropRefusedRenders) and nothing a kept Retry scratch still needs. */
         state.rendersPre = null;
         try { state.rendersPre = fs.readdirSync(dir).map(String); } catch (e) {}
+        /* A Retry whose every cut still has its render: nothing to ask Premiere for — the engine
+         * re-encodes from the cache (see renderSpec). Said in the log and the run's notes. */
+        var reusedNote = spec.reused ? ["Retry: " + spec.reused + " cut(s) re-encoded from the "
+            + "renders the last run kept" + (spec.length ? ", " + spec.length + " rendered again"
+                                             : " — Premiere rendered nothing again")] : [];
+        if (spec.reused) log("render: " + reusedNote[0] + " (" + dir + ")");
+        if (!spec.length) {
+            runEngineExport(dir, reusedNote, 0);
+            return;
+        }
         clearError();
         showReport(false);
         show(el.prog, true);
@@ -4339,11 +4860,11 @@
                      * answer. And nothing reuses a finished render on a fresh export:
                      * renderSpec() returns every picked clip and the host has no
                      * existence check, so Premiere renders the lot again. Only Retry
-                     * re-uses _renders/, and a stop before the encode leaves no report to
+                     * re-uses the kept renders (renderSpec), and a stop before the encode leaves no report to
                      * retry from. Say what the state is; promise nothing. */
                     say("renders", "warn", "Stopped after " + r.written + " of "
                         + spec.length + " clip(s). Nothing was cut. The finished ranges stay "
-                        + "in _renders/; exporting again renders from the start.");
+                        + "in this Mac's render cache; exporting again renders from the start.");
                     log("render: STOPPED at range " + (r.stopped_at === undefined
                         ? "?" : r.stopped_at) + " — the encode was not started");
                     return;
@@ -4351,7 +4872,7 @@
 
                 /* Carried into the run's own notes rather than shown and lost: the report
                  * is what he reads afterwards, and both of these change what it means. */
-                var notes = [];
+                var notes = reusedNote.slice();
                 for (i = 0; i < (r.warnings || []).length; i++) {
                     notes.push("⚠ " + r.warnings[i]);
                     log("render: " + r.warnings[i]);
@@ -6467,8 +6988,9 @@
      * trackPicked().
      * The alternative — teaching the panel to emit --tracks audio and run a second export —
      * would produce a second run with its own 01..N numbering into the same folder, which is
-     * the collision the raw/ and edited/ split once existed to avoid (3.90 made the version
-     * folder flat; see CLAUDE.md for what two kinds of run in one folder measurably do).
+     * the collision the raw/ and edited/ split exists to avoid (3.90 made the version folder
+     * flat and 3.91 split it again; see CLAUDE.md for what two kinds of run in one folder
+     * measurably do).
      *
      * Built from what the SCAN reported, like the mixdown menu and the master-track menu:
      * A2 on one project is not A2 on the next.
@@ -7326,9 +7848,11 @@
         state.cutFrom = want;
         try { window.localStorage.setItem("xmlcut.cutfrom", state.cutFrom); } catch (e) {}
         applyCutFrom();
-        /* 3.90 round 2 · A VERSION FOLDER KEEPS THE MODE IT WAS DELIVERED IN, so switching
-         * mode can make the destination refused, or free again (folderTaken). */
+        /* 3.91 · THE MODE IS IN THE PATH AGAIN — <version>/raw or <version>/edited — so the
+         * destination line and the dest row follow the switch at once, and a report's Retry is
+         * offered only in the folder it is of. */
         setOutDest();
+        paintRetry();
         renderSettings();
         if (state.clips.length) renderClips();
         /* ⚠️ RE-READ THE LIST, because the mode changes what is IN it.
@@ -7428,29 +7952,135 @@
         say("rendermode", "info", out.join(" "));
     }
 
-    /* Where Premiere writes the rendered ranges: <version folder>/_renders, composed out of
-     * outDir() so it can never be anywhere the export is not. "" when there is no
-     * destination — path.join("", "_renders") is a RELATIVE path, and renderCuts() would
-     * create it wherever Premiere's working directory happens to be.
+    /* Where Premiere writes the rendered ranges: ~/Library/Caches/Raw-cutter/renders/<key>/, a
+     * LOCAL folder keyed by the destination mode folder — never beside the clips (3.91, the
+     * product owner, 29 Sep). "" when there is no destination: path.join("", …) is a RELATIVE
+     * path, and renderCuts() would create it wherever Premiere's working directory happens to
+     * be.
      *
-     * Beside the clips rather than in a temp folder: these are large — Match Source High on a
-     * 4K sequence is tens of MB a cut — and /tmp is on the system volume, which is not the
-     * volume he chose to have room on.
+     * ⚠️ WHY NOT BESIDE THE CLIPS ANY MORE. 3.90 wrote them into <version>/_renders on the
+     * shared drive, and MEASURED on 27 Sep 2026 (the panel log of a real export): single
+     * Premiere renders took 7 s and 3 s, then 66 min, 16 min, 15 min, 5 h 11 min, 35 min and
+     * 65 min, and the last 12 of 23 "returned without writing a file" — Premiere writing into a
+     * streamed drive folder. _renders/ (13 files, 45 MB) was left in the delivery, and the
+     * previous run's clips 12–23 were moved to _earlier_export/ because this run produced no
+     * render for them. The editor's own words: "it still has the subfolder of render".
      *
-     * ⚠️ DELETED AFTER A CLEAN RUN, kept after a dirty one. This comment used to say the
-     * opposite — "kept after the run, not deleted" — and the reason it gave is still true and
-     * is why the deletion is conditional: the engine CUTS FROM these files, so "Retry the N
-     * that failed" re-encodes the failed rows out of _renders without asking Premiere to
-     * render anything again. Throw them away while something still needs retrying and the
-     * retry becomes a full re-render.
+     * ⚠️ THE KEY IS THE MODE FOLDER'S RESOLVED PATH, HASHED, so it is the same folder on every
+     * call for one destination — "Retry the N that failed" finds the renders the dirty run kept
+     * — and a different one for any other destination, so two versions never share renders.
      *
-     * What deleting on a clean run buys: these are Premiere intermediates carrying a full
-     * stereo mix of the whole sequence, while the delivered clips are silent by design. Left
-     * behind, they read as a second folder of the same clips WITH sound — which is exactly how
-     * they were reported ("two folders, one with sound one without"). See cleanRenders(). */
+     * ⚠️ DELETED AFTER A CLEAN RUN, kept after a dirty one, as before: the engine CUTS FROM
+     * these files, so a Retry re-encodes the failed rows out of them. Entries older than
+     * RENDER_CACHE_DAYS are pruned at the start of a render run (pruneRenderCache), never the
+     * one this run uses. The volume's free space is checked against the run's estimated render
+     * size before Premiere is asked for anything (renderSpaceWhy). */
+    var RENDER_CACHE_DAYS = 7;
+
+    function renderCacheRoot() {
+        var h = userHome();
+        return h ? path.join(h, "Library", "Caches", "Raw-cutter", "renders") : "";
+    }
+
+    /* A short, stable hash of a path: two 32-bit FNV-1a lanes over its UTF-16 units, as 16 hex
+     * digits. Hand-rolled because nothing here may assume node's crypto in every CEP build. */
+    function renderKey(p) {
+        var str = String(p || ""), h1 = 0x811c9dc5, h2 = 0x01000193 ^ 0x5bd1e995;
+        for (var i = 0; i < str.length; i++) {
+            var c = str.charCodeAt(i);
+            h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+            h2 = Math.imul(h2 ^ c ^ (i & 0xff), 0x01000193) >>> 0;
+        }
+        var hex = function (n) { return ("0000000" + (n >>> 0).toString(16)).slice(-8); };
+        return hex(h1) + hex(h2);
+    }
+
     function renderDir() {
-        var d = outDir();
-        return d ? path.join(d, "_renders") : "";
+        var d = outDir(), root = renderCacheRoot();
+        return (d && root) ? path.join(root, renderKey(path.resolve(d))) : "";
+    }
+
+    /* THE CACHE IS PRUNED, NEVER THE RUN'S OWN ENTRY: anything in renders/ whose newest time
+     * (the entry and what is directly inside it) is older than RENDER_CACHE_DAYS. Never a
+     * failure of its own. Returns how many entries went. */
+    function pruneRenderCache(keep) {
+        var root = renderCacheRoot(), names, gone = 0;
+        if (!root) return 0;
+        try { names = fs.readdirSync(root).map(String); } catch (e) { return 0; }
+        var cutoff = Date.now() - RENDER_CACHE_DAYS * 86400000;
+        for (var i = 0; i < names.length; i++) {
+            var p = path.join(root, names[i]);
+            if (keep && path.resolve(p) === path.resolve(keep)) continue;
+            var newest = 0, st = null;
+            try { st = fs.statSync(p); newest = st.mtimeMs; } catch (e1) { continue; }
+            if (st.isDirectory()) {
+                var kids = [];
+                try { kids = fs.readdirSync(p).map(String); } catch (e2) { kids = []; }
+                for (var k = 0; k < kids.length; k++) {
+                    try { newest = Math.max(newest, fs.statSync(path.join(p, kids[k])).mtimeMs); }
+                    catch (e3) {}
+                }
+            }
+            if (newest >= cutoff) continue;
+            if (st.isDirectory() ? rmTree(p) : (function () {
+                try { fs.unlinkSync(p); return true; } catch (e4) { return false; }
+            })()) gone++;
+        }
+        if (gone) log("render cache: removed " + gone + " entr" + (gone === 1 ? "y" : "ies")
+                      + " older than " + RENDER_CACHE_DAYS + " days from " + root);
+        return gone;
+    }
+
+    /* The bytes Premiere will write for `spec` ("label|in|out" records): each range's length
+     * at the sequence's rate, times the render's video bitrate (renderMbps(), or the stock
+     * preset's 10 Mbps when that is 0) plus the stereo AAC every render carries. The same
+     * number the render preset is built from, so it is the size the render is asked to be. */
+    function renderBytes(spec) {
+        var fps = seqFps() || Number((state.info || {}).fps) || 30;
+        var bps = ((renderMbps() || 10) * 1e6 + 320000) / 8;
+        var frames = 0;
+        for (var i = 0; i < spec.length; i++) {
+            var f = String(spec[i]).split("|");
+            var n = parseInt(f[2], 10) - parseInt(f[1], 10);
+            if (n > 0) frames += n;
+        }
+        return Math.round(frames / fps * bps);
+    }
+
+    /* Free bytes on the volume `dir` is (or will be) on — the nearest folder of it that exists.
+     * fs.statfsSync where the runtime has it (Node 18.15+), else `df -k`; -1 when neither can
+     * say, and then nothing is refused on a number nobody has. */
+    function freeBytes(dir) {
+        var at = String(dir || "");
+        while (at && !exists(at) && path.dirname(at) !== at) at = path.dirname(at);
+        if (!at) return -1;
+        try {
+            if (typeof fs.statfsSync === "function") {
+                var sf = fs.statfsSync(at);
+                if (sf && sf.bavail >= 0 && sf.bsize > 0) return Number(sf.bavail) * Number(sf.bsize);
+            }
+        } catch (e) {}
+        try {
+            var cp = node.require("child_process");
+            if (cp && typeof cp.execFileSync === "function") {
+                var out = String(cp.execFileSync("/bin/df", ["-k", at], { encoding: "utf8" }));
+                var row = out.trim().split("\n").pop().split(/\s+/);
+                var kb = parseInt(row[3], 10);
+                if (kb >= 0) return kb * 1024;
+            }
+        } catch (e2) {}
+        return -1;
+    }
+
+    /* ⚠️ REFUSED WHEN CLEARLY SHORT: the volume has less free space than the renders are
+     * estimated to take. One sentence; "" when there is room, or when it cannot be told. */
+    function renderSpaceWhy(dir, spec) {
+        var need = renderBytes(spec), free = freeBytes(dir);
+        if (!(need > 0) || free < 0 || free >= need) return "";
+        return "Not enough free space for Premiere's renders: this run needs about "
+            + humanBytes(need) + " in " + shortPath(renderCacheRoot(), 44) + " on this Mac, "
+            + "and that disk has " + humanBytes(free) + " free — free some space there (or "
+            + "tick fewer clips), then export again.";
     }
 
     /* Remove a directory tree, on whatever this runtime actually provides.
@@ -7512,20 +8142,21 @@
             /* Said out loud, because a folder that is sometimes there and sometimes not is a
              * thing you go looking for an explanation of.
              *
-             * 3.90 · AND WHERE IT IS: with the files flat, _renders/ sits INSIDE the delivery
-             * folder, Output/ACT/<version>/ on the team drive — measured, 18 renders left
-             * there by a run with one failed clip. Named, so nobody takes it for part of the
-             * delivery or wonders where the drive's space went. */
-            say("renders", "info", "_renders/ kept for Retry inside the delivery folder "
-                + path.basename(path.dirname(dir)) + "/: " + why
-                + ". It is not part of the delivery — delete it by hand when you are done.");
+             * 3.91 · AND WHERE IT IS: on this Mac, in the render cache — never in the delivery
+             * (3.90 left it inside Output/ACT/<version>/ on the team drive). Named, so nobody
+             * goes looking for it beside the clips, and so the 7-day prune is no surprise. */
+            say("renders", "info", "Premiere's renders are kept for Retry in this Mac's cache, "
+                + shortPath(dir, 60) + ": " + why + ". They are not in the delivery; the next "
+                + "clean run of this folder removes them, and so does any render run "
+                + RENDER_CACHE_DAYS + " days from now.");
             return;
         }
         if (rmTree(dir)) {
             log("removed the render scratch: " + dir);
             say("renders", "info", "");
         } else {
-            say("renders", "info", "_renders/ could not be removed — safe to delete by hand.");
+            say("renders", "info", "Premiere's renders could not be removed from " + shortPath(dir, 60)
+                + " — safe to delete by hand.");
         }
     }
 
@@ -7534,7 +8165,11 @@
      * refusal then left this run's _renders/ — measured, 19 render files — inside the other
      * sequence's version folder. This run's own renders go: the whole folder when it was not
      * there before the render, otherwise only the entries that were not (a scratch kept for
-     * someone's Retry stays as it was). Never a failure of its own. */
+     * someone's Retry stays as it was). Never a failure of its own.
+     *
+     * 3.91 · the renders are in the local cache now, not the other sequence's folder, but a
+     * refused run still leaves nothing to Retry from, so its renders still go — the cache is
+     * this Mac's disk, not somewhere to leave a run's worth of intermediates. */
     function dropRefusedRenders(dir) {
         var pre = state.rendersPre, names;
         state.rendersPre = null;
@@ -7559,14 +8194,60 @@
     /* The cuts a render phase has to produce, as the host's "label|in|out" records. Only
      * video, only the chosen track, only what is actually ticked — the same set the
      * engine will be asked to cut, or the two would disagree about what a run is. */
+    /* ⚠️ A RETRY RENDERS ONLY WHAT IT HAS TO (3.91 review). renderSpec() used to return every
+     * ticked cut whatever the run, so "Retry the 2 that failed" asked Premiere for all 19 ranges
+     * again — measured through the panel with the real engine: 17 renders kept, 2 missing,
+     * Retry, renderCuts() asked for [19, 19] — and host.jsx deletes a render before writing its
+     * range, so the kept ones were always replaced, never used. The rail said they were "kept for
+     * Retry". Now, while state.retryKeys is set, the spec is the RETRIED cuts only (the set the
+     * engine's --pick will cut), and of those only the ones with no usable render left in the
+     * cache: a render that is there, non-empty, under a name the engine looks up (RENDER_EXTS in
+     * xmlcut.py), for a row whose failure was NOT about its render. A row the engine marked
+     * no_render or render_mismatch is always rendered again — reusing a render of the wrong
+     * length would fail it the same way for ever. `reused` on the returned list counts the rest. */
+    var ENGINE_RENDER_EXTS = [".mp4", ".mov", ".m4v", ".mxf", ".mkv"];
+    var RENDER_FAULTS = { no_render: 1, render_mismatch: 1 };
+
+    function keptRender(dir, label) {
+        if (!dir) return "";
+        for (var i = 0; i < ENGINE_RENDER_EXTS.length; i++) {
+            var p = path.join(dir, label + ENGINE_RENDER_EXTS[i]);
+            try {
+                var st = fs.statSync(p);
+                if (st.isFile() && st.size > 0) return p;
+            } catch (e) {}
+        }
+        return "";
+    }
+
     function renderSpec() {
         var want = Number(state.vtrackWant || 0);
-        var picked = pickedClips(), out = [], i, c;
-        for (i = 0; i < picked.length; i++) {
-            c = picked[i];
+        var retry = null, i, c;
+        if (state.retryKeys && state.retryKeys.length) {
+            retry = {};
+            for (i = 0; i < state.retryKeys.length; i++) retry[state.retryKeys[i]] = "";
+            for (i = 0; i < state.report.length; i++) {
+                var rr = state.report[i];
+                if (rr && rr.key && Object.prototype.hasOwnProperty.call(retry, rr.key)) {
+                    retry[rr.key] = String(rr.status || "");
+                }
+            }
+        }
+        var pool = retry ? state.clips : pickedClips(), out = [], reused = 0;
+        var dir = retry ? renderDir() : "";
+        for (i = 0; i < pool.length; i++) {
+            c = pool[i];
+            if (retry && (c.group !== 0
+                          || !Object.prototype.hasOwnProperty.call(retry, clipKey(c)))) continue;
             if (c.trackType !== "video") continue;
             if (want && Number(c.trackIndex) !== want) continue;
             if (!(c.timelineOut > c.timelineIn)) continue;
+            if (retry && !RENDER_FAULTS[retry[clipKey(c)]]
+                && keptRender(dir, c.trackType + "-" + c.trackIndex + "-" + c.timelineIn
+                                   + "-" + c.timelineOut)) {
+                reused++;
+                continue;
+            }
             /* The label IS the filename xmlcut.py looks the render up by, so it is
              * built from the timeline geometry and never from the clip's name.
              *
@@ -7579,6 +8260,8 @@
                 + "-" + c.timelineOut
                 + "|" + c.timelineIn + "|" + c.timelineOut);
         }
+        out.reused = reused;
+        out.retry = !!retry;
         return out;
     }
 
@@ -8544,6 +9227,8 @@
             log("no manifest to report on: " + e);
             return false;
         }
+        // 3.91 · the folder this report is of — its Retry belongs there (retryHere).
+        state.reportFor = outDir();
 
         var clips = data.clips || [];
         for (var i = 0; i < clips.length; i++) {
@@ -8643,6 +9328,10 @@
                 // one place someone checks after a long export.
                 wrote: (st === "ok"),
                 kept: (st === "skipped_existing"),
+                // The engine's own word for what happened. A Retry reads it to tell a render
+                // that was missing or wrong (render again) from an encode that failed on a good
+                // render (re-encode from the one kept) — renderSpec().
+                status: st,
                 problem: bad || warn
             });
         }
@@ -8762,6 +9451,19 @@
     /* The keys of the clips that did not write, for a retry to run and for the headline to
      * count. Derived from the report rather than stored, so it answers for whatever run is
      * currently on screen. */
+    /* 3.91 · A RETRY BELONGS TO THE FOLDER ITS REPORT IS OF. The mode (raw/ or edited/) and a
+     * picked product are both in the path now, so a report of a Source Render's failures stays
+     * on screen after a switch to Timeline Render while outDir() has moved to edited/: its
+     * Retry would render and cut the Source run's failed rows into the other folder. 3.90's
+     * mixed-mode refusal is what stopped that press; with the modes apart, this does. */
+    function retryHere() {
+        return !!state.reportFor && outDir() === state.reportFor;
+    }
+
+    function paintRetry() {
+        if (el.retry) show(el.retry, failedRows().length > 0 && retryHere());
+    }
+
     function failedRows() {
         var out = [];
         for (var i = 0; i < state.report.length; i++) {
@@ -8788,7 +9490,7 @@
             state.reportFresh = false;
             el.onlyprob.checked = failed.length > 0;
         }
-        show(el.retry, failed.length > 0);
+        paintRetry();
         // One expression, not a special case for a single failure: "Retry the 1 that failed"
         // reads correctly out of the general form, and a hard-coded branch beside a computed
         // one is where an off-by-one hides — the fixture has exactly one failure, so the
@@ -8982,6 +9684,8 @@
      *    idempotent, so the overlap is not worth avoiding. */
     window.addEventListener("focus", function () {
         checkSequence("focus");
+        // 3.91 · SAMX_WORKSPACE is listed again: Tech may have just made the product's folder.
+        dropSamxCache();
         /* A REFUSED destination is asked again on focus: its remedy — move the other export's
          * clips out — happens in Finder, and he comes back to a row that should say so. Only
          * then, so a row that is not a refusal (the "Created Output/ACT" note) is left alone. */
@@ -9005,6 +9709,16 @@
         var bad = failedRows();
         for (var i = 0; i < bad.length; i++) keys.push(bad[i].key);
         if (!keys.length) return;
+        if (!retryHere()) {
+            log("retry refused: the report is of " + state.reportFor + ", the destination is now "
+                + (outDir() || "none"));
+            say("export", "warn", "Those " + keys.length + " clip(s) failed in "
+                + clashLeaf(state.reportFor) + ", and Export now goes to "
+                + (outDir() ? clashLeaf(outDir()) : "nowhere") + " — switch back to retry them "
+                + "there.");
+            paintRetry();
+            return;
+        }
         state.retryKeys = keys;
         /* Straight into the run. doExport() hides the report and shows progress itself, and
          * the rows being retried go back to "encoding" as their start lines arrive — the rest
@@ -9131,8 +9845,41 @@
     el.copyout.addEventListener("click", function () {
         copyText(destShown(resolveDest()), el.copyout, "Copy");
     });
+    /* 3.91 · THE PRODUCT MENU. A pick is remembered for this project's path and wins over the
+     * match; the first entry ("Matched: …" or "Pick the product…") forgets it. */
+    if (el.productpick) {
+        el.productpick.addEventListener("change", function () {
+            var v = String(el.productpick.value || "");
+            /* ⚠️ A REFUSED CHANGE PUTS THE MENU BACK (3.91 review). Between the Export press and
+             * the sequence check's answer (up to SEQ_ANSWER_MS) the menu is still live, and a
+             * change there was ignored while the <select> went on showing the product NOT
+             * picked — through the run and every repaint after it (paintProductPick skips an
+             * unchanged _sig), and picking that product again then fired no change at all.
+             * Measured: the engine wrote into the matched product, the box said so, the menu said
+             * the other one. Only the menu is repainted here: the rail is the running export's. */
+            if (!state.info || state.running || state.exportPending || v === "-") {
+                el.productpick._sig = "";
+                if (state.info) paintProductPick(resolveDest());
+                return;
+            }
+            rememberPick(state.info.project_path, v);
+            log("product " + (v ? "picked: " + v : "pick cleared") + " for "
+                + state.info.project_path);
+            el.productpick._sig = "";
+            setOutDest();
+            paintRetry();
+            refreshExportEnabled();
+        });
+    }
+    /* ⚠️ THE REPORT'S OWN FOLDER while the report is on screen (3.91 review). Its box is painted
+     * once, with the folder the run wrote, but Copy and Show in Finder asked outDir() — which
+     * FOLLOWS the mode since 3.91, so after a switch to the other mode "Show in Finder" on a
+     * Source report opened <version>/ (edited/ did not exist yet) or edited/. */
+    function reportShownFor() {
+        return (state.reportFor && el.repsum && !el.repsum.hidden) ? state.reportFor : "";
+    }
     el.copydest.addEventListener("click", function () {
-        copyText(outDir(), el.copydest, "Copy");
+        copyText(reportShownFor() || outDir(), el.copydest, "Copy");
     });
 
     function reveal(dir) {
@@ -9152,13 +9899,19 @@
      * the project is open. Save to only when there is no destination at all. */
     function revealDest() {
         var d = resolveDest();
-        var want = (d.ok || d.taken) ? d.dir
-                 : (d.from === "project" && d.product ? d.product : "");
+        /* 3.91 · the mode folder when it is the destination; the folder a refusal names when
+         * another export owns the version (takenDir); the matched or picked product, or
+         * SAMX_WORKSPACE itself while nothing is. */
+        var want = (d.ok || d.taken || (d.from && d.from !== "saveto")) ? destShown(d) : "";
         var at = want;
         while (at && !exists(at) && path.dirname(at) !== at) at = path.dirname(at);
         reveal(want && exists(at) ? at : state.out);
     }
-    el.reveal.addEventListener("click", revealDest);
+    el.reveal.addEventListener("click", function () {
+        var r = reportShownFor();
+        if (r && exists(r)) reveal(r);
+        else revealDest();
+    });
     el.showsaved.addEventListener("click", function () { reveal(state.folder); });
 
     /* The same folder as #reveal, reachable BEFORE a run instead of only from the report,

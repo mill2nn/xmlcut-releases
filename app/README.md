@@ -706,7 +706,7 @@ MY_SEQUENCE
 XML + Premiere · nests resolved, ramp keyframes read
 
 FILE TYPES     [x] .mp4 24   [x] .mov 3   [ ] .aep 1
-PROJECT        v1.2 in Brand 1.0                [Open] [Change]
+PROJECT        v1.2/raw in Brand 1.0            [Open] [Change]
 
               [ Export 27 clips ]
 ```
@@ -714,27 +714,47 @@ PROJECT        v1.2 in Brand 1.0                [Open] [Change]
 Untick a type to skip it; project files like `.aep` start unticked because they can't be
 decoded.
 
-**Where the clips land: `<product>/Output/ACT/<version>/`** (since 3.90). The team drive
-`SAMX_WORKSPACE` holds one folder per product — `Asset/`, `Output/`, `Sources/` — and the
-export goes into that product's `Output/ACT/`, one folder per version of the edit, with the
-files flat inside it. There is no `raw/` or `edited/` any more: a Source export and a Timeline
-Render export of the same version share the folder.
+**Where the clips land: `<product>/Output/ACT/<version>/raw/` or `…/<version>/edited/`**
+(since 3.91). The team drive `SAMX_WORKSPACE` holds one folder per product — `Asset/`,
+`Output/`, `Sources/` — and the export goes into that product's `Output/ACT/`, one folder per
+version of the edit, with one folder per mode inside it: **Source Render** writes
+`<version>/raw/`, **Timeline Render** writes `<version>/edited/`. Everything an export keeps
+about itself — `manifest.json`/`manifest.csv`, `clips.csv`, `report/`, the hidden ledger and
+`_earlier_export/` — is inside that mode folder, so the two modes of one version never touch
+each other's files. (3.90 wrote both modes flat into `<version>/`; see *Files 3.90 left in a
+version folder*, below.)
 
 - **Which product.** If the open Premiere project is saved inside `SAMX_WORKSPACE`
   (`…/SAMX_WORKSPACE/<Product>/Asset/project/x.prproj`), it is that `<Product>` — the row's
-  caption reads **Project** and Save to is not used (it may even be empty). Otherwise it is
-  **Save to**: point it at the product folder. Picking its `Output/`, its `Output/ACT/` or a
-  version folder inside `ACT/` comes to the same product. The box names the version folder
-  first and then the product — `v1.2 in Brand 1.0` — so a docked panel still shows the
-  version; click it, or hover, for the full path.
+  caption reads **Project** and Save to is not used (it may even be empty). If it is saved on
+  **another shared drive** (`<team drive>/<Product>/Video/Editing file/x.prproj`), the panel
+  looks for `SAMX_WORKSPACE` beside that drive (or, failing that, in the first Google Drive
+  account under `~/Library` that has one) and matches the folders of the project's path
+  against its product folders, ignoring case and extra spaces:
+  - **exactly one match** — that product, captioned **Matched**;
+  - **no exact match, or two** — nothing is exported until you choose the product in the
+    **Product** menu under the box, which lists the likeliest first (a folder that starts or
+    contains the product's name, or has the same letters and digits) and then every other
+    product folder. The pick is remembered for that project and captioned **Picked**; it can
+    also overrule a match. When the project's own product folder — the first folder below
+    the drive that is not a working folder such as `Video` or `Projects 2026` — resembles
+    nothing in `SAMX_WORKSPACE`, the row names it: *SAMX_WORKSPACE has no folder for “Brand” yet — ask
+    Tech to create it, or pick the product below.*
+
+  Save to is not used on either of these routes. A project outside any shared drive (the
+  Desktop, say) — or a Mac with no `SAMX_WORKSPACE` at all — uses **Save to**: point it at the
+  product folder. Picking its `Output/`, its `Output/ACT/`, a version folder inside `ACT/` or a
+  mode folder inside that comes to the same product. The box names the version and mode
+  folders first and then the product — `v1.2/raw in Brand 1.0` — so a docked panel still shows
+  the version; click it, or hover, for the full path.
 - **It must already be a product.** The product needs an `Output/` folder (any case). Without
   one the panel refuses to export — before anything runs — and says why; it never creates
   `Output/`. So the default Save to, `~/Desktop/xmlcut clips`, is refused unless the project
   is inside `SAMX_WORKSPACE`.
 - **`ACT/`** is used under the spelling it has on the drive. If it is not there yet the row
   says so before you export (*Output/ACT isn't there yet — Export will create it*), the export
-  creates it, and the report says *this export created Output/ACT*. A FILE where `ACT/` or the
-  version folder has to go is refused, naming the file.
+  creates it, and the report says *this export created Output/ACT*. A FILE where `ACT/`, the
+  version folder or its `raw/`/`edited/` has to go is refused, naming the file.
 - **Which version** comes from the **sequence name** only — never from a folder, since a
   product can itself be called "Brand 2.0". Anything in `[...]` is an editor handle and is
   ignored (a broken `a.b][c.d]` too); a `vid` number wins (`vid 13.0` → `v13.0`, `vid35.1` →
@@ -767,35 +787,47 @@ because whose they are is for you to check. Only files named the way xmlcut name
 (`NN_….mp4` and the other media it writes, and the two mixes) count; its own `manifest.*`,
 `clips.csv`, folders and anything else of yours (a `notes.txt`) do not.
 
-**A version folder belongs to the export it holds** (since 3.90). Export is refused —
-before anything runs, with one sentence saying what is there and what to do — when the version
-folder still holds clips, its record says who made them, and either:
-
-- **another sequence** delivered them. Two sequences whose names give the same version —
-  `Brand vid 9.0 … v3` and its `… v3 4x5` variant are both `v9.0` — cannot share one flat
-  folder. Rename this sequence to another version (the sentence suggests one that ACT/ does not
-  have yet, e.g. `vid 9.1`), or, if this sequence replaces that one, move that folder's clips
-  out first. Renaming the *other* sequence does not free the folder: its clips stay there. The
-  panel compares Premiere's sequence ID, which the manifest and the ledger record since 3.90,
-  so renaming a sequence (a handle changed, `V` for `v`, a space at the end) keeps its folder;
-  only when an ID is missing on either side does it compare the names, with handles, spacing
-  and case ignored.
-- **the other mode** delivered them. A Source Render and a Timeline Render name their files by
-  different times, so one after the other would replace or leave behind the first run's files.
-  Switch back to the folder's mode, or export this one under another version. A record from
-  before the mode was kept does not block.
+**A version belongs to the sequence whose export it holds** (since 3.90). Export is refused —
+before anything runs, with one sentence saying what is there and what to do — when **another
+sequence** delivered clips that are still in the version: in the mode folder this export would
+write, in the version's other mode folder (a version is one delivery, `raw/` and `edited/` of
+one edit), or at the top of the version folder from 3.90. Two sequences whose names give the
+same version — `Brand vid 9.0 … v3` and its `… v3 4x5` variant are both `v9.0` — cannot share
+it. Rename this sequence to another version (the sentence suggests one that ACT/ does not
+have yet, e.g. `vid 9.1`), or, if this sequence replaces that one, move that folder's clips
+out first. Renaming the *other* sequence does not free the folder: its clips stay there. The
+panel compares Premiere's sequence ID, which the manifest and the ledger record since 3.90,
+so renaming a sequence (a handle changed, `V` for `v`, a space at the end) keeps its folder;
+only when an ID is missing on either side does it compare the names, with handles, spacing
+and case ignored. The same sequence in the other mode is never refused — that is what
+`raw/` and `edited/` are for (3.90 refused it, because both modes then shared one folder).
 
 The record is two files. `manifest.json` describes the last run only, and a Retry or a
 narrowed re-export that writes nothing replaces it with a list of what failed — so the folder's
 hidden `.xmlcut-ledger.json`, which the engine updates after every clip it puts in place and
 never empties while the clip is there, names each clip's sequence and mode as well. Either one
-naming another sequence (or the other mode) for clips still in the folder is enough; a Cancel,
+naming another sequence for clips still in the folder is enough; a Cancel,
 a failed Retry, or a `manifest.json` cut short or deleted does not free it. A folder that is
 empty, holds no clips, or whose clips neither file claims is free.
 
-A Timeline Render that does not finish cleanly keeps its `_renders/` inside that version
-folder for Retry; the note says so, and it is not part of the delivery — delete it when you
-are done.
+**Premiere's renders stay on this Mac** (since 3.91). A Timeline Render has Premiere render
+each cut first, and those intermediates go to `~/Library/Caches/Raw-cutter/renders/<key>/` —
+one folder per destination, so a Retry finds them — never beside the clips on the drive
+(3.90's `<version>/_renders/`, where single renders were measured taking over an hour and a
+long run left the last half unwritten). A clean run deletes them; a run that did not finish
+cleanly keeps them for Retry, and the note says where. Retry asks Premiere only for the clips it
+retries: a clip whose encode failed is re-encoded from the render kept for it, and only a clip
+Premiere did not render, or rendered to the wrong length, is rendered again. Anything in that cache older than seven
+days is removed when the next render run starts, and before rendering the panel checks that
+disk has room for this run's renders (the cut lengths at the render bitrate) and refuses, in
+one sentence, when it clearly has not. A Retry is offered only in the folder its report is of:
+after switching mode (or product) it is hidden, and a press is refused rather than rendering
+the other mode's failed clips into this one.
+
+**Files 3.90 left in a version folder.** 3.90 wrote clips, `manifest.json`, `report/`,
+`_renders/` and `_earlier_export/` straight into `<version>/`. An export now goes into
+`<version>/raw/` or `<version>/edited/` and never touches them; the row says, in one sentence,
+what is still at the top so you can tidy it by hand.
 
 The read folder beside the project (below) is still named after the sequence, with illegal
 characters replaced, not stripped: `v2.0: final/cut` becomes `v2.0- final-cut`. `:` is the
