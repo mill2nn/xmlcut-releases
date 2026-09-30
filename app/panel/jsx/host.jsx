@@ -437,14 +437,39 @@ function pruneOldReads(dir) {
  *
  * Sequence-level export is preferred: it writes ONLY this sequence, which is what
  * makes the multi-sequence picker unnecessary.
+ *
+ * ⚠️ 3.93 audit · `expectId` IS THE SEQUENCE THE READ DUMPED (its sequence_id), and when it
+ * is given the export REFUSES any other. The read is three host calls, and the dump before
+ * this one holds Premiere for seconds: a click on another timeline tab made meanwhile is
+ * handled the moment the dump returns, and this used to export whatever was open then. The
+ * engine takes the only sequence in a one-sequence XML whatever its name, so the other
+ * sequence's clips were cut into the read sequence's folder — with no question asked when
+ * the editor then switched back to the read one. Refused before anything is written, with
+ * `changed: true` so the panel can tell it from an export Premiere could not make. Omitted
+ * (the panel as it is), nothing is compared, exactly as before.
  */
-function exportSequenceXML(destPath) {
+function exportSequenceXML(destPath, expectId) {
     var result = { ok: false, tried: [] };
     try {
         var seq = app.project.activeSequence;
         if (!seq) {
             result.error = "No active sequence.";
             return ser(result);
+        }
+        if (expectId !== undefined && expectId !== null && String(expectId) !== "") {
+            var openId = String(get(seq, "sequenceID", ""));
+            if (openId !== String(expectId)) {
+                result.changed = true;
+                result.open_id = openId;
+                result.open_name = String(get(seq, "name", ""));
+                var readName = sequenceNameById(expectId);
+                result.error = "The open sequence changed during Read: “"
+                    + result.open_name + "” is in front now, not "
+                    + (readName ? "“" + readName + "”, " : "")
+                    + "the sequence that was read. No XML was exported — bring the one you"
+                    + " want to the front and press Read again.";
+                return ser(result);
+            }
         }
 
         var target = new File(destPath);
@@ -635,6 +660,15 @@ function askChoice(title, message, aLabel, bLabel) {
     }
 }
 
+/* How deep the fingerprint follows nests — the same runaway guard as the engine's
+ * MAX_NEST_DEPTH, not a limit anyone should reach on purpose. */
+var MAX_STAMP_DEPTH = 4;
+
+/* The id and fingerprint the last DEEP stamp computed, so a host call that holds a sequence
+ * can take its fingerprint from the one walk there is (see sequenceFpOf) instead of parsing
+ * a reply or keeping a second copy of the walk. Set only at the end of a walk that finished. */
+var LAST_STAMP = null;
+
 /* WHICH SEQUENCE IS OPEN RIGHT NOW, and nothing else.
  *
  * dumpActiveSequence() answers this too, but it walks every clipitem on every track to do
@@ -679,48 +713,170 @@ function activeSequenceStamp(deep) {
          * In render mode that is worse in kind: Premiere renders the LIVE timeline while
          * every name, number and timecode comes from the stale read.
          *
-         * ⚠️ DELIBERATELY NOT dumpActiveSequence(). That walks every clipitem and resolves
-         * a projectItem per clip, which is why it is too heavy to call on a timer. This
-         * reads two integers per clip and nothing else, so it is cheap enough to run before
-         * every export.
+         * ⚠️ DELIBERATELY NOT dumpActiveSequence(). That walks every clipitem and reads
+         * every effect parameter on it, which is why it is too heavy to call on a timer.
+         * This reads a handful of plain properties per clip (see the 3.93 note below), so it
+         * is cheap enough to run before every export — and it still never runs on a timer.
          *
          * A rolling hash rather than a count and a duration: swapping two clips leaves both
          * of those identical and is exactly the edit a guard must catch. Ticks, not seconds,
-         * so it is exact and a re-read of an untouched timeline gives the same number. */
+         * so it is exact and a re-read of an untouched timeline gives the same number.
+         *
+         * ⚠️ 3.93 AUDIT · IT HASHED WHERE EACH VIDEO CLIP SAT AND NOTHING ABOUT WHAT IT PLAYED.
+         * One piece per video clip was track, index, start and end ticks — so a SLIP (same
+         * place, new source in), two clips of EQUAL length swapped, Replace With Clip, Replace
+         * Footage, a clip switched off, any audio edit, a track's eye and anything inside a
+         * nest all came back with the read's fingerprint, measured, and the export check
+         * passed in silence. Source Render cuts from the XML taken at Read, so it delivered
+         * the pre-edit frames (or a clip the editor had switched off) under today's names;
+         * Timeline Render put another clip's pixels under the read's names. So now:
+         *   - every clip on every VIDEO AND AUDIO track, and where it sits (as before);
+         *   - what it plays: inPoint/outPoint ticks, the disabled flag, the project item's
+         *     nodeId (Replace With Clip) and its media path (Replace Footage, a relink);
+         *   - each track's eye / mute, because a switched-off track is out of the XML's cut
+         *     list and out of a render alike;
+         *   - for a NEST, the nested sequence's own walk, folded in by value.
+         * Still far below dumpActiveSequence(), which reads every effect parameter of every
+         * clip: plain property reads per clip, and the two method calls (the media path, "is
+         * it a sequence") made ONCE PER PROJECT ITEM, not per clip; a nest is walked once
+         * however often it is used, and never more than MAX_STAMP_DEPTH deep. NOT covered:
+         * effects, transitions, speed keyframes — nothing here reads a component. The clip
+         * COUNT after the dot is still the top level's video clips, which is what the panel's
+         * log line calls "clips". */
         if (!deep) { return ser(result); }
-        var h = 0, nclips = 0, vt = get(seq, "videoTracks", null);
-        if (vt) {
-            var nt = Number(get(vt, "numTracks", 0));
-            for (var ti = 0; ti < nt; ti++) {
-                var tr = null;
-                try { tr = vt[ti]; } catch (eT) { tr = null; }
-                if (!tr) continue;
-                var cl = get(tr, "clips", null);
-                if (!cl) continue;
-                var nc = Number(get(cl, "numItems", 0));
-                for (var ci = 0; ci < nc; ci++) {
-                    var it = null;
-                    try { it = cl[ci]; } catch (eI) { it = null; }
-                    if (!it) continue;
-                    nclips++;
-                    var st = get(it, "start", null), en = get(it, "end", null);
-                    var sv = st ? String(get(st, "ticks", "")) : "";
-                    var ev = en ? String(get(en, "ticks", "")) : "";
-                    /* Position matters: ti and ci are folded in, so moving a clip to another
-                     * track changes the hash even if its own range does not. */
-                    var piece = ti + ":" + ci + ":" + sv + ":" + ev + ";";
-                    for (var k = 0; k < piece.length; k++) {
-                        h = ((h << 5) - h + piece.charCodeAt(k)) | 0;
+        var h = 0, nclips = 0;
+        var facts = {}, nestOf = null, nestFp = {}, inWalk = {};
+        var fold = function (hh, piece) {
+            for (var k = 0; k < piece.length; k++) {
+                hh = ((hh << 5) - hh + piece.charCodeAt(k)) | 0;
+            }
+            return hh;
+        };
+        var ticksOf = function (it, name) {
+            var t = get(it, name, null);
+            return t ? String(get(t, "ticks", "")) : "";
+        };
+        /* One project item's media path and whether it is a nested sequence — asked once per
+         * item for the whole walk, however many clips use it. */
+        var itemFacts = function (pi) {
+            if (!pi) return { id: "", path: "", nest: false };
+            var id = String(get(pi, "nodeId", ""));
+            if (id && facts[id]) return facts[id];
+            var f = { id: id, path: String(call(pi, "getMediaPath", "")),
+                      nest: call(pi, "isSequence", false) === true };
+            if (id) facts[id] = f;
+            return f;
+        };
+        /* The Sequence a nested clip plays, found by its project item's nodeId. The map is
+         * built only when the first nest turns up, so a timeline with none never pays. */
+        var nestedSequence = function (id) {
+            if (nestOf === null) {
+                nestOf = {};
+                var all = get(app.project, "sequences", null);
+                var ns = all ? Number(get(all, "numSequences", 0)) : 0;
+                for (var si = 0; si < ns; si++) {
+                    var s = null;
+                    try { s = all[si]; } catch (eS) { s = null; }
+                    if (!s) continue;
+                    var spi = get(s, "projectItem", null);
+                    var sid = spi ? String(get(spi, "nodeId", "")) : "";
+                    if (sid) nestOf[sid] = s;
+                }
+            }
+            return nestOf[id] || null;
+        };
+        var walk = null;
+        var nestHash = function (id, depth) {
+            if (!id) return "?";
+            if (nestFp[id] !== undefined) return nestFp[id];
+            if (depth + 1 > MAX_STAMP_DEPTH || inWalk[id]) return "deep";
+            var ns = nestedSequence(id);
+            if (!ns) return "?";                  // still hashed by its nodeId and path
+            inWalk[id] = true;
+            var v = String(walk(ns, depth + 1));
+            inWalk[id] = false;
+            nestFp[id] = v;
+            return v;
+        };
+        walk = function (s, depth) {
+            var hh = 0;
+            var kinds = [["v", get(s, "videoTracks", null)], ["a", get(s, "audioTracks", null)]];
+            for (var kk = 0; kk < kinds.length; kk++) {
+                var kind = kinds[kk][0], tracks = kinds[kk][1];
+                if (!tracks) continue;
+                var nt = Number(get(tracks, "numTracks", 0));
+                for (var ti = 0; ti < nt; ti++) {
+                    var tr = null;
+                    try { tr = tracks[ti]; } catch (eT) { tr = null; }
+                    if (!tr) continue;
+                    var mu = call(tr, "isMuted", null);
+                    hh = fold(hh, kind + ti + "m" + (mu === null ? "?" : (mu ? "1" : "0")) + ";");
+                    var cl = get(tr, "clips", null);
+                    if (!cl) continue;
+                    var nc = Number(get(cl, "numItems", 0));
+                    for (var ci = 0; ci < nc; ci++) {
+                        var it = null;
+                        try { it = cl[ci]; } catch (eI) { it = null; }
+                        if (!it) continue;
+                        if (depth === 0 && kind === "v") nclips++;
+                        var f = itemFacts(get(it, "projectItem", null));
+                        /* Position matters: the track and the index are folded in, so moving
+                         * a clip to another track changes the hash even if its own range
+                         * does not. */
+                        var piece = kind + ti + ":" + ci
+                            + ":" + ticksOf(it, "start") + ":" + ticksOf(it, "end")
+                            + ":" + ticksOf(it, "inPoint") + ":" + ticksOf(it, "outPoint")
+                            + ":" + (get(it, "disabled", false) === true ? "off" : "on")
+                            + ":" + f.id + ":" + f.path;
+                        if (f.nest) piece += ":~" + nestHash(f.id, depth);
+                        hh = fold(hh, piece + ";");
                     }
                 }
             }
-        }
+            return hh;
+        };
+        h = walk(seq, 0);
         result.clips = nclips;
         result.fp = String(h) + "." + String(nclips);
+        LAST_STAMP = { id: result.id, fp: result.fp };
     } catch (e) {
         result.error = String(e) + (e.line ? (" (line " + e.line + ")") : "");
     }
     return ser(result);
+}
+
+/* THE FINGERPRINT OF `seq`, for a host call that already holds it (3.93 audit).
+ *
+ * activeSequenceStamp(true) is the ONE implementation of the walk — the baseline the panel
+ * keeps comes from it, and a second copy here would drift from it — so this runs it and takes
+ * the result from LAST_STAMP. ExtendScript runs a call to its end before Premiere handles the
+ * next click, so the sequence it walks is the active one `seq` was read from; the id is
+ * compared anyway, and anything that does not line up is null: "could not tell", never a
+ * made-up match. */
+function sequenceFpOf(seq) {
+    try {
+        LAST_STAMP = null;
+        activeSequenceStamp(true);
+        var want = String(get(seq, "sequenceID", ""));
+        if (LAST_STAMP && LAST_STAMP.fp && LAST_STAMP.id === want) return LAST_STAMP.fp;
+    } catch (e) {}
+    return null;
+}
+
+/* A sequence's name from its id, for a sentence that has to name the one that is NOT open.
+ * "" when it cannot be found — the caller then leaves the name out rather than invent one. */
+function sequenceNameById(id) {
+    try {
+        var all = get(app.project, "sequences", null);
+        var n = all ? Number(get(all, "numSequences", 0)) : 0;
+        for (var i = 0; i < n; i++) {
+            var s = all[i];
+            if (s && String(get(s, "sequenceID", "")) === String(id)) {
+                return String(get(s, "name", ""));
+            }
+        }
+    } catch (e) {}
+    return "";
 }
 
 /* --------------------------------------------------------------- pickers */
@@ -762,7 +918,10 @@ function defaultOutputFolder() {
     }
 }
 
-function dumpActiveSequence() {
+/* `withFp` (3.93 audit, optional): also return the edited-since-Read baseline, `fp`, taken in
+ * THIS call from the sequence this dump walked — see the note at result.fp below. Omitted (the
+ * panel as it is), nothing extra is walked. */
+function dumpActiveSequence(withFp) {
     var result = { ok: false };
     try {
         if (!app || !app.project) {
@@ -854,6 +1013,15 @@ function dumpActiveSequence() {
          * carries the same name. It was already in the dump's own JSON — the summary is
          * what the panel keeps in memory, so it has to be here too. */
         result.sequence_id = data.sequence.id;
+        /* 3.93 audit · THE BASELINE FINGERPRINT, FROM THIS SAME CALL. The panel took it with a
+         * second host call once this one had returned, and exported the XML with a third — and
+         * this dump holds Premiere for seconds, so a click on another timeline tab made
+         * meanwhile is queued and handled the moment it returns. The fingerprint and the XML
+         * then described the OTHER sequence while every name, id and folder came from this
+         * one. Taken here, it cannot be another's. null when it could not be taken: no
+         * baseline, never a guess. exportSequenceXML() takes this dump's sequence_id for the
+         * same reason. */
+        if (withFp) result.fp = sequenceFpOf(seq);
         // The sequence name made safe to be a folder. Returned so the panel can name the
         // export's subfolder without a second copy of this rule — safeName() already has
         // to exist here to name the read folder, and two implementations of "what is a
@@ -1275,10 +1443,18 @@ function renderOneRange(seq, label, inFrames, outFrames, destDir, preset, timeba
     /* Clear anything an earlier probe left at this name. Without this, a render
      * that fails finds the PREVIOUS run's file and reports it as a success — the
      * check reading the number the bug produced. */
+    /* ⚠️ 3.93 audit · AND IT IS CHECKED GONE, every one of them. ExtendScript's File.remove()
+     * RETURNS false when it cannot delete — it does not throw — so the catch below never ran
+     * and a file that would not go stayed to be found after an export that wrote nothing. And
+     * producedRender() answers with the first of five names, so a second leftover under
+     * another extension was never looked at. So: remove, look again, until nothing answers. */
     var base = destDir + "/" + label;
-    var stale = producedRender(base);
-    if (stale) {
-        try { stale.remove(); } catch (eRm) {
+    for (var sweep = 0; sweep < 6; sweep++) {
+        var stale = producedRender(base);
+        if (!stale) break;
+        var gone = false;
+        try { gone = stale.remove() !== false; } catch (eRm) { gone = false; }
+        if (!gone || new File(stale.fsName).exists) {
             r.tried.push("could not remove the earlier " + stale.name
                 + " — a stale file would be misread as this run's output");
             r.error = "Could not clear " + stale.fsName;
@@ -1514,7 +1690,30 @@ function writeRenderProgress(file, done, total, current, failed) {
     } catch (e) {}
 }
 
-function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
+/* 3.93 audit · THREE MORE ARGUMENTS, all optional — a panel that sends none gets exactly the
+ * old behaviour:
+ *
+ *   expectSeq  the sequence ID this export was checked against at the press (the read's,
+ *              unless the editor answered "Export anyway" to another one). renderCuts
+ *              REFUSES to render any other sequence.
+ *   expectFp   the fingerprint (activeSequenceStamp(true)) the press check approved.
+ *              renderCuts REFUSES to render an edit that no longer matches it.
+ *   offeredAudio  the audio tracks the panel OFFERED as ticks ("1,2"). Given, only an offered
+ *              track the editor unticked is muted; a track the panel never showed is left
+ *              exactly as it was found. See soloAudioTrack().
+ *
+ * ⚠️ WHY THE HOST ASKS, when the panel already checked at the press. In Both the check runs
+ * once, at the press, and the Timeline half starts only after the Source half's engine has
+ * run for minutes with Premiere free to use: another timeline tab brought to the front, or the
+ * read sequence trimmed meanwhile, and this rendered THAT — the read's ranges out of the other
+ * edit, encoded into edited/ under the read's numbers and names. Same length, so nothing
+ * downstream could tell; measured, the report and the chime were a clean run's. This call is
+ * the one moment that cannot be stale — the render starts from it — so the refusal lives here,
+ * before a folder is made, a track touched or an in/out moved. `refused` says which of the two
+ * it was ("sequence" / "edited"), so a panel can word it. The same gap, narrower, exists in a
+ * single Timeline Render whose stamp check went unanswered. */
+function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio,
+                    expectSeq, expectFp, offeredAudio) {
     var res = { ok: false, renders: [], tried: [], written: 0, failed: 0 };
     var i;
     try {
@@ -1527,12 +1726,42 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
             res.error = "No active sequence — open a timeline first.";
             return ser(res);
         }
+        res.sequence = String(get(seq, "name", ""));
+        res.sequence_id = String(get(seq, "sequenceID", ""));
+        if (expectSeq !== undefined && expectSeq !== null && String(expectSeq) !== ""
+                && res.sequence_id !== String(expectSeq)) {
+            var readName = sequenceNameById(expectSeq);
+            res.refused = "sequence";
+            res.error = "Premiere has “" + res.sequence + "” in front, not "
+                + (readName ? "“" + readName + "”, " : "")
+                + "the sequence this export was checked against — so nothing was rendered,"
+                + " and your timeline was not touched. Bring that sequence back to the front"
+                + " and export again, or press Read to export the one in front.";
+            return ser(res);
+        }
+        if (expectFp !== undefined && expectFp !== null && String(expectFp) !== "") {
+            var fpNow = sequenceFpOf(seq);
+            res.fp = fpNow;
+            if (fpNow === null) {
+                /* The walk that took the baseline could not be taken now. Not a verdict either
+                 * way — said, and rendered, as the panel's own unanswerable check is. */
+                res.tried.push("sequence check: the fingerprint could not be taken, so the"
+                    + " timeline was not compared with the one the export was checked against");
+            } else if (fpNow !== String(expectFp)) {
+                res.refused = "edited";
+                res.error = "“" + res.sequence + "” has been edited since this export was"
+                    + " checked — the list, ranges and names are the old edit's, so nothing was"
+                    + " rendered and your timeline was not touched. Press Read again.";
+                res.tried.push("sequence check: expected fp " + String(expectFp) + ", open fp "
+                    + fpNow);
+                return ser(res);
+            }
+        }
         var timebase = Number(get(seq, "timebase", 0));
         if (!timebase) {
             res.error = "Premiere did not report a timebase for this sequence.";
             return ser(res);
         }
-        res.sequence = String(get(seq, "name", ""));
         res.timebase = timebase;
         res.fps = TICKS_PER_SECOND / timebase;
 
@@ -1599,6 +1828,35 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
         }
         res.total = ranges.length;
 
+        /* ⚠️ THE STOP FILE, READ ONCE BEFORE THE TIMELINE IS TOUCHED — and never deleted
+         * unread (3.93 audit).
+         *
+         * This used to REMOVE any _render_stop found before the loop, as a leftover from a run
+         * cancelled after its last range. That leftover cannot reach this call: the panel's
+         * beginExport() clears it (clearRenderStop) synchronously, immediately before the only
+         * evalScript that asks for this render. What CAN be here is the Cancel of THIS run,
+         * pressed while the request was queued behind Premiere or while the preset was being
+         * built — the window the panel's writeRenderStop() makes the folder for. Deleting it
+         * threw that Cancel away: measured, a stop file written during the setup gave 3 of 3
+         * ranges rendered, Premiere held for all of them, the button on "Stopping…" throughout.
+         *
+         * So a stop found here is honoured before anything moves, and the loop below reads it
+         * again before EVERY range, the first included, which covers a Cancel that lands during
+         * the track solo. A stop is its own outcome, not a failure: `ok` is true with
+         * `stopped`, so the panel says "Stopped after 0 of N" and not "Premiere rendered none
+         * of the cuts" — its reply handler tests !r.ok before r.stopped. */
+        var stopFile = new File(dir.fsName + "/_render_stop");
+        if (stopFile.exists) {
+            try { stopFile.remove(); } catch (eEarly) {}
+            res.stopped = true;
+            res.stopped_at = 0;
+            res.restored = true;                 // nothing was moved, so nothing to put back
+            res.ok = true;
+            res.tried.push("stopped before the first range: Cancel was pressed before"
+                + " Premiere reached the render — no track, and no in/out, was touched");
+            return ser(res);
+        }
+
         /* Read the in/out points BEFORE anything moves them, and put them back at the
          * end whatever happens in between. Leaving the timeline as it was found is the
          * one condition this whole feature was given. */
@@ -1611,10 +1869,11 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
          * nothing — an older panel — so the mix is then Premiere's own. */
         var asolo = null;
         if (keepAudio !== undefined && keepAudio !== null) {
-            asolo = soloAudioTrack(seq, keepAudio);
+            asolo = soloAudioTrack(seq, keepAudio, offeredAudio);
             for (i = 0; i < asolo.tried.length; i++) res.tried.push("audio: " + asolo.tried[i]);
             res.audio_muted = asolo.muted;
             res.audio_kept = asolo.kept;
+            res.audio_left = asolo.left;
             /* THE SAME TWO NOTES THE VIDEO SOLO CARRIES just below. They were missing
              * here, so every audio-side failure reached `tried` at most — and the panel
              * writes `tried` to the log under the gear and `warnings` to the run's notes,
@@ -1655,6 +1914,21 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
                     + " video track(s) were hidden — check one clip for a logo or caption"
                     + " that should not be there");
             }
+            /* 3.93 audit · a ticked track whose eye was off in Premiere. Its pixels are in
+             * the render because the ticks say so; the editor still has to hear that the
+             * timeline disagreed, and that it is back off now. */
+            if (solo.shown.length) {
+                res.warnings.push("V" + solo.shown.join(", V") + " " + (solo.shown.length > 1
+                    ? "were" : "was") + " switched off in Premiere but ticked to be in the"
+                    + " picture — switched on for the render and off again afterwards");
+            }
+            var unsure = solo.showUnknown;
+            if (unsure.length) {
+                res.warnings.push("V" + unsure.join(", V") + " " + (unsure.length > 1 ? "were"
+                    : "was") + " switched off in Premiere but ticked, and Premiere would not"
+                    + " confirm it came on for the render — check one clip for a missing"
+                    + " picture");
+            }
         }
 
         var prog = new File(dir.fsName + "/_render_progress.json");
@@ -1671,14 +1945,9 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
          * range it is on and then stops, which is the most that can honestly be offered here.
          * The panel's own button says exactly that rather than promising an instant stop.
          *
-         * Removed as it is honoured, so it cannot cancel the run after this one. And removed
-         * before the loop as well: a run cancelled after its LAST range leaves the file
-         * behind, and that must not stop the next run before it has begun. */
-        var stopFile = new File(dir.fsName + "/_render_stop");
-        if (stopFile.exists) {
-            try { stopFile.remove(); } catch (eStale) {}
-        }
-
+         * Removed as it is honoured, so it cannot cancel the run after this one. A run
+         * cancelled after its LAST range leaves the file behind, and the panel clears that
+         * before the next render is asked for — see the first read of it, above. */
         for (i = 0; i < ranges.length; i++) {
             if (stopFile.exists) {
                 try { stopFile.remove(); } catch (eStop) {}
@@ -1797,7 +2066,9 @@ function renderCuts(destFolder, spec, mbps, onePass, keepTracks, keepAudio) {
         res.pass_used = res.bitrate ? String(res.bitrate.pass || "") : "";
         res.one_pass_used = false;   // nothing writes the pass mode; see writeRenderPreset
 
-        res.ok = res.written > 0 && !res.aborted;
+        /* A Cancel honoured is the call doing what it was asked, whatever it had written by
+         * then — `stopped` says so, and the panel encodes nothing from it. */
+        res.ok = res.stopped ? true : (res.written > 0 && !res.aborted);
         if (!res.ok && !res.error) res.error = "Premiere rendered none of the cuts.";
     } catch (e) {
         res.error = String(e) + (e.line ? (" (line " + e.line + ")") : "");
@@ -2138,10 +2409,24 @@ function videoTrackStates(seq) {
  * refuses to render on it: seventeen files with a watermark burned in are worse than a
  * clear stop. `unverified` counts tracks this Premiere would not report on at all, which
  * is a warning rather than a refusal — the difference between knowing it is wrong and not
- * knowing. */
+ * knowing.
+ *
+ * ⚠️ 3.93 audit · A KEPT TRACK WHOSE EYE IS OFF. This used to leave every kept track exactly
+ * as it was, and it already knew when one was switched off (`before[i].muted === true`): the
+ * master's eye turned off after Read to look at an overlay and forgotten, and every clip
+ * rendered black; a ticked grade track hidden, and every clip lost the grade — while the
+ * Picture ticks said that track was in, and nothing said otherwise. The ticks are what the
+ * render is asked to show, so such a track is switched ON for the render, recorded in
+ * `changed` with its prior `muted: true` so the restore switches it off again, and listed in
+ * `shown` for a warning (`showUnknown` when Premiere will not say whether it came on). A
+ * track that reports it will not come on (`unshown`) refuses the render, as a
+ * track that will not hide does: a clip missing its shot is as wrong as one with a
+ * stranger's logo on it. (A track that was off AT Read never gets here: its clips are out of
+ * the read, so it is never offered as a tick.) And a keep list that names no track this
+ * sequence HAS is refused like an empty one — it would hide every track there is. */
 function soloVideoTrack(seq, keepList) {
     var res = { ok: false, tried: [], before: [], changed: [], unverified: 0, denied: 0,
-                hidden: 0, kept: [] };
+                hidden: 0, kept: [], shown: [], unshown: 0, showUnknown: [] };
     var tracks = get(seq, "videoTracks", null);
     var n = tracks ? Number(get(tracks, "numTracks", 0)) : 0;
     if (!n) {
@@ -2152,20 +2437,62 @@ function soloVideoTrack(seq, keepList) {
 
     /* The set of tracks to leave visible. An empty list would hide the picture entirely,
      * so it is refused rather than obeyed — the caller passes nothing at all when it wants
-     * the timeline left alone. */
-    var keep = {}, parts = String(keepList || "").split(","), kn = 0;
+     * the timeline left alone. So is a list of tracks this sequence does not have: "4" on a
+     * three-track timeline keeps nothing and hides all three. */
+    var keep = {}, parts = String(keepList || "").split(","), kn = 0, kin = 0;
     for (var p = 0; p < parts.length; p++) {
         var v = parseInt(parts[p], 10);
-        if (v > 0 && !keep[v]) { keep[v] = 1; kn++; res.kept.push(v); }
+        if (v > 0 && !keep[v]) {
+            keep[v] = 1; kn++; res.kept.push(v);
+            if (v <= n) kin++;
+        }
     }
     if (!kn) {
         res.error = "No video track was named as visible — refusing to render a black"
             + " picture.";
         return res;
     }
+    if (!kin) {
+        res.error = "The video track(s) named as visible (V" + res.kept.join(", V")
+            + ") are not on this sequence, which has " + n + " — refusing to render a black"
+            + " picture.";
+        return res;
+    }
 
     for (var i = 0; i < n; i++) {
-        if (keep[i + 1]) continue;               // its pixels belong in the render
+        if (keep[i + 1]) {
+            /* Its pixels belong in the render — so it must be SHOWING. Left alone when it
+             * already is, or when this Premiere will not say (null: never guessed at). */
+            if (!(res.before[i] && res.before[i].muted === true)) continue;
+            var threw = "";
+            try {
+                tracks[i].setMute(0);
+            } catch (eS) {
+                threw = String(eS);
+            }
+            /* Recorded whether or not the call threw: the restore then hides it again, which
+             * is where the editor left it either way. */
+            res.changed.push({ index: i + 1, muted: true });
+            var up = call(tracks[i], "isMuted", null);
+            if (up === null) {
+                res.tried.push("V" + (i + 1) + ": ticked but switched off; asked to show it"
+                    + (threw ? " (setMute threw: " + threw + ")" : "") + ", and Premiere"
+                    + " would not say whether it is showing");
+                res.showUnknown.push(i + 1);
+                continue;
+            }
+            if (up) {
+                res.tried.push("V" + (i + 1) + ": ticked but switched off, and still reports"
+                    + " hidden after being asked to show" + (threw ? " (setMute threw: "
+                    + threw + ")" : ""));
+                res.unshown++;
+                continue;
+            }
+            res.tried.push("V" + (i + 1) + ": ticked but switched off in Premiere — switched"
+                + " on for the render");
+            res.shown.push(i + 1);
+            continue;
+        }
         var want = 1;                            // 1 = hidden
         try {
             tracks[i].setMute(want);
@@ -2200,10 +2527,14 @@ function soloVideoTrack(seq, keepList) {
         res.hidden++;
     }
 
-    res.ok = res.denied === 0;
-    if (!res.ok) {
+    res.ok = res.denied === 0 && res.unshown === 0;
+    if (res.denied) {
         res.error = "Premiere would not hide " + res.denied + " video track(s), so every"
             + " render would carry whatever is on them. Nothing was rendered.";
+    } else if (res.unshown) {
+        res.error = "Premiere would not switch on " + res.unshown + " ticked video track(s)"
+            + " that are switched off in the timeline, so every render would be missing"
+            + " them. Nothing was rendered.";
     }
     return res;
 }
@@ -2238,7 +2569,16 @@ function restoreVideoTracks(seq, changed) {
  * nothing" is a silent render, a legitimate ask, where "see nothing" is a black one — and a
  * track Premiere will not mute is reported and counted, never silently skipped, because the
  * clip would then carry sound the editor unticked. Verifiable only in Premiere itself:
- * isMuted() is asked back after every setMute(). */
+ * isMuted() is asked back after every setMute().
+ *
+ * ⚠️ 3.93 audit · "MUTE EVERY TRACK NOT KEPT" MUTED TRACKS NOBODY WAS SHOWN. The panel's
+ * ticks are built from the engine's audio_tracks_available, which lists only tracks with
+ * audio ffmpeg can open — so an After Effects comp or a Motion Graphics template with its
+ * own sound, alone on A3, is never offered, never ticked, and was muted here: every edited/
+ * clip lost that sound, and nothing said so. When the panel sends `offeredList` — the tracks
+ * it showed — only an offered track the editor unticked is muted, and every other track is
+ * left exactly as it was found (`left`, and a line in `tried`). Without it the old rule
+ * stands, because this side cannot tell "unticked" from "never shown". */
 function audioTrackStates(seq) {
     var out = [];
     var tracks = get(seq, "audioTracks", null);
@@ -2250,9 +2590,9 @@ function audioTrackStates(seq) {
     return out;
 }
 
-function soloAudioTrack(seq, keepList) {
+function soloAudioTrack(seq, keepList, offeredList) {
     var res = { ok: true, tried: [], before: [], changed: [], unverified: 0, denied: 0,
-                muted: 0, kept: [] };
+                muted: 0, kept: [], left: [] };
     var tracks = get(seq, "audioTracks", null);
     var n = tracks ? Number(get(tracks, "numTracks", 0)) : 0;
     if (!n) return res;                          // nothing to hear, nothing to mute
@@ -2262,8 +2602,24 @@ function soloAudioTrack(seq, keepList) {
         var v = parseInt(parts[p], 10);
         if (v > 0 && !keep[v]) { keep[v] = 1; res.kept.push(v); }
     }
+    /* null = the caller did not say what it offered, so every track is the ticks' to decide.
+     * An EMPTY string is an answer — "offered nothing" — and then nothing is muted at all. */
+    var offered = null;
+    if (offeredList !== undefined && offeredList !== null) {
+        offered = {};
+        var op = String(offeredList).split(",");
+        for (var q = 0; q < op.length; q++) {
+            var w = parseInt(op[q], 10);
+            if (w > 0) offered[w] = 1;
+        }
+    }
     for (var i = 0; i < n; i++) {
         if (keep[i + 1]) continue;               // ticked: heard
+        if (offered && !offered[i + 1]) {        // never shown as a tick: not ours to mute
+            res.left.push(i + 1);
+            res.tried.push("A" + (i + 1) + ": not offered as a tick, left as it was found");
+            continue;
+        }
         try {
             tracks[i].setMute(1);
         } catch (e) {

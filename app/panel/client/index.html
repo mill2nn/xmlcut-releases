@@ -85,6 +85,15 @@
                 <span class="modename">Timeline Render</span>
                 <span class="modenote">effects included</span>
             </button>
+            <!-- 3.93 · THE THIRD: both of the above from one press — Source Render into
+                 <version>/raw/ first, then Timeline Render into <version>/edited/, one after the
+                 other (the product owner, 29 Sep 2026). Its hue is the other two's together, so
+                 it adds no colour of its own. -->
+            <button id="modeboth" class="modebtn"
+                    title="Both, one after the other: Source Render into raw/ first, then Timeline Render into edited/ — same version folder, one press. If either can't run, neither starts.">
+                <span class="modename">Both</span>
+                <span class="modenote">raw + edited</span>
+            </button>
         </div>
     </div>
 </section>
@@ -214,7 +223,8 @@
          over a disabled select. -->
     <div id="panetracks" class="tabpane" hidden>
     <div class="group g-tracks" id="trackgroup" hidden>
-        <div class="gcap">Picture</div>
+        <!-- 3.93 · #trackfor: in Both, which folder this frame governs (edited/ only). -->
+        <div class="gcap">Picture<span id="trackfor" class="capnote" hidden>· edited/</span></div>
         <div class="fields">
             <!-- Only in render mode, because it only exists there. A render is the whole
                  picture at that instant, so a title on V2 sitting over a clip on V1 would
@@ -340,7 +350,7 @@
                      Every line of the H.265 work still runs — `--vcodec libx265` from a
                      terminal, the measured size ratio, its estimate — and the select still
                      carries the option, so bringing it back is deleting one attribute. -->
-                <div class="field f-enc" hidden>
+                <div class="field f-enc" id="encfield" hidden>
                     <div class="flbl">Encoder <span class="q" data-tip="H.264 plays everywhere and is what Premiere, phones and browsers expect. H.265 encodes and decodes slower, and older software may not open it. ⚠️ The two CRF scales are NOT the same number — H.265 crf 28 is about H.264 crf 23. The size estimate accounts for this.">?</span></div>
                     <select id="vcodec" class="sel wide">
                         <option value="libx264">H.264 — plays everywhere</option>
@@ -475,7 +485,9 @@
     <!-- ⚠️ THE LABEL CARRIES AN ID so the whole File types block can go in one move. It is
          hidden outright in timeline-render mode, where the source file's extension decides
          nothing — see applyCutFrom() in main.js for why hidden rather than dimmed. -->
-    <p class="lbl" id="typelbl"><span class="legend" data-tip="Only clips whose source file is one of these types get cut. The number is how many are on this timeline. Untick a type to leave its clips out.">Colour = file type</span>
+    <!-- 3.93 · #typefor: in Both, the chips govern raw/ only — the Timeline half cuts what is
+         on its master track whatever the file type. -->
+    <p class="lbl" id="typelbl"><span class="legend" data-tip="Only clips whose source file is one of these types get cut. The number is how many are on this timeline. Untick a type to leave its clips out.">Colour = file type</span><span id="typefor" class="capnote" hidden>· raw/</span>
         <button id="typeall" class="linkbtn">select what's here</button>
     </p>
     <div id="types" class="types"></div>
@@ -582,7 +594,7 @@
                         <span class="q" data-tip="Plays a short macOS system sound when an export finishes — one tone if every clip wrote, a different one if anything failed or you cancelled. An export takes minutes and you are usually somewhere else; nothing pops up and nothing steals focus.">?</span>
                     </label>
                     <label class="tick"><input type="checkbox" id="resume">skip clips already there
-                        <span class="q" data-tip="Leaves any file that already exists untouched, so a re-run only writes what is missing. ⚠️ A file left half-written by a cancelled or crashed run counts as one that already exists, so it is kept too.">?</span>
+                        <span class="q" data-tip="Keeps each clip an earlier export of this folder finished at the same settings, so a re-run only writes what is missing. A clip takes its name only once it is whole, so a cancelled or crashed run leaves nothing half-written to keep. In Timeline Render a clip is kept only if Premiere renders it identically again, which it rarely does.">?</span>
                     </label>
                 </div>
         </div>

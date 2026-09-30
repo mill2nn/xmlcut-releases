@@ -886,6 +886,49 @@ one sentence, when it clearly has not. A Retry is offered only in the folder its
 after switching mode (or product) it is hidden, and a press is refused rather than rendering
 the other mode's failed clips into this one.
 
+**Both — `raw/` and `edited/` from one press** (since 3.93). A third mode button, **Both**
+(*raw + edited*), sits beside the other two and is remembered and locked like them. Export
+then runs **Source Render into `<version>/raw/` first, and then Timeline Render into
+`<version>/edited/`** — one after the other, never at the same time — and each half is exactly
+the export that mode makes on its own: the same command line, the same clips, the same
+`manifest.json`, `clips.csv` and `report/` in its folder.
+
+- **What you see.** Both modes' settings at once: the file-type chips (they decide `raw/`,
+  captioned so), the master track and the *In the picture* ticks (they decide `edited/`),
+  the audio ticks, and the render notes. The list shows every cut, as in Source Render; a cut
+  only one folder gets says **raw/ only** (a clip on an overlay track, a nest's inner clips)
+  or **edited/ only** (a comp, a title, a nest rendered as one clip), and the row's hover says
+  its number in each. The button says both counts — *Export 16 raw + 10 edited* — and the box
+  reads `v1.2/raw + edited in Brand 1.0`. Reading takes two passes in Both (the Timeline one
+  is what `edited/` is cut from), so a read costs a little more.
+- **Nothing starts unless both can.** If either half is blocked — its folder refused (another
+  sequence's clips, a file where `raw/` or `edited/` must go, no `Output/`, no version), this
+  Mac's disk too short for the renders, or nothing ticked for one of the halves — Export
+  refuses before Premiere is asked for anything, and says which half and why.
+- **Once started,** a failed clip, or even a failed run, in the Source half does not stop the
+  Timeline half. **Cancel stops the whole thing**: the second half does not start. The
+  progress line names the half — *Source Render (1 of 2) · [3/16] …*, *Timeline Render (2 of
+  2) · Rendering 4 of 10*. The sound plays once, at the end, the clean one only if both were
+  clean.
+- **The report** gives both folders' outcomes — *raw/ 16 written · edited/ 9 of 10 written, 1
+  failed* — and a failed row says which folder it failed in. **Retry** re-runs each half's own
+  failed clips into its own folder (the Timeline ones from the renders the run kept, as a
+  Timeline Render Retry does) and skips a half that had none. It is offered only while Both is
+  lit, and only while both of its folders are still where Export goes: after **Change**, a
+  Product-menu choice or a new Save to it is hidden, and going back to that folder offers it
+  again.
+- **Where the two folders are** is decided exactly as for each mode alone (since 3.92's
+  folders): the project's product, a matched or picked product, **a folder chosen with Change**
+  — for a free folder `<folder>/<version>/raw/` and `<folder>/<version>/edited/`, with no
+  `Output/` or `ACT/` made in it, and the box `v1.2/raw + edited in <folder>` under **Chosen** —
+  or Save to. Every refusal of a chosen folder refuses Both too, said once: a folder that has
+  gone, the top of the disk, `SAMX_WORKSPACE` itself. Change and the Product menu change nothing
+  from the press to the end of the second half. And the box holds for both folders: if what it
+  showed changes before the press or before the first half starts, nothing runs; if the
+  `edited/` folder is no longer the one it showed when the second half is about to start (an
+  `Output/` made in a free folder while `raw/` was being written, say), `raw/` stays as written,
+  `edited/` is not exported, and the rail says so.
+
 **Files 3.90 left in a version folder.** 3.90 wrote clips, `manifest.json`, `report/`,
 `_renders/` and `_earlier_export/` straight into `<version>/`. An export now goes into
 `<version>/raw/` or `<version>/edited/` and never touches them; the row says, in one sentence,
@@ -1037,3 +1080,58 @@ python3 xmlcut.py timeline.xml -o ./clips \
 
 # 3. manifest.csv is your label file — join it to the clip filenames
 ```
+
+---
+
+## 3.93 audit — engine
+
+What changed in the cut engine, for anyone reading an export or a log:
+
+- **"Skip clips already there" in Timeline Render** keeps a clip only when this run's render of
+  its range is byte for byte the render the clip was made from. A range Premiere renders again
+  is a new file, so after a timeline fix those clips are re-cut rather than kept old. The
+  `--resume` line says how many were re-cut for this reason.
+- **A ripple edit, or the same folder exported from another Mac** (media under another path),
+  no longer moves the folder's clips aside before anything is encoded: each old file waits
+  until its clip's new file is in place, then goes to `_earlier_export/`. A Cancel leaves every
+  clip in the delivery, old or new.
+- **One export at a time per folder.** An export holds a hidden `.xmlcut-running` file in the
+  output folder while it runs; a second export into the same folder on the same Mac is refused
+  before it touches anything. A lock left by a run that died is taken over by the next run.
+- **A destination that disappears during an export** (moved, renamed, unmounted) is not
+  recreated at the end: the run says so on a `!!` line and exits non-zero.
+- **Nested sequences:** a clip inside a nest is never repointed at another clip's media by the
+  panel's read; a reversed clip trimmed by the nest's window gets the frames the window shows;
+  a nest switched off on the timeline gives no clips and no sound.
+- **iPhone photos** (.heic, .heif, .avif) are cut as stills (converted once with macOS's `sips`).
+- **Export presets:** a `presets.json` that cannot be read is reported, and never overwritten
+  by a save.
+- **Updates:** an update is refused, and nothing is changed, when the panel files that arrive
+  are not the release the channel announced (the download may still be the previous release's
+  copy — try again in a few minutes). In the panel's own install `.backup` holds the previous
+  engine only, not the panel's files.
+- `completeness` in the manifest says `0 of N produced a file` when an export wrote nothing.
+
+## 3.93 audit — panel
+
+What changed in the Premiere panel:
+
+- **Both asks which sequence is open again before edited/.** The Source half takes minutes and
+  Premiere stays free; if another sequence was opened meanwhile, or this one edited or renamed
+  to another version, edited/ is not rendered — the rail says why, raw/ is kept as written.
+  Premiere itself is also told which sequence and edit a render is for, and refuses another.
+- **Settings survive Premiere updates.** Each Premiere version starts the panel with empty
+  storage; the panel now keeps a copy of its settings in
+  `~/Library/Application Support/Raw-cutter/panel-settings.json` and puts them back (Save to,
+  each project's picked product and chosen folder, the export settings), saying so in Info.
+- **The report is always of the folder the export wrote**, even if the destination changed
+  while it ran (that is said on the rail); in Both, Show in Finder and Copy open that version
+  folder. Copy report pastes the report's own folder.
+- **The list on screen is always the lit mode's and the master track's**: a mode press or a
+  master-track change during a re-read reads the list again when it lands, and changing the
+  master track re-reads so the numbers are the files'.
+- **Retry renders again a range whose render came up short.** A Both Retry chimes clean only
+  when both folders are delivered.
+- **Cancel during a render** writes its stop file where Premiere is rendering, and the
+  "Stopped." row stays on the rail.
+- A second export into a folder another export is still writing is refused in one sentence.

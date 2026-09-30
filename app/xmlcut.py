@@ -21,6 +21,8 @@ Requires: ffmpeg + ffprobe on PATH. No third-party Python packages.
 from __future__ import annotations
 
 import argparse
+import atexit
+import bisect
 import collections
 import contextlib
 import csv
@@ -31,6 +33,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import textwrap
 import tempfile
@@ -46,7 +49,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Optional, Union
 
-VERSION = "3.92"
+VERSION = "3.93"
 
 # Files this tool writes into an output folder: an index prefix, then anything, then a
 # media extension. Used to tell an earlier run's leftovers from a user's own files, which
@@ -98,7 +101,18 @@ NAME = "Raw-cutter"
 # Stills sit on the timeline for N frames but have no playable duration —
 # they need -loop instead of -ss/-t.
 STILL_EXT = {".png", ".jpg", ".jpeg", ".psd", ".tif", ".tiff", ".bmp",
-             ".tga", ".gif", ".exr", ".dpx", ".webp", ".ai", ".eps"}
+             ".tga", ".gif", ".exr", ".dpx", ".webp", ".ai", ".eps",
+             ".heic", ".heif", ".avif"}
+
+# ⚠️ 3.93 AUDIT · THE PHONE'S PHOTO FORMATS ARE STILLS, BUT FFMPEG CANNOT LOOP THEM. They were
+# in no set, so an iPhone photo on the timeline classified as VIDEO, was seeked to its virtual
+# 24-hour in-point and failed with "the source is shorter than the cut, or unreadable" under a
+# name carrying that clock (MEASURED on 3.93: 01_(3596.40-3597.90)_still.mp4). Classifying
+# them as stills is not enough: they open through the mov demuxer, which refuses the still
+# branch's `-loop 1`, and a full-size iPhone photo is a GRID of 512x512 tiles that ffprobe
+# reports as the first tile. So each one is converted once, by macOS's own sips, to a PNG
+# the ordinary still path can read and probe — see still_input().
+HEIF_EXT = {".heic", ".heif", ".avif"}
 
 # Project/comp files that ffmpeg cannot decode (dynamic-link, not media).
 #
@@ -508,11 +522,55 @@ def load_presets() -> dict:
     """Named export settings. Shared by the CLI, the panel and the browser GUI — a file
     rather than the panel's localStorage, so a preset can be inspected, edited and used
     from a terminal, and so the panel is not the only thing that knows about it."""
+    return load_presets_checked()[0]
+
+
+def load_presets_checked() -> tuple[dict, str]:
+    """(the presets, "") — or ({}, why) when a presets.json is THERE and cannot be read.
+
+    ⚠️ 3.93 AUDIT · MISSING AND UNREADABLE ARE DIFFERENT, AND ONLY ONE OF THEM IS EMPTY. Every
+    exception used to come back as {}: a hand edit that left a trailing comma, or a file cut
+    short, looked exactly like "no presets yet" — and save_preset started from that {} and
+    wrote a file holding only the new preset. MEASURED on 3.93: two presets and a trailing
+    comma, the panel's Save of a third -> the file held only the third. So an unreadable file
+    is reported (--list-presets-json carries it as `error`) and never written over; see
+    save_preset.
+    """
+    p = presets_path()
     try:
-        d = json.loads(presets_path().read_text(encoding="utf-8"))
-        return d if isinstance(d, dict) else {}
-    except Exception:
-        return {}
+        raw = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}, ""
+    except OSError as e:
+        return {}, f"{p} could not be read ({e})"
+    try:
+        d = json.loads(raw)
+    except ValueError as e:
+        return {}, f"{p} is not valid JSON ({e})"
+    if not isinstance(d, dict):
+        return {}, f"{p} does not hold a set of named presets"
+    return d, ""
+
+
+class PresetsUnreadable(ValueError):
+    """presets.json is there and cannot be read, so nothing may be written over it."""
+
+
+def _write_presets(all_: dict) -> None:
+    """Through a temporary file and a rename, so an interrupted write can never leave a
+    truncated presets.json behind (which is how a file becomes unreadable by itself)."""
+    p = presets_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(f".{p.name}.part")
+    try:
+        tmp.write_text(json.dumps(all_, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(str(tmp), str(p))
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 # The encoder belongs here for the same reason crf and scale do: it DETERMINES THE
@@ -524,11 +582,15 @@ PRESET_FIELDS = ("container", "vcodec", "crf", "bitrate", "x264_preset", "fps",
 
 
 def save_preset(name: str, settings: dict) -> None:
-    p = presets_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    all_ = load_presets()
+    """Add or replace one preset. Raises PresetsUnreadable, writing nothing, when the file
+    is there and cannot be read — starting from {} would delete every preset in it."""
+    all_, bad = load_presets_checked()
+    if bad:
+        raise PresetsUnreadable(
+            f"{bad}. Nothing was saved, so the presets in it are not overwritten — fix the "
+            f"file or move it aside, then save again")
     all_[name] = {k: settings.get(k) for k in PRESET_FIELDS}
-    p.write_text(json.dumps(all_, indent=2, sort_keys=True), encoding="utf-8")
+    _write_presets(all_)
 
 
 def preset_from_args(args) -> dict:
@@ -1078,6 +1140,82 @@ def release_file_complaint(rel: str, data: bytes) -> Optional[str]:
     return None
 
 
+# ⚠️ 3.93 AUDIT · FROM THIS RELEASE ON, latest.json CARRIES A sha256 FOR EVERY FILE, and an
+# updater that finds none refuses the release rather than installing files it cannot check.
+# Publish Update.command writes the map over the exact bytes it pushes (every UPDATE_FILES
+# entry: host.jsx, the CSS, the HTML and the tools carry no version of their own, so without
+# it a stale CDN copy of any of them installed as this release). A release numbered below this
+# was published before the map existed and keeps the two stamps only (release_file_stale).
+# Engines before 3.93 never read the key: they take "version", "files" and "notes" as always,
+# so a channel that carries it installs on them exactly as before (tests/check_update.py
+# drives the 3.92 engine against it).
+SHA256_REQUIRED_FROM = "3.93"
+_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
+
+
+def release_digest_complaint(info: dict, files: list) -> Optional[str]:
+    """Why this latest.json cannot be installed for want of per-file digests, or None.
+
+    Asked before anything is downloaded. A release numbered below SHA256_REQUIRED_FROM needs
+    none; from it on, latest.json must carry `"sha256"` naming a digest for every file this
+    copy would fetch."""
+    want = str(info.get("version") or "")
+    if version_key(want) < version_key(SHA256_REQUIRED_FROM):
+        return None
+    digests = info.get("sha256")
+    if not isinstance(digests, dict) or not digests:
+        return (f"latest.json for {want} carries no sha256 for its files, which every release "
+                f"from {SHA256_REQUIRED_FROM} on is published with, so what it would download "
+                f"cannot be checked")
+    missing = [rel for rel in files
+               if not isinstance(digests.get(rel), str) or not _SHA256_RE.fullmatch(digests[rel])]
+    if missing:
+        return (f"latest.json for {want} has no sha256 for "
+                + ", ".join(missing[:3]) + (f" and {len(missing) - 3} more" if len(missing) > 3
+                                            else "")
+                + (", so it cannot be checked" if len(missing) == 1
+                   else ", so they cannot be checked"))
+    return None
+
+
+def release_file_stale(rel: str, data: bytes, info: dict) -> Optional[str]:
+    """Why these bytes are not THIS release's copy of `rel`, or None.
+
+    Two stamps Publish Update.command puts in every release, checked because they cost
+    nothing and a stale CDN copy of the previous release fails them: the CEP manifest's
+    ExtensionBundleVersion (set_version writes it from the same number as VERSION) and the
+    CHANGELOG entry for the version in main.js (check_publishable refuses a release without
+    one). Every other file carries no version of its own, so for them — and for these two as
+    well — a latest.json that carries `"sha256": {"<file>": "<hex>"}` is checked file by
+    file. From SHA256_REQUIRED_FROM on the map is required (release_digest_complaint refuses
+    a release without it before anything is fetched); a release numbered below that gets the
+    stamps only. A map that names no digest for a file is a refusal, not a pass.
+    """
+    want = str(info.get("version") or "")
+    # The two stamps first, because what they say is more use to the person reading it than
+    # "the digest differs" — they name the release the file came from. Both still have to
+    # pass the digest after them.
+    if rel == "panel/CSXS/manifest.xml":
+        try:
+            got = ET.fromstring(data.decode("utf-8")).get("ExtensionBundleVersion") or ""
+        except (ET.ParseError, UnicodeDecodeError):
+            got = ""
+        if got != want:
+            return (f"is from release {got or '(no version)'}, not {want}")
+    if rel == "panel/client/main.js":
+        if not re.search(r'^\s*"%s"\s*:\s*CL_' % re.escape(want),
+                         data.decode("utf-8", "replace"), re.M):
+            return f"has no release notes for {want}, so it is not {want}'s panel"
+    digests = info.get("sha256")
+    if isinstance(digests, dict):
+        d = digests.get(rel)
+        if not isinstance(d, str) or not _SHA256_RE.fullmatch(d):
+            return "has no sha256 in latest.json to be checked against"
+        if hashlib.sha256(data).hexdigest() != d.lower():
+            return "is not the file this release published (its sha256 differs)"
+    return None
+
+
 def apply_update(info: dict, progress=None, out: Optional[dict] = None) -> tuple[bool, str]:
     """Download the released files and swap them in, or change nothing at all.
 
@@ -1123,6 +1261,12 @@ def apply_update(info: dict, progress=None, out: Optional[dict] = None) -> tuple
         files.append(rel)
     if not files:
         return False, "latest.json listed nothing this copy can update — nothing was changed"
+    # Before the first download: a release that should carry digests and does not is refused
+    # whole, not file by file halfway down the list.
+    no_digests = release_digest_complaint(info, files)
+    if no_digests:
+        return False, (f"{no_digests} — nothing was changed. The release has to be published "
+                       f"again with Publish Update.command, which writes them")
     got: dict[str, bytes] = {}
     for n, rel in enumerate(files, start=1):
         say(f"Downloading {rel} ({n}/{len(files)})")
@@ -1147,6 +1291,20 @@ def apply_update(info: dict, progress=None, out: Optional[dict] = None) -> tuple
                 return False, (f"the download says "
                                f"{m.group(1) if m else 'no version'}, not "
                                f"{info.get('version')} — nothing was changed")
+        # ⚠️ 3.93 AUDIT · AND THE PANEL FILES HAVE TO BE FROM THIS RELEASE TOO. Each file is
+        # fetched on its own, API first, then raw.githubusercontent — whose CDN edge can
+        # still hold the PREVIOUS release for five minutes after a publish. MEASURED on
+        # 3.93 (stubbed channel): latest.json and xmlcut.py from the new release, every
+        # panel file from the old one -> `ok: True`, `restart_needed: False` ("cut engine
+        # only, already live"), the header on the new number, and every later check "up to
+        # date" — the panel fix never lands. The xmlcut.py VERSION check above was the only
+        # one. See release_file_stale() for the two stamps every release carries, and the
+        # per-file digests a latest.json may carry.
+        stale = release_file_stale(rel, data, info)
+        if stale:
+            return False, (f"{rel} {stale} — nothing was changed; the release channel may "
+                           f"still be serving the previous release's copy, so try again in "
+                           f"a few minutes")
         got[rel] = data
 
     # Which files this update actually CHANGES, as opposed to rewriting identically.
@@ -1256,8 +1414,14 @@ def apply_update(info: dict, progress=None, out: Optional[dict] = None) -> tuple
         # new, the panel is not. A front end that reads this can say so where the success
         # banner is, instead of in a log.
         out["panel_error"] = panel_error
-    return True, (f"updated {VERSION} → {info['version']}. The previous version is in "
-                  f".backup." + tail)
+    # ⚠️ 3.93 AUDIT · SAID AS IT IS. In the panel's own (bundled) install the panel files
+    # arrive in a staging folder that did not exist before, so they are "fresh", never backed
+    # up, and the swap removes its .old copies — .backup holds the engine and its tools only.
+    # "The previous version is in .backup" sent someone rolling back a bad panel release to a
+    # folder without it (and restoring the engine alone from there is a mixed install).
+    kept = ("The previous engine is in .backup (the panel's own files are replaced, not "
+            "kept)." if bundled else "The previous version is in .backup.")
+    return True, (f"updated {VERSION} → {info['version']}. {kept}" + tail)
 
 
 # --------------------------------------------------------------------------
@@ -3141,8 +3305,18 @@ class Timeline:
                         # Trim the source range by the same amount of material, scaled by
                         # the inner clip's own speed. A reversed clip is consumed from the
                         # far end, so its head trim comes off the tail of the source range.
+                        #
+                        # ⚠️ 3.93 AUDIT · AND ITS TAIL TRIM COMES OFF THE START. A reversed
+                        # clip shows its source END first, so what a window cuts off at its
+                        # nest-time tail is the START of the source range. Only the length
+                        # was taken off, so the in-point stayed put and the clip delivered
+                        # the part of the source the window hides: MEASURED on 3.93, inner
+                        # clip over source 100..159 reversed, window 0-30 -> delivered
+                        # 129..100 where the timeline shows 159..130, status ok, and the
+                        # window 30-60 delivered the very same frames.
                         k_in = (c.speed_percent / 100.0) or 1.0
                         if c.reversed:
+                            c.source_in_seconds += tail * k_in
                             c.source_duration_seconds -= (head + tail) * k_in
                         else:
                             c.source_in_seconds += head * k_in
@@ -3184,6 +3358,19 @@ class Timeline:
         # The nest clipitem's own fader rides on everything inside it, the same way a
         # track's does — a nest is a submix, and Premiere lets you pull it down as one.
         _mark_audio_level(out, *read_audio_level(clip))
+
+        # ⚠️ 3.93 AUDIT · AND SO DOES ITS OWN ENABLE SWITCH. The nest clipitem's <enabled>
+        # was never read here — only the enclosing track's toggle, applied by the caller —
+        # so every shot inside a nest switched off on the timeline came back enabled:
+        # MEASURED on 3.93, delivered to raw/ as `ok` in Source Render, and its voice-over
+        # mixed into _timeline_audio.mp3 in both modes (this function is the mix's walk too,
+        # see _nest_audio_for_mix) while the run said the clip was NOT cut. A clip switched
+        # off is `enabled` False with `track_enabled` left alone, so the --disabled drop,
+        # its counts ("switched off", not "on a muted track") and the audio filter all
+        # treat these as the clip-level switch they are.
+        if txt(clip, "enabled", "TRUE").strip().upper() == "FALSE":
+            for c in out:
+                c.enabled = False
 
         # ⚠️ PER NEST INSTANCE, not only when the whole nest yields nothing. A nest that
         # gives back SOME cuts and drops others looked identical to a nest that gave back
@@ -3637,6 +3824,16 @@ class DumpTimeline:
         # the two inputs for the same timeline.
         self.cuts.sort(key=lambda c: (c.track_type != "video", c.timeline_in_frames,
                                       c.track_index))
+        # ⚠️ 3.93 AUDIT · AND IDENTIFIED THE WAY THE XML PATH IDENTIFIES THEM. This route is
+        # what the panel cuts from when Premiere's XML export fails, and it never assigned a
+        # cut_id — so every cut had "", the folder's ledger recorded nothing (record() needs
+        # an id), 'skip clips already there' kept nothing, and the tidy had nothing to plan:
+        # MEASURED on 3.93, a lift on this route left numbers 01-13 each worn by two files.
+        # The same recipe as Timeline._assign_cut_ids, so the ledger, --resume and the tidy
+        # work here too. (The dump derives its source range from ticks x speed, so its ids
+        # need not equal the XML route's for the same clip: switching a folder between the
+        # two routes reads as a relink — same names overwritten, the rest set aside.)
+        Timeline._assign_cut_ids(self)
         if nests:
             self.warnings.append(
                 f"{nests} nested sequence(s) skipped. Export this timeline as XML to "
@@ -3794,6 +3991,28 @@ class DumpTimeline:
         return cut
 
 
+class _TickBuckets(dict):
+    """The dump's clips by start tick, with the ticks kept sorted for match_dump_clip.
+    Filled with setdefault() only, which is the one way overlay_dump() adds to it."""
+
+    def __init__(self):
+        super().__init__()
+        self._rank: dict = {}
+        self._sorted: list = []
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self._rank[key] = len(self._rank)
+            bisect.insort(self._sorted, key)
+        return super().setdefault(key, default)
+
+    def near(self, want, slack) -> list:
+        lo = bisect.bisect_left(self._sorted, want - slack) - 1
+        hi = bisect.bisect_right(self._sorted, want + slack) + 1
+        hits = [t for t in self._sorted[max(0, lo):hi] if abs(t - want) <= slack]
+        return sorted(hits, key=self._rank.__getitem__)
+
+
 def match_dump_clip(buckets: dict, want_ticks: int, slack: float,
                     source_path: str) -> tuple:
     """Find the panel clip that is the same clip as an XML cut.
@@ -3808,9 +4027,18 @@ def match_dump_clip(buckets: dict, want_ticks: int, slack: float,
     than guessing.
     """
     cands = []
-    for t, lst in buckets.items():
-        if abs(t - want_ticks) <= slack:
-            cands.extend(lst)
+    # ⚠️ 3.93 AUDIT · NOT EVERY BUCKET FOR EVERY CUT. This loop visited every start tick of
+    # the dump once per XML cut — cuts x starts. MEASURED on 3.93: 5,000 cuts spent most of a
+    # 12 s read here, paid on every read and twice in Both. overlay_dump() hands over a
+    # _TickBuckets, which keeps its keys sorted: only the keys within the slack are visited
+    # (widened by one each side and re-tested with the same predicate, so float rounding at
+    # the edges cannot change the answer), in the dict's own insertion order, so the
+    # candidates — and therefore byname / only / ambiguous — are exactly what the full scan
+    # gives. A plain dict still gets the full scan.
+    near = buckets.near(want_ticks, slack) if isinstance(buckets, _TickBuckets) else [
+        t for t in buckets if abs(t - want_ticks) <= slack]
+    for t in near:
+        cands.extend(buckets[t])
     if not cands:
         return None, "none"
 
@@ -3930,7 +4158,7 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
     # against whatever happened to be on top. On real timeline that mismatched most
     # of the list, and since the merge can repoint a cut's media, a wrong match could
     # have pointed a cut at the wrong file.
-    buckets: dict[int, list] = {}
+    buckets = _TickBuckets()
     for c in data.get("clips") or []:
         if c.get("track_type") != "video":
             continue
@@ -3943,6 +4171,19 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
 
     for cut in tl.cuts:
         if cut.track_type != "video":
+            continue
+        # ⚠️ 3.93 AUDIT · A CUT FROM INSIDE A NEST HAS NO CLIP IN THE DUMP. host.jsx walks the
+        # top-level track items only, so the nest is one clip there and its inner clips are
+        # nowhere — anything found at an inner clip's instant is ANOTHER clip. The "only"
+        # rule below then handed it over without comparing file names: MEASURED on 3.93, an
+        # offline clip inside a nest and a B-roll clip on V2 starting on the same frame -> the
+        # nested shot repointed at the B-roll's file, cut at the nested clip's own source
+        # range, named after the wrong file and reported `ok`, and `3 of 3 video clip(s)
+        # matched`. The dump can describe nothing about a nest's interior (not its path, not
+        # its ramp, not its range), so such a cut is left exactly as the XML has it — an
+        # offline one stays missing_source, which the panel offers to relink — and it counts
+        # as unmatched, which is what the lead note's "(nests, …)" says.
+        if cut.nested_from:
             continue
         want = int(round(cut.timeline_in_frames * PPRO_TICKS_PER_SECOND
                          / tl.sequence_fps))
@@ -4050,14 +4291,9 @@ def overlay_dump(tl, dump_path: Path) -> list[str]:
             + (f", {unmatched} only in the XML (nests, titles, graphics)"
                if unmatched > 0 else "")]
     if ambiguous:
-        # Almost always nested content: the panel hands over the NEST, so a child clip's
-        # filename is never in the bucket and no match is possible. Naming the cause
-        # matters — the mechanism on its own reads like a fault when it is expected.
-        nested_amb = sum(1 for c in tl.cuts
-                         if c.track_type == "video" and c.nested_from)
-        why = ("expected — inside nested sequences, which the panel sees as one clip"
-               if nested_amb else
-               "several clips share that instant and none carries this cut's filename")
+        # Nested content is no longer asked at all (see the loop above), so what is left is
+        # a top-level cut whose instant holds several clips, none of them its file.
+        why = "several clips share that instant and none carries this cut's filename"
         lead.append(f"{ambiguous} cut(s) kept the XML's values rather than guessing: {why}")
     if repaired:
         lead.append(f"repaired {repaired} media path(s) from Premiere's live location")
@@ -4182,11 +4418,68 @@ def media_end_seconds(data: dict, track_type: str) -> float:
     return whole
 
 
+def still_input(path: str) -> tuple[str, str]:
+    """(the file ffmpeg and ffprobe should open for this still, why it cannot be, or "").
+
+    The source itself for every still but HEIF_EXT; for those, a PNG made from it once by
+    sips and kept in the temp folder, keyed by the source's path, size and modification
+    time, so an edited photo is converted again and an unchanged one is not. Written under
+    a unique temporary name and renamed, because parallel encodes can ask for it at once.
+    """
+    if Path(path).suffix.lower() not in HEIF_EXT:
+        return path, ""
+    try:
+        st = os.stat(path)
+    except OSError as e:
+        return path, f"the photo could not be read ({e})"
+    key = hashlib.sha1(f"{path}\0{st.st_size}\0{st.st_mtime_ns}".encode("utf-8")).hexdigest()
+    d = Path(tempfile.gettempdir()) / "xmlcut-heif"
+    out = d / f"{key[:20]}.png"
+    try:
+        if out.is_file() and out.stat().st_size > 0:
+            return str(out), ""
+    except OSError:
+        pass
+    sips = shutil.which("sips")
+    if not sips:
+        return path, ("an HEIC/HEIF/AVIF photo is converted for cutting by macOS's sips, "
+                      "which is not on this machine — export the photo as PNG or JPEG")
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=f".{key[:20]}.", suffix=".png", dir=str(d))
+        os.close(fd)
+    except OSError as e:
+        return path, f"the photo could not be converted for cutting ({e})"
+    try:
+        r = subprocess.run([sips, "-s", "format", "png", path, "--out", tmp],
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode != 0 or os.path.getsize(tmp) <= 0:
+            raise OSError((r.stderr or r.stdout or "no output").strip()[:200])
+        os.replace(tmp, str(out))
+    except (OSError, subprocess.SubprocessError) as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return path, (f"sips could not convert this HEIC/HEIF/AVIF photo for cutting ({e}) "
+                      f"— export it as PNG or JPEG")
+    return str(out), ""
+
+
+def probe_source(path: str, timeout: float = PROBE_READ_TIMEOUT) -> dict:
+    """probe() of the file a cut is actually read from. For a phone photo that is the PNG
+    it is converted to (see HEIF_EXT): its own probe reports one 512x512 tile of a
+    12-megapixel grid. Everything else is probed as itself. Used by both the pooled pre-warm
+    and apply_probe, so the two cannot describe one file differently."""
+    src, why = still_input(path)
+    return {"_probe_failed": why} if why else probe(src, timeout)
+
+
 def apply_probe(cut: Cut, cache: dict, timeout: float = PROBE_READ_TIMEOUT) -> None:
     if not cut.source_exists:
         return
     if cut.source_path not in cache:
-        cache[cut.source_path] = probe(cut.source_path, timeout)
+        cache[cut.source_path] = probe_source(cut.source_path, timeout)
     data = cache[cut.source_path]
     # ⚠️ RECORDED ON THE CUT, and nothing else is read out of a failed probe. Leaving the
     # loop below to iterate an empty dict is how "ffprobe never answered" became "this file
@@ -4812,7 +5105,9 @@ def build_command(cut: Cut, out_path: Path, args, seq_fps: float) -> list[str]:
         # the two are one expression rather than a special case bolted beside a general
         # one. A still with an odd dimension still cannot be encoded, scaled or not.
         _out = float(getattr(args, "fps", None) or 0.0) or seq_fps
-        cmd += ["-loop", "1", "-framerate", f"{_out:.6f}", "-i", cut.source_path,
+        cmd += ["-loop", "1", "-framerate", f"{_out:.6f}",
+                # A phone photo is looped as the PNG it was converted to (see HEIF_EXT).
+                "-i", still_input(cut.source_path)[0],
                 "-t", f"{cut.source_duration_seconds:.6f}",
                 *codec_flags(cut, args),
                 "-movflags", "+faststart",
@@ -7066,7 +7361,8 @@ ASIDE_DIR = "_earlier_export"
 # the identity and the settings it was made under, and --resume keeps a file only when this
 # record vouches for exactly that file, that cut and these settings. Hidden, because it is
 # the engine's bookkeeping and not a deliverable — the same reason partials are hidden — and
-# small: file names, cut ids, byte counts, eight settings and (3.90) the sequence's name and
+# small: file names, cut ids, byte counts (and, 3.93, each file's modification time), eight
+# settings and (3.90) the sequence's name and
 # Premiere id, no paths. The panel reads it too, to tell whose clips a version folder holds
 # and in which mode (see ledger_sequence).
 LEDGER_NAME = ".xmlcut-ledger.json"
@@ -7122,6 +7418,82 @@ def _known_bytes(v) -> int:
     return 0
 
 
+def _known_mtime_ns(v) -> int:
+    """A recorded st_mtime_ns, or 0 when the entry carries none (a ledger from before 3.93)."""
+    if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+        return v
+    return 0
+
+
+def render_identity(cut) -> Optional[dict]:
+    """{"bytes", "sha256"} of the render this cut is encoded from, or None when it has none.
+
+    ⚠️ 3.93 AUDIT · THE RENDER IS PART OF WHAT A KEPT FILE MUST MATCH. cut_id describes the
+    master clip (name, track, in/out, source, speed, reverse, nest) and RESUME_DRIFT_FIELDS
+    the encode settings; neither says anything about what Premiere baked into a Timeline
+    Render — a title fixed over the clip, a graphic, a grade, another track ticked in or out.
+    MEASURED on 3.93: three clips delivered from red renders, one render rebuilt green, the
+    same export with 'skip clips already there' -> `0 written … 3 already there`, the
+    delivered clip still red, its manifest row naming the NEW render, and the panel then
+    deleted that render as a clean run's. So every clip written from a render records the
+    render's bytes here, and --resume keeps it only while this run's render is byte for byte
+    the same file (plan_resume). The whole file is hashed — a size alone cannot see a title
+    fixed at the same byte count — and a render re-made by Premiere carries a new timestamp
+    in its metadata, so in practice a re-rendered range is re-cut: the keep is for a render
+    that was reused (a Retry of a stopped run), which is the one case it is right for.
+
+    Cached on the cut: computed once, OUTSIDE the folder step that records it, so the
+    commit lock is never held while a large render is read.
+    """
+    p = getattr(cut, "render_path", "") or ""
+    if not p:
+        return None
+    got = getattr(cut, "_render_identity", None)
+    if got is not None:
+        return got
+    h = hashlib.sha256()
+    n = 0
+    try:
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+                n += len(chunk)
+    except OSError:
+        return None
+    got = {"bytes": n, "sha256": h.hexdigest()}
+    try:
+        cut._render_identity = got
+    except AttributeError:
+        pass
+    return got
+
+
+def _render_record(v) -> Optional[dict]:
+    """A ledger entry's render record as open() keeps it, or None for anything else."""
+    if (isinstance(v, dict) and _known_bytes(v.get("bytes"))
+            and isinstance(v.get("sha256"), str) and len(v["sha256"]) == 64):
+        return {"bytes": int(v["bytes"]), "sha256": v["sha256"]}
+    return None
+
+
+def render_matches(recorded, cut) -> bool:
+    """Is this run's render for `cut` the very file the recorded clip was made from?
+
+    No record (a ledger from before 3.93, an entry seeded from a manifest, a clip written
+    from source) is no proof, and no proof is a re-cut. The size is compared first so a
+    render that changed length is never read in full just to be told so."""
+    rec = _render_record(recorded)
+    if rec is None:
+        return False
+    try:
+        if os.path.getsize(cut.render_path) != rec["bytes"]:
+            return False
+    except (OSError, TypeError):
+        return False
+    now = render_identity(cut)
+    return bool(now) and now["sha256"] == rec["sha256"] and now["bytes"] == rec["bytes"]
+
+
 def ledger_sequence(v) -> dict:
     """A sequence identity as the ledger records it — {"name", "id"}, each only when it is a
     non-empty string (or an integer id) — or {} for anything else.
@@ -7150,9 +7522,9 @@ def ledger_sequence(v) -> dict:
 class FolderLedger:
     """What this engine has written into one output folder, file by file. See LEDGER_NAME.
 
-    `files` maps a delivered filename to {"cut_id", "bytes", "settings"}. Written after
-    every clip that is put in place, so a run that is killed halfway has already recorded
-    the clips it finished — which is the case the manifest can never cover.
+    `files` maps a delivered filename to {"cut_id", "bytes", "mtime_ns", "settings"}.
+    Written after every clip that is put in place, so a run that is killed halfway has
+    already recorded the clips it finished — which is the case the manifest can never cover.
     """
 
     def __init__(self, out_dir: Path, files: dict, existed: bool, seeded: bool, now: dict,
@@ -7210,6 +7582,10 @@ class FolderLedger:
                                    "bytes": _known_bytes(e.get("bytes")),
                                    "settings": (e["settings"] if isinstance(
                                        e.get("settings"), dict) else {})}
+                    # Kept across runs, like the byte count: what vouches() compares (3.93).
+                    _mt = _known_mtime_ns(e.get("mtime_ns"))
+                    if _mt:
+                        files[name]["mtime_ns"] = _mt
                     if e.get("seeded") is True:
                         files[name]["seeded"] = True
                     # Kept across runs: a run that does not re-make this file must not erase
@@ -7217,6 +7593,11 @@ class FolderLedger:
                     _seq = ledger_sequence(e.get("sequence"))
                     if _seq:
                         files[name]["sequence"] = _seq
+                    # Kept too: a run that keeps this file must not erase which render it
+                    # was made from, or the next --resume could never keep it (render_identity).
+                    _rend = _render_record(e.get("render"))
+                    if _rend:
+                        files[name]["render"] = _rend
             return cls(out_dir, files, existed, False, now, aside=aside)
         settings, clips = _manifest_record(out_dir)
         # The sequence that manifest's run cut, for the entries seeded from it below.
@@ -7265,14 +7646,30 @@ class FolderLedger:
         had = bool(files) or any(str(c.get("cut_id") or "") for c in clips)
         return cls(out_dir, files, False, bool(files), now, had_record=had)
 
-    def record(self, name: str, cut_id: str, nbytes: int) -> None:
+    def record(self, name: str, cut_id: str, nbytes: int,
+               render: Optional[dict] = None) -> None:
         if not name or not cut_id:
             return
+        # ⚠️ 3.93 AUDIT · THE FILE'S OWN MODIFICATION TIME, READ THE MOMENT IT IS IN PLACE, is
+        # what lets vouches() tell this tool's file from a hand-replaced one of the same byte
+        # count (see there). Read here, after the rename, and only kept when the size read
+        # with it is the size recorded: a stat that disagrees is no proof, so no stamp.
+        try:
+            _st = (self.out_dir / name).stat()
+            _mt = _st.st_mtime_ns if _st.st_size == int(nbytes or 0) else 0
+        except OSError:
+            _mt = 0
         with self._lock:
             self.files[name] = {"cut_id": cut_id, "bytes": int(nbytes or 0),
                                 "settings": dict(self.now)}
+            if _mt > 0:
+                self.files[name]["mtime_ns"] = _mt
             if self.sequence:
                 self.files[name]["sequence"] = dict(self.sequence)
+            # The render this clip was encoded from, when it was (see render_identity).
+            _rend = _render_record(render)
+            if _rend:
+                self.files[name]["render"] = _rend
             self._save_locked()
 
     def vouches(self, name: str, cut_id: str) -> bool:
@@ -7285,18 +7682,35 @@ class FolderLedger:
         was inferred from an older manifest, not written here, and an inference is enough
         to keep a file and never enough to destroy one. Anything this says no to is moved
         aside instead.
+
+        ⚠️ 3.93 AUDIT · THE SIZE ALONE WAS THE WHOLE PROOF, so a file an editor replaced by
+        hand with one of the SAME byte count — a re-export of the fix at the same length, a
+        file copied in over it — was deleted as "the old-numbered copy this tool wrote". The
+        entry now also holds the file's st_mtime_ns, read when this tool put it in place
+        (record), and both must still match. Metadata only: reading the clip back to hash it
+        would download every renumbered file of a Drive folder just to decide a delete. An
+        in-place rewrite changes the time; a copy brought in over the name carries the time
+        of the file it came from. NOT the inode, though the time alone cannot see a
+        replacement stamped with this file's exact time to the nanosecond: a folder that is
+        copied, restored or synced (the suite's own fixtures copy folders) gives every file a
+        new inode with the same bytes and time, and proof that fails on every copy of a folder
+        is no proof worth having. An entry with no time — a ledger an engine before 3.93
+        wrote — proves nothing, so its file is moved aside, never deleted; the same for a
+        Drive round trip that rewrote the time. Both are the safe direction: a copy left in
+        ASIDE_DIR costs disk, a wrong delete costs the editor's work.
         """
         with self._lock:
             e = self.files.get(name)
             if (not e or e.get("seeded") or e.get("cut_id") != cut_id
-                    or not e.get("bytes")
+                    or not e.get("bytes") or not _known_mtime_ns(e.get("mtime_ns"))
                     or _drift_between(e.get("settings") or {}, self.now)):
                 return False
-            nbytes = e["bytes"]
+            nbytes, mtime_ns = e["bytes"], e["mtime_ns"]
         try:
-            return (self.out_dir / name).stat().st_size == nbytes
+            st = (self.out_dir / name).stat()
         except OSError:
             return False
+        return st.st_size == nbytes and st.st_mtime_ns == mtime_ns
 
     def forget(self, name: str) -> None:
         with self._lock:
@@ -7557,6 +7971,7 @@ def plan_resume(cuts: list, idx: dict, args) -> dict:
     claimed: set[str] = set()
     drift: list[str] = []
     n_drift = 0
+    n_render = 0                               # kept files whose render is not this run's
     ambiguous: set[str] = set()
     renumbered: list = []                      # (the file's name, this run's name)
     legacy_stale: list = []                    # unrecorded files that match by name only
@@ -7584,8 +7999,17 @@ def plan_resume(cuts: list, idx: dict, args) -> dict:
                 n_drift += 1
                 drift += [x for x in d if x not in drift]
                 continue
+            # ⚠️ 3.93 AUDIT · AND A CLIP CUT FROM A RENDER IS KEPT ONLY OVER THE SAME RENDER.
+            # Nothing above can see what Premiere baked into it; see render_identity.
+            if c.render_path and not render_matches(records[cands[0]].get("render"), c):
+                n_render += 1
+                continue
             name = cands[0]
         else:
+            # A render's content cannot be vouched for by a folder with no record at all.
+            if c.render_path:
+                n_render += 1
+                continue
             # The folder holds no record, so the name is all there is. One file with it AND
             # one cut of this run wanting it, or nothing: a second cut wanting the same
             # index-free name is the Cutaway/Reverse pair again, on a folder with no ids.
@@ -7606,6 +8030,7 @@ def plan_resume(cuts: list, idx: dict, args) -> dict:
         adopt[id(c)] = name
     args.resume_plan = {c.cut_id: adopt[id(c)] for c in cuts if id(c) in adopt}
     return {"matched": len(adopt), "legacy": legacy, "drift": drift, "n_drift": n_drift,
+            "n_render": n_render,
             "ambiguous": len(ambiguous), "renumbered": renumbered,
             "legacy_stale": legacy_stale}
 
@@ -7627,6 +8052,104 @@ def move_aside(outdir: Path, name: str) -> Optional[str]:
     except OSError:
         return None
     return f"{ASIDE_DIR}/{dst.name}"
+
+
+# ⚠️ 3.93 AUDIT · ONE RUN AT A TIME IN ONE FOLDER. Nothing locked a delivery folder, and two
+# exports into one — the panel and a terminal or the browser GUI beside it — destroyed each
+# other: both encode a cut to the same hidden partial name and each unlinks the other's at
+# its start, os.replace() publishes the other run's half-written file, and set_aside_leftovers
+# then moves the other run's delivered clips aside "from an EARLIER run". MEASURED on 3.93,
+# 12 cuts, the second run started 0.2-1.0 s after the first: both exit 0, the folder left
+# with 0-6 of 12 clips, moov-less files published as written, and a manifest calling `ok`
+# clips that sit in _earlier_export/. So an export holds this file in the folder for as long
+# as it runs (take_run_lock), and a second run on THIS Mac is refused before it touches
+# anything. A lock left by a run that died (SIGKILL, a crash) is recognised by its process
+# being gone and is taken over. A lock written by ANOTHER Mac (a team drive syncs it) cannot
+# be checked from here, so it is said on a `!!` line and taken over rather than blocking the
+# folder for good — that case (two Macs on one Drive folder) was not measured.
+RUN_LOCK_NAME = ".xmlcut-running"
+_RUN_LOCKS: list = []
+
+
+def _run_is_alive(pid) -> bool:
+    """Is process `pid` on this Mac still running, and still one of this tool's?"""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    # A pid is reused: a dead run's number can belong to something else by now.
+    try:
+        r = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True,
+                           text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            return "xmlcut" in r.stdout
+        return r.returncode != 1
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
+def take_run_lock(outdir: Path) -> Optional[str]:
+    """Hold `outdir` for this run. None when held (or when no lock can be made at all, which
+    is not worth failing an export over); otherwise the sentence refusing the run."""
+    p = outdir / RUN_LOCK_NAME
+    me = {"pid": os.getpid(), "host": socket.gethostname(),
+          "started": time.strftime("%Y-%m-%d %H:%M:%S"), "tool": f"{NAME} {VERSION}"}
+    for _ in range(3):
+        try:
+            fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            try:
+                other = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                other = {}
+            if not isinstance(other, dict):
+                other = {}
+            host, pid = str(other.get("host") or ""), other.get("pid")
+            if host == me["host"] and pid != me["pid"] and _run_is_alive(pid):
+                return (f"another export is already writing into {outdir} (process {pid}, "
+                        f"started {other.get('started') or 'at an unknown time'}). Two runs "
+                        f"in one folder overwrite each other's clips, so this one did not "
+                        f"start — wait for that one to finish, or stop it, and export again")
+            if host and host != me["host"]:
+                say(f"  !! this folder was being exported into from another Mac ({host}, "
+                    f"started {other.get('started') or 'at an unknown time'}); that run "
+                    f"cannot be checked from here — if it is still going, the two will "
+                    f"overwrite each other's clips")
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return None
+            continue
+        except OSError:
+            return None
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(me, f)
+        except OSError:
+            pass
+        _RUN_LOCKS.append((p, me["pid"]))
+        return None
+    return None
+
+
+def release_run_locks() -> None:
+    """Remove this process's run locks — only ever one this process wrote."""
+    for p, pid in list(_RUN_LOCKS):
+        try:
+            other = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(other, dict) and other.get("pid") == pid:
+                p.unlink()
+        except (OSError, ValueError):
+            pass
+    _RUN_LOCKS.clear()
 
 
 def sweep_stale_partials(outdir: Path) -> list[str]:
@@ -7825,6 +8348,24 @@ class FolderTidy:
                      if plan.get(c.cut_id) != c.output_file}
         timeline_ids = set(getattr(args, "timeline_cut_ids", None) or ())
         on_timeline = timeline_ids | set(self.by_id)
+        # ⚠️ 3.93 AUDIT · A FILE THIS RUN IS ABOUT TO REPLACE UNDER ANOTHER NUMBER IS NOT A
+        # CLIP THE EDIT NO LONGER HAS. cut_id carries the timeline in/out and the absolute
+        # source path, so a ripple insert or delete ahead of a clip — or the same folder
+        # exported from another Mac, whose media sits under another /Users/… — gives every
+        # later clip a new id, and every one of their files used to be moved aside BEFORE the
+        # first encode as "no clip on this timeline matches it any more". MEASURED on 3.93: a
+        # head insert into a 10-clip folder, the panel's Cancel after the first new clip
+        # landed -> rc -15, the delivery holding 2 clips, 10 aside. Each of those files wears
+        # the index-free name (source range and source file, or timeline range in Timeline
+        # Render) of exactly one clip of this run, which writes it under a new number. Such
+        # a file now waits for that clip to LAND, like any renumbered file, and is then moved
+        # aside (rule 1 — the ledger cannot vouch for it under the new id, so it is never
+        # deleted); if that clip never lands it stays where it is. Only a name two clips of
+        # this run share, or none, is still moved up front.
+        _heirs: dict = {}
+        for c in self.by_id.values():
+            _heirs.setdefault(index_free(c.output_file), []).append(c)
+        heir_of = {k: v[0] for k, v in _heirs.items() if len(v) == 1}
         stale: list = []
         for name, e in sorted(dict(led.files).items()):
             if name in kept or not (out / name).is_file():
@@ -7847,6 +8388,10 @@ class FolderTidy:
                 # else: see the relink note below — overwritten, as an export always has
             elif cid in on_timeline or not timeline_ids:
                 continue              # a clip on the timeline this run did not select
+            elif heir_of.get(index_free(name)) is not None:
+                self._supersede(heir_of[index_free(name)], name, False,
+                                "the edit moved its clip to another number (or its media "
+                                "path changed); set aside once the new file landed")
             else:
                 stale.append((name, "no clip on this timeline matches it any more"))
         # A folder with no record: files matched by filename alone under an old number.
@@ -8004,7 +8549,9 @@ class FolderTidy:
                 continue
             _release_part(part)
             if self.led is not None:
-                self.led.record(cut.output_file, cut.cut_id, cut.output_bytes)
+                # The render's identity was read before this step (run_cut), never here.
+                self.led.record(cut.output_file, cut.cut_id, cut.output_bytes,
+                                render=getattr(cut, "_render_identity", None))
             self.landed.add(cut.cut_id)
             landed.append(cut)
         for i, (cut, _, _) in enumerate(members):
@@ -8107,6 +8654,201 @@ def tidy_before_encode(tl, args) -> "FolderTidy":
     except Exception as e:                                      # noqa: BLE001
         print(f"  (could not tidy this folder before cutting: {e})")
     return st
+
+
+# ⚠️ 3.93 AUDIT · THE FOLDER STEPS OF AN EXPORT, IN ONE PLACE FOR EVERY FRONT END. main() had
+# them inline, and xmlcut_gui.py — which imports this module and runs its own pool — called
+# run_cut and write_manifest directly and took none of them: no run lock (the GUI and the panel
+# could write one folder at once), no ledger, a Resume tick that kept nothing, no tidy (a clip
+# the edit no longer has kept its file under the delivery), and a failed clip left an earlier
+# run's file under its name. main() and the GUI now both go through these, in this order:
+#
+#   open_export_folder      the run lock, the folder's ledger, --resume's plan
+#   ready_folder_for_encode the stale-partial sweep and FolderTidy (before the first encode)
+#   settled_results         each finished cut once, parked and late landings included
+#   settle_folder_after_encode   earlier runs' files out from under names not produced
+#   mark_unstarted_after_stop    after a stop: what never started is failed, not pending
+#
+# and release_run_locks() when the run is over. `report` is where the few lines these print
+# themselves go (the console for main(); the GUI passes its own log). tests/check_folder.py
+# drives the GUI's export headless and fails if any of the steps is skipped.
+
+
+def open_export_folder(tl, args, report=None) -> Optional[str]:
+    """Hold `args.out` for this run and open its record: the steps every export takes before
+    anything in the folder is read or moved. None, or the sentence refusing the run."""
+    report = report or say
+    # One export at a time in one folder, held before anything in it is read or moved — see
+    # RUN_LOCK_NAME. A scan that only lists (the panel's reads go to its own work folder) and
+    # a preview write no clips and take no lock.
+    if not args.dry_run and (not args.manifest_only or getattr(args, "interactive", False)):
+        _busy = take_run_lock(args.out)
+        if _busy:
+            return _busy
+
+    # The folder's record of what this engine wrote into it. Opened for EVERY run, scans
+    # included, because a folder an older version wrote has only its manifest as a record,
+    # and this run is about to replace that manifest — see FolderLedger.open.
+    args.ledger = FolderLedger.open(args.out, args)
+    args.ledger.sequence = ledger_sequence({"name": tl.sequence_name,
+                                            "id": getattr(tl, "sequence_id", "")})
+    if args.ledger.seeded:
+        args.ledger.save()
+
+    if getattr(args, "resume", False):
+        args.resume_index = build_resume_index(args.out, args.ledger)
+        _ri = args.resume_index
+        _plan = plan_resume(tl.cuts, _ri, args)
+        args.resume_legacy_stale = _plan["legacy_stale"]
+        args.resume_renumbered = _plan["renumbered"]
+        # ⚠️ SETTINGS ARE JUDGED PER FILE, against the settings THAT FILE was made with.
+        # This used to be one comparison against the last manifest's settings block, which
+        # a --pick run, a scan or a killed run replaces or never writes (see LEDGER_NAME) —
+        # so a folder of mixed settings shipped under a manifest claiming one. Warned rather
+        # than refused: the panel lets someone re-export into the same folder at a different
+        # crf with the tick on, and a hard stop turns a working flow into a dead end.
+        # Re-cutting costs seconds; keeping the old pixels under the new settings' manifest
+        # is the outcome that cannot stand.
+        if _plan["n_drift"]:
+            _d = _plan["drift"]
+            _dtxt = "; ".join(_d[:4]) + (", …" if len(_d) > 4 else "")
+            tl.warnings.append(
+                f"--resume: {_plan['n_drift']} file(s) in this folder were made with "
+                f"different encode settings ({_dtxt}) — not kept, re-cut at this run's "
+                f"settings")
+        if _plan["legacy"] and _plan["matched"]:
+            tl.warnings.append(
+                f"--resume kept {_plan['matched']} file(s) matched by filename alone — this "
+                f"folder holds no record of the settings they were made with, so a change "
+                f"of crf, size, encoder or render sound since then cannot be seen. Untick "
+                f"'skip clips already there' to re-cut them")
+        # ⚠️ THE LINE COUNTS WHAT THE RUN WILL DO, NOT WHAT THE FOLDER LOOKS LIKE. It
+        # said `1 filename(s) ambiguous, re-cut` whenever two files shared an index-free
+        # name, even when both had been matched by id and nothing was re-cut — MEASURED on
+        # 3.88 in front of `Done: 0 written … 19 already there`. Every re-cut named here is
+        # one the plan decided on, and a count that silently shrinks reads as the tick
+        # having stopped working, so each kind is named with its reason.
+        _bad = int(_ri.get("failed") or 0)
+        report(f"  --resume: {_plan['matched']} clip(s) matched "
+               f"{'by filename' if _plan['legacy'] else 'by id'}, "
+               f"{_ri.get('files', 0)} file(s) already in the folder"
+               # "not finished or damaged": a row the last run marked failed is one; a file
+               # whose bytes no longer match its record — truncated, half-synced,
+               # part-restored — is the other, and the audit measured that one being adopted.
+               + (f", {_bad} not finished or damaged, re-cut" if _bad else "")
+               + (f", {_plan['n_drift']} made at different settings, re-cut"
+                  if _plan["n_drift"] else "")
+               # 3.93 audit: a clip from a render is kept only over the render it was made from.
+               + (f", {_plan['n_render']} whose render is not the one it was made from, re-cut"
+                  if _plan.get("n_render") else "")
+               + (f", {_plan['ambiguous']} filename(s) ambiguous, re-cut"
+                  if _plan["ambiguous"] else "")
+               + (f", {len(_plan['renumbered'])} whose number changed, re-cut under the new one"
+                  if _plan["renumbered"] else "")
+               + f" (matched by {_ri.get('how')})")
+    return None
+
+
+def ready_folder_for_encode(tl, args, report=print) -> None:
+    """The last folder steps before the first encode: a dead run's partials swept, and this
+    run's FolderTidy planned (sets args.tidy; None on a --dry-run)."""
+    args.tidy = None
+    if not args.dry_run:
+        _swept = sweep_stale_partials(args.out)
+        if _swept:
+            report(f"  removed {len(_swept)} half-written file(s) a stopped run left in this "
+                   f"folder: " + ", ".join(_swept[:4]) + (", …" if len(_swept) > 4 else ""))
+        # Before the first encode, and it moves ONLY the files of clips the edit no longer
+        # has; everything else waits for its clip to land — see FolderTidy.
+        args.tidy = tidy_before_encode(tl, args)
+
+
+def settled_results(futures, args):
+    """Each finished cut once, in the order it settled. A cut that had to wait
+    for another clip's old name (FolderTidy) is reported when it lands or is
+    refused, by the thread that settled it, rather than when its own encode ended."""
+    for fut in as_completed(futures):
+        if fut.cancelled():
+            continue
+        c = fut.result()
+        if args.tidy is None or c.cut_id not in args.tidy.parked_ids:
+            yield c
+        if args.tidy is not None:
+            yield from args.tidy.drain_late()
+    if args.tidy is not None:
+        args.tidy.flush_parked()
+        yield from args.tidy.drain_late()
+
+
+def settle_folder_after_encode(tl, args, report=print) -> None:
+    """After the pool, on a run that was not stopped: every earlier run's file moved out from
+    under a name this run did not produce, and the renumbered clips' outcomes said."""
+    if args.dry_run:
+        return
+    # Moved, noted in the ledger and said on its `!!` line in one step.
+    set_aside_leftovers(tl, args)
+    # ⚠️ SAID ON A `!!` LINE, BECAUSE THAT IS WHAT REACHES THE PANEL. runEngineExport
+    # keeps exactly two kinds of engine line for the editor to read — `++` and `!!` —
+    # and a warning printed any other way stays in the Advanced log. A folder that has
+    # just lost files from its delivery names is the one thing the editor must be told.
+    _deleted = list(args.tidy.deleted) if args.tidy is not None else []
+    if _deleted:
+        tl.warnings.append(
+            f"{len(_deleted)} clip(s) changed number since this folder was exported (the "
+            f"edit added or removed a clip before them): each was re-encoded under its new "
+            f"number, and the old-numbered file this tool had written for it was deleted: "
+            + ", ".join(f"{a} -> {b}" for a, b in _deleted[:6])
+            + (", …" if len(_deleted) > 6 else ""))
+        report(f"\n  !! {tl.warnings[-1]}")
+    # The files set aside were each said on a `!!` line the moment they moved (see
+    # FolderTidy); what is left to say is which renumbered clips did NOT land, so their
+    # earlier file is still under the old number — kept, never deleted, by rule 2.
+    _left = list(args.tidy.not_redone) if args.tidy is not None else []
+    if _left:
+        tl.warnings.append(
+            f"{len(_left)} clip(s) changed number but were not re-encoded this run, so "
+            f"the file each already had stays under its OLD number, untouched: "
+            + ", ".join(f"{n} ({c.status})" for n, c in _left[:6])
+            + (", …" if len(_left) > 6 else ""))
+        report(f"\n  !! {tl.warnings[-1]}")
+
+
+def mark_unstarted_after_stop(tl, args, how: str = "interrupted (Ctrl-C)",
+                              again: str = "Run the same command again with --resume to "
+                                           "finish",
+                              resume: str = "--resume", report=print) -> list:
+    """After a stop: every cut that never started is recorded as failed (not left pending),
+    and the delivery names still wearing an earlier run's file are named. Returns those cuts.
+    Nothing is moved aside on a stop — a stop that emptied the folder is the failure
+    FolderTidy exists to prevent."""
+    _uncut = [c for c in tl.cuts if c.status == "pending"]
+    for c in _uncut:
+        c.status = "failed"
+        c.error = (f"not cut — the run was {how} before this clip "
+                   f"started. {again}")
+    tl.warnings.append(
+        f"{how}: {len(_uncut)} of {len(tl.cuts)} clip(s) were never "
+        f"started and are recorded as failed; clips that were encoding when it came "
+        f"are failed or finished as ffmpeg left them. This is NOT a complete export")
+    # ⚠️ AND WHICH OF THEM STILL WEAR AN EARLIER RUN'S FILE. Nothing is moved aside on an
+    # interrupt — a stop that emptied the folder is the failure FolderTidy exists to
+    # prevent — so over an earlier export every clip this run did not finish keeps the
+    # old file under its delivery name, possibly at other settings. MEASURED in the 3.89
+    # merge review: crf 40 folder, Ctrl-C into a crf 18 re-export, 12 crf-40 files left
+    # under delivery names beside 7 new ones and no line naming any of them. This run
+    # writes through hidden partial names, so a delivery-named file for a clip it did
+    # not finish can only be an earlier run's.
+    _old = [c.output_file for c in tl.cuts
+            if c.status == "failed" and c.output_file and (args.out / c.output_file).is_file()]
+    if _old:
+        tl.warnings.append(
+            f"{len(_old)} clip(s) this run did not finish still hold an EARLIER run's file "
+            f"under their name "
+            f"— kept, not this run's, and possibly at other settings; {resume} re-cuts them: "
+            + ", ".join(_old[:6]) + (", …" if len(_old) > 6 else ""))
+    for _w in tl.warnings[-2 if _old else -1:]:
+        report(f"  !! {_w}")
+    return _uncut
 
 
 # ⚠️ WHAT A CANCEL HAS TO CLEAN UP, held where a signal handler can reach it. The panel's
@@ -8346,6 +9088,8 @@ def _stop_everything(signum) -> None:
         if _got_commit:
             _COMMIT_LOCK.release()
         raise KeyboardInterrupt
+    # The folder's run lock goes with the run (take_run_lock); a signal death runs no atexit.
+    release_run_locks()
     signal.signal(signum, signal.SIG_DFL)
     os.kill(os.getpid(), signum)
 
@@ -8860,6 +9604,10 @@ def _run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
     # hidden and swaps it in once that clip lands — see FolderTidy. The partial stays
     # registered with the stop handler until then, so a Cancel takes it away.
     _st = getattr(args, "tidy", None)
+    # The render this clip was made from, read NOW — before the folder step that records
+    # it, which holds the commit lock and must stay short (see render_identity).
+    if cut.status == "ok":
+        render_identity(cut)
     if cut.status == "ok" and _st is not None:
         _st.commit(cut, part_path, out_path)
         return cut
@@ -8883,7 +9631,8 @@ def _run_cut(cut: Cut, outdir: Path, args, seq_fps: float = 25.0) -> Cut:
     if cut.status == "ok":
         _led = getattr(args, "ledger", None)
         if _led is not None:
-            _led.record(cut.output_file, cut.cut_id, cut.output_bytes)
+            _led.record(cut.output_file, cut.cut_id, cut.output_bytes,
+                        render=getattr(cut, "_render_identity", None))
     return cut
 
 
@@ -9421,7 +10170,12 @@ def completeness(s: dict) -> str:
     # checks read it — and the delivery is appended to it.
     made = (n.get("ok", 0) or 0) + (n.get("skipped_existing", 0) or 0)
     short = ""
-    if made and made < kept:
+    # ⚠️ 3.93 AUDIT · DECIDED BY THE RUN'S STATE, NOT BY `made`. `if made and …` kept a scan's
+    # sentence bare (nothing is made in a scan) and, with it, the one export this suffix was
+    # added for: MEASURED on 3.93, every clip failed (or every render missing) -> `Done: 0
+    # written`, and the manifest, clips.csv and the panel all read "all 2 cuts on the
+    # timeline", word for word what a complete export says. A scan's state says it is one.
+    if s.get("state") == "cut" and made < kept:
         short = f" — {made} of {kept} produced a file"
     why = []
     if st["types_kept"]:
@@ -9567,8 +10321,19 @@ def write_manifest(tl: Timeline, outdir: Path, args) -> tuple[Path, Path, Path]:
     advisory, which is the opposite of the strays check that catches everything so it
     cannot fail a completed export. Callers turn it into their own kind of failure —
     main() into a one-line exit, the browser GUI into a message in its own log.
+
+    ⚠️ 3.93 AUDIT · IT NEVER CREATES THE FOLDER. This did `mkdir(parents=True)`, so a
+    destination moved, renamed or unmounted while the clips were being written was REBUILT
+    at the end of the run, holding only the cut list: MEASURED on 3.93, Output/ renamed
+    after the first clip landed -> `Done: 1 written, 23 failed`, exit 0, and
+    Output/ACT/v1.2/raw back in the product with a manifest calling `ok` a clip that sat in
+    the moved folder — the panel's "nothing creates Output/" broken for the length of the
+    run, and a Retry into the rebuilt folder then delivered a silently incomplete set. Every
+    caller has made the folder already (main() and the GUI both, before the first clip), so
+    a folder missing here can only have gone during the run; see write_manifest_or_exit.
     """
-    outdir.mkdir(parents=True, exist_ok=True)
+    if not outdir.is_dir():
+        raise FileNotFoundError(2, "the destination folder is no longer there", str(outdir))
     rows = [readable(c) for c in tl.cuts]
     for r in rows:
         r["filters"] = "; ".join(r["filters"])
@@ -9624,6 +10389,18 @@ def write_manifest_or_exit(tl: Timeline, outdir: Path, args) -> tuple[Path, Path
         return write_manifest(tl, outdir, args)
     except OSError as e:
         done = sum(1 for c in tl.cuts if getattr(c, "status", "") == "ok")
+        if not outdir.is_dir():
+            # The folder went away during the run (see write_manifest). Said on a `!!` line,
+            # the prefix the panel shows the editor, and nothing is recreated anywhere.
+            say(f"\n  !! The destination {outdir} is no longer there — it was moved, renamed "
+                f"or unmounted while this run was writing into it. Nothing was recreated in "
+                f"its place and no cut list was written"
+                + (f"; the {done} clip(s) this run finished went with the folder."
+                   if done else "."))
+            raise SystemExit(
+                f"error: the destination {outdir} disappeared during the run, so this export "
+                f"has no cut list and is not a finished delivery. Put the folder back (or "
+                f"choose it again) and export again.")
         # The three files are written in turn, so an error partway leaves some of them
         # absent and any earlier run's copies looking current. Naming that is cheaper than
         # deleting files that may be the only record of anything.
@@ -9967,34 +10744,44 @@ def main():
     args = ap.parse_args()
 
     if args.list_presets_json:
-        print(json.dumps({"presets": load_presets(), "path": str(presets_path())}))
+        # 3.93 audit: an unreadable presets.json is said, not shown as "no presets".
+        _pr, _bad = load_presets_checked()
+        print(json.dumps({"presets": _pr, "path": str(presets_path()),
+                          **({"error": _bad} if _bad else {})}))
         return
 
     if args.delete_preset:
-        saved = load_presets()
+        saved, _bad = load_presets_checked()
         removed = saved.pop(args.delete_preset, None) is not None
         if removed:
-            presets_path().parent.mkdir(parents=True, exist_ok=True)
-            presets_path().write_text(json.dumps(saved, indent=2, sort_keys=True),
-                                      encoding="utf-8")
+            _write_presets(saved)
         if args.presets_only:
             print(json.dumps({"ok": removed, "deleted": args.delete_preset,
-                              "presets": saved}))
+                              "presets": saved, **({"error": _bad} if _bad else {})}))
             return
-        print(("removed" if removed else "no such preset:") + f" {args.delete_preset}")
+        print(("removed" if removed else "no such preset:") + f" {args.delete_preset}"
+              + (f" ({_bad})" if _bad else ""))
 
     # Saving a preset does not need a timeline. Without this, making one from the panel
     # would mean reading a sequence first, which is a strange thing to have to do to
     # record four numbers.
     if args.presets_only:
         if args.save_preset:
-            save_preset(args.save_preset, preset_from_args(args))
+            try:
+                save_preset(args.save_preset, preset_from_args(args))
+            except PresetsUnreadable as e:
+                print(json.dumps({"ok": False, "saved": None, "error": str(e),
+                                  "presets": {}}))
+                return 1
         print(json.dumps({"ok": True, "saved": args.save_preset,
                           "presets": load_presets()}))
         return
 
     if args.list_presets:
-        saved = load_presets()
+        saved, _bad = load_presets_checked()
+        if _bad:
+            print(f"The presets file cannot be read: {_bad}")
+            return 1
         if not saved:
             print(f"No export presets yet. Make one with --save-preset NAME.")
             print(f"They live in {presets_path()}")
@@ -10010,7 +10797,10 @@ def main():
     # always wins over the stored value — otherwise a preset would silently override the
     # thing you just typed.
     if args.export_preset:
-        saved = load_presets()
+        saved, _bad = load_presets_checked()
+        if _bad:
+            sys.exit(f"error: the export presets cannot be read — {_bad} — so "
+                     f"{args.export_preset!r} cannot be loaded.")
         if args.export_preset not in saved:
             sys.exit(f"error: no export preset named {args.export_preset!r}. "
                      f"Try --list-presets.")
@@ -10962,7 +11752,8 @@ def main():
         if len(_ppaths) > 1:
             with ThreadPoolExecutor(max_workers=JOBS) as _pex:
                 for _pp, _pd in zip(_ppaths,
-                                    _pex.map(lambda q: probe(q, _ptimeout), _ppaths)):
+                                    _pex.map(lambda q: probe_source(q, _ptimeout),
+                                             _ppaths)):
                     cache[_pp] = _pd
 
         # Unchanged, and deliberately so: every cache entry it needs is already there, and
@@ -11347,63 +12138,14 @@ def main():
         sys.exit(f"error: cannot write to --out {args.out} ({_e}). Pick a folder you can "
                  f"write to, or fix its permissions.")
 
-    # The folder's record of what this engine wrote into it. Opened for EVERY run, scans
-    # included, because a folder an older version wrote has only its manifest as a record,
-    # and this run is about to replace that manifest — see FolderLedger.open.
-    args.ledger = FolderLedger.open(args.out, args)
-    args.ledger.sequence = ledger_sequence({"name": tl.sequence_name,
-                                            "id": getattr(tl, "sequence_id", "")})
-    if args.ledger.seeded:
-        args.ledger.save()
-
-    if getattr(args, "resume", False):
-        args.resume_index = build_resume_index(args.out, args.ledger)
-        _ri = args.resume_index
-        _plan = plan_resume(tl.cuts, _ri, args)
-        args.resume_legacy_stale = _plan["legacy_stale"]
-        args.resume_renumbered = _plan["renumbered"]
-        # ⚠️ SETTINGS ARE JUDGED PER FILE, against the settings THAT FILE was made with.
-        # This used to be one comparison against the last manifest's settings block, which
-        # a --pick run, a scan or a killed run replaces or never writes (see LEDGER_NAME) —
-        # so a folder of mixed settings shipped under a manifest claiming one. Warned rather
-        # than refused: the panel lets someone re-export into the same folder at a different
-        # crf with the tick on, and a hard stop turns a working flow into a dead end.
-        # Re-cutting costs seconds; keeping the old pixels under the new settings' manifest
-        # is the outcome that cannot stand.
-        if _plan["n_drift"]:
-            _d = _plan["drift"]
-            _dtxt = "; ".join(_d[:4]) + (", …" if len(_d) > 4 else "")
-            tl.warnings.append(
-                f"--resume: {_plan['n_drift']} file(s) in this folder were made with "
-                f"different encode settings ({_dtxt}) — not kept, re-cut at this run's "
-                f"settings")
-        if _plan["legacy"] and _plan["matched"]:
-            tl.warnings.append(
-                f"--resume kept {_plan['matched']} file(s) matched by filename alone — this "
-                f"folder holds no record of the settings they were made with, so a change "
-                f"of crf, size, encoder or render sound since then cannot be seen. Untick "
-                f"'skip clips already there' to re-cut them")
-        # ⚠️ THE LINE COUNTS WHAT THE RUN WILL DO, NOT WHAT THE FOLDER LOOKS LIKE. It
-        # said `1 filename(s) ambiguous, re-cut` whenever two files shared an index-free
-        # name, even when both had been matched by id and nothing was re-cut — MEASURED on
-        # 3.88 in front of `Done: 0 written … 19 already there`. Every re-cut named here is
-        # one the plan decided on, and a count that silently shrinks reads as the tick
-        # having stopped working, so each kind is named with its reason.
-        _bad = int(_ri.get("failed") or 0)
-        say(f"  --resume: {_plan['matched']} clip(s) matched "
-            f"{'by filename' if _plan['legacy'] else 'by id'}, "
-            f"{_ri.get('files', 0)} file(s) already in the folder"
-            # "not finished or damaged": a row the last run marked failed is one; a file
-            # whose bytes no longer match its record — truncated, half-synced,
-            # part-restored — is the other, and the audit measured that one being adopted.
-            + (f", {_bad} not finished or damaged, re-cut" if _bad else "")
-            + (f", {_plan['n_drift']} made at different settings, re-cut"
-               if _plan["n_drift"] else "")
-            + (f", {_plan['ambiguous']} filename(s) ambiguous, re-cut"
-               if _plan["ambiguous"] else "")
-            + (f", {len(_plan['renumbered'])} whose number changed, re-cut under the new one"
-               if _plan["renumbered"] else "")
-            + f" (matched by {_ri.get('how')})")
+    # ⚠️ 3.93 AUDIT · THE LOCK, THE LEDGER AND --resume's PLAN LIVE IN open_export_folder(),
+    # WHICH THE BROWSER GUI CALLS TOO. They were written inline here, so xmlcut_gui.py — which
+    # runs its own pool — took none of them: no lock, no ledger, a Resume that kept nothing.
+    # Registered before the lock is taken so a run that dies between the two still lets go.
+    atexit.register(release_run_locks)
+    _busy = open_export_folder(tl, args)
+    if _busy:
+        sys.exit(f"error: {_busy}.")
 
     # The tail of tl.warnings: everything the probe and resume passes found after the
     # header was printed. Same markers, same list — this is a second flush, not a second
@@ -11438,20 +12180,17 @@ def main():
         print()
 
     if args.save_preset:
-        save_preset(args.save_preset, preset_from_args(args))
-        print(f"  saved export preset {args.save_preset!r} to {presets_path()}")
+        # The export is the job here: a presets file that cannot be read costs the SAVE,
+        # said on a `!!` line, and never the export — nor the presets in that file.
+        try:
+            save_preset(args.save_preset, preset_from_args(args))
+            print(f"  saved export preset {args.save_preset!r} to {presets_path()}")
+        except PresetsUnreadable as e:
+            print(f"  !! export preset {args.save_preset!r} NOT saved: {e}")
 
     # A Cancel stops the encodes and takes their partials with it; see _stop_on_signal.
     install_stop_handler()
-    args.tidy = None
-    if not args.dry_run:
-        _swept = sweep_stale_partials(args.out)
-        if _swept:
-            print(f"  removed {len(_swept)} half-written file(s) a stopped run left in this "
-                  f"folder: " + ", ".join(_swept[:4]) + (", …" if len(_swept) > 4 else ""))
-        # Before the first encode, and it moves ONLY the files of clips the edit no longer
-        # has; everything else waits for its clip to land — see FolderTidy.
-        args.tidy = tidy_before_encode(tl, args)
+    ready_folder_for_encode(tl, args)
 
     print(f"\nCutting with {JOBS} parallel job(s) ...")
     done = 0
@@ -11481,21 +12220,7 @@ def main():
         # Where the stop handler can cancel what has not started yet.
         with _INFLIGHT_LOCK:
             _INFLIGHT_FUTURES[:] = list(futures)
-        def _results():
-            """Each finished cut once, in the order it settled. A cut that had to wait
-            for another clip's old name (FolderTidy) is reported when it lands or is
-            refused, by the thread that settled it, rather than when its own encode ended."""
-            for fut in as_completed(futures):
-                c = fut.result()
-                if args.tidy is None or c.cut_id not in args.tidy.parked_ids:
-                    yield c
-                if args.tidy is not None:
-                    yield from args.tidy.drain_late()
-            if args.tidy is not None:
-                args.tidy.flush_parked()
-                yield from args.tidy.drain_late()
-
-        for c in _results():
+        for c in settled_results(futures, args):
             done += 1
             # ⚠️ no_render AND render_mismatch WERE IN NO MAP AND NO TOTAL. run_cut refuses
             # a cut with "no_render" (Premiere never produced the range) or
@@ -11565,6 +12290,7 @@ def main():
             _COMMIT_LOCK.acquire(timeout=1.0)
             print("  !! stopped without waiting. No manifest was written; run the same "
                   "command again with --resume to finish.", flush=True)
+            release_run_locks()
             os._exit(130)
     finally:
         ex.shutdown(wait=True)
@@ -11584,33 +12310,7 @@ def main():
         # EARLIER run under its name — possibly at other settings, which this run's manifest
         # would no longer record — and adopting that by filename is the silent-bad-data
         # direction. Re-encoding it costs seconds.
-        _uncut = [c for c in tl.cuts if c.status == "pending"]
-        for c in _uncut:
-            c.status = "failed"
-            c.error = ("not cut — the run was interrupted (Ctrl-C) before this clip "
-                       "started. Run the same command again with --resume to finish")
-        tl.warnings.append(
-            f"interrupted (Ctrl-C): {len(_uncut)} of {len(tl.cuts)} clip(s) were never "
-            f"started and are recorded as failed; clips that were encoding when it came "
-            f"are failed or finished as ffmpeg left them. This is NOT a complete export")
-        # ⚠️ AND WHICH OF THEM STILL WEAR AN EARLIER RUN'S FILE. Nothing is moved aside on an
-        # interrupt — a stop that emptied the folder is the failure FolderTidy exists to
-        # prevent — so over an earlier export every clip this run did not finish keeps the
-        # old file under its delivery name, possibly at other settings. MEASURED in the 3.89
-        # merge review: crf 40 folder, Ctrl-C into a crf 18 re-export, 12 crf-40 files left
-        # under delivery names beside 7 new ones and no line naming any of them. This run
-        # writes through hidden partial names, so a delivery-named file for a clip it did
-        # not finish can only be an earlier run's.
-        _old = [c.output_file for c in tl.cuts
-                if c.status == "failed" and c.output_file and (args.out / c.output_file).is_file()]
-        if _old:
-            tl.warnings.append(
-                f"{len(_old)} clip(s) this run did not finish still hold an EARLIER run's file "
-                f"under their name "
-                f"— kept, not this run's, and possibly at other settings; --resume re-cuts them: "
-                + ", ".join(_old[:6]) + (", …" if len(_old) > 6 else ""))
-        for _w in tl.warnings[-2 if _old else -1:]:
-            print(f"  !! {_w}")
+        _uncut = mark_unstarted_after_stop(tl, args)
         # No whole-timeline audio: that is another ffmpeg run the interrupt asked not to
         # have. The manifest is still written, because it is what lets --resume keep the
         # clips that did finish by id rather than by filename.
@@ -11628,33 +12328,7 @@ def main():
     # See set_aside_leftovers. Said by name, and on screen as well as in the manifest,
     # because the editor's next move depends on it: those files are no longer where the
     # delivery is, and the ones worth keeping have to be put back by hand.
-    if not args.dry_run:
-        # Moved, noted in the ledger and said on its `!!` line in one step.
-        set_aside_leftovers(tl, args)
-        # ⚠️ SAID ON A `!!` LINE, BECAUSE THAT IS WHAT REACHES THE PANEL. runEngineExport
-        # keeps exactly two kinds of engine line for the editor to read — `++` and `!!` —
-        # and a warning printed any other way stays in the Advanced log. A folder that has
-        # just lost files from its delivery names is the one thing the editor must be told.
-        _deleted = list(args.tidy.deleted) if args.tidy is not None else []
-        if _deleted:
-            tl.warnings.append(
-                f"{len(_deleted)} clip(s) changed number since this folder was exported (the "
-                f"edit added or removed a clip before them): each was re-encoded under its new "
-                f"number, and the old-numbered file this tool had written for it was deleted: "
-                + ", ".join(f"{a} -> {b}" for a, b in _deleted[:6])
-                + (", …" if len(_deleted) > 6 else ""))
-            print(f"\n  !! {tl.warnings[-1]}")
-        # The files set aside were each said on a `!!` line the moment they moved (see
-        # FolderTidy); what is left to say is which renumbered clips did NOT land, so their
-        # earlier file is still under the old number — kept, never deleted, by rule 2.
-        _left = list(args.tidy.not_redone) if args.tidy is not None else []
-        if _left:
-            tl.warnings.append(
-                f"{len(_left)} clip(s) changed number but were not re-encoded this run, so "
-                f"the file each already had stays under its OLD number, untouched: "
-                + ", ".join(f"{n} ({c.status})" for n, c in _left[:6])
-                + (", …" if len(_left) > 6 else ""))
-            print(f"\n  !! {tl.warnings[-1]}")
+    settle_folder_after_encode(tl, args)
 
     # The single whole-timeline mp3, after the cuts and before the manifest that records it.
     if getattr(args, "audio_per_track", False):

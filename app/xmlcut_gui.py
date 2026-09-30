@@ -21,9 +21,14 @@ file's contents but never its path, and xmlcut needs paths. The page asks the se
 the server asks `osascript`, the native dialog appears. There is a plain text field
 as a fallback wherever that isn't available.
 
-Like the tkinter version, this imports xmlcut and calls Timeline / run_cut /
-write_manifest directly. It holds no timing logic of its own and never shells out to
-the CLI, so the two cannot drift apart.
+Like the tkinter version, this imports xmlcut and calls its functions directly. It holds
+no timing logic of its own and never shells out to the CLI, so the two cannot drift apart —
+and since the 3.93 audit its export takes the SAME folder steps as the CLI's, through the
+engine's own functions (open_export_folder, ready_folder_for_encode, settled_results,
+settle_folder_after_encode, write_manifest_or_exit, release_run_locks): the run lock, the
+folder's ledger, Resume's plan, the tidy and the set-aside. It used to call run_cut and
+write_manifest with none of them. tests/check_folder.py runs do_cut headless and fails if
+any of them is skipped.
 """
 
 from __future__ import annotations
@@ -82,6 +87,9 @@ class Job:
         self.running = False
         self.finished = False
         self.cancel = threading.Event()
+        # The export's queued cuts, so a Cancel can take back the ones not started yet —
+        # every cut is submitted at once, so checking the flag while submitting did nothing.
+        self.futures: list = []
         self.manifest: str = ""
         # Source extensions the user has switched OFF. Held here rather than in the
         # browser so the table, the summary and the cut cannot disagree about what is
@@ -324,6 +332,11 @@ def do_scan(payload: dict) -> dict:
     if isinstance(seq, str) and seq.strip().isascii() and seq.strip().isdigit():
         seq = int(seq.strip())
     tl = xmlcut.Timeline(xml, remaps, seq if seq not in ("", None) else None)
+    # Every clip the edit still has, taken before the Tracks / Min frames / File types filters
+    # narrow the list — what the folder's tidy needs to tell a file of a clip this run merely
+    # did not select (left alone) from one of a clip the edit no longer has (moved aside).
+    # main() takes the same set at the same point; see FolderTidy.plan.
+    args.timeline_cut_ids = {c.cut_id for c in tl.cuts if c.cut_id}
     tl.cuts = [c for c in tl.cuts if c.track_type == args.tracks]
     tl.cuts = [c for c in tl.cuts if c.duration_frames >= args.min_frames]
     for i, c in enumerate(tl.cuts, start=1):
@@ -395,49 +408,106 @@ def do_cut(payload: dict) -> dict:
 
     def work():
         try:
-            outdir.mkdir(parents=True, exist_ok=True)
-            if JOB.excluded:
-                JOB.say(f"  skipping types: {', '.join('.' + e for e in sorted(JOB.excluded))}")
-            JOB.say(f"Cutting {len(ready)} clip(s), {xmlcut.JOBS} parallel job(s), "
-                    f"speed={args.speed} …")
-            with ThreadPoolExecutor(max_workers=xmlcut.JOBS) as ex:
-                futures = []
-                for c in tl.cuts:
-                    if JOB.cancel.is_set():
-                        break
-                    futures.append(ex.submit(xmlcut.run_cut, c, outdir,
-                                             args, tl.sequence_fps))
-                for fut in futures:
-                    c = fut.result()
-                    with JOB.lock:
-                        JOB.progress += 1
-                    if c.error:
-                        JOB.say(f"  {c.status.upper()} {c.clip_name}: "
-                                f"{c.error.splitlines()[0][:150]}")
-            args.types_excluded = sorted(JOB.excluded) or None
-            csv_p, _, sheet_p = xmlcut.write_manifest(tl, outdir, args)
-            tally = collections.Counter(c.status for c in tl.cuts)
-            if JOB.cancel.is_set():
-                JOB.say("Cancelled. The manifest describes what was written.")
-            extra = "".join(
-                f", {tally[k]} {label}" for k, label in
-                (("skipped_existing", "already there"), ("no_audio", "silent source"))
-                if tally[k])
-            JOB.say(f"Done: {tally['ok']} written, {tally['failed']} failed, "
-                    f"{tally['missing_source']} missing source, "
-                    f"{tally['unsupported']} unsupported{extra}.")
-            JOB.say(f"Manifest: {csv_p}")
-            JOB.say(f"Sheet   : {sheet_p}  (file, clip name, timecode, original path)")
-            with JOB.lock:
-                JOB.manifest = str(csv_p)
+            export_to_folder(tl, args, outdir, ready)
+        except SystemExit as e:
+            # write_manifest_or_exit's one-line refusals (a destination that went away, a cut
+            # list that could not be written): not an Exception, so said here, not lost.
+            JOB.say(f"!! {e}")
         except Exception:
             JOB.say("!! " + traceback.format_exc(limit=3))
         finally:
+            # The folder's run lock goes with the run, however it ended.
+            xmlcut.release_run_locks()
             with JOB.lock:
                 JOB.running, JOB.finished = False, True
+                JOB.futures = []
 
     threading.Thread(target=work, daemon=True).start()
     return {"started": True}
+
+
+def export_to_folder(tl, args, outdir: Path, ready: list) -> None:
+    """The export itself, through the engine's own folder steps — the same ones main() takes.
+
+    ⚠️ 3.93 AUDIT · THIS USED TO BE run_cut IN A POOL AND write_manifest AT THE END, and
+    nothing else: no run lock, so this page and the panel (or a terminal) could write one
+    folder at once and destroy each other's clips; no ledger, so the Resume tick kept NOTHING
+    (it reads the plan the ledger makes) and the next panel export could not tell whose clips
+    these were; no tidy, so a clip the edit no longer has kept its file under a delivery name;
+    and a failed or missing clip left an earlier run's file under its name looking current.
+    Run headless (never the page) by tests/check_folder.py.
+    """
+    args.out = outdir
+    said = len(tl.warnings)
+    # A second Cut from the same scan starts every clip over: what it reports, and what a
+    # Cancel records as never started, must be this run's and not the last one's.
+    for c in tl.cuts:
+        c.status, c.error, c.output_bytes, c.stale_delivery = "pending", "", 0, False
+
+    def flush_warnings():
+        # The engine's `!!` lines go to the terminal this server runs in; the page shows the
+        # ones that land in tl.warnings, which is where every folder change is recorded.
+        nonlocal said
+        for w in tl.warnings[said:]:
+            JOB.say(("++ " if xmlcut.is_advisory_warning(w) else "!! ") + w)
+        said = len(tl.warnings)
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    busy = xmlcut.open_export_folder(tl, args, report=lambda s: JOB.say(s.strip()))
+    if busy:
+        JOB.say(f"!! Not started: {busy}.")
+        return
+    xmlcut.ready_folder_for_encode(tl, args, report=lambda s: JOB.say(s.strip()))
+    flush_warnings()
+    if JOB.excluded:
+        JOB.say(f"  skipping types: {', '.join('.' + e for e in sorted(JOB.excluded))}")
+    JOB.say(f"Cutting {len(ready)} clip(s), {xmlcut.JOBS} parallel job(s), "
+            f"speed={args.speed} …")
+    ex = ThreadPoolExecutor(max_workers=xmlcut.JOBS)
+    try:
+        futures = {ex.submit(xmlcut.run_cut, c, outdir, args, tl.sequence_fps): c
+                   for c in tl.cuts}
+        with JOB.lock:
+            JOB.futures = list(futures)
+        if JOB.cancel.is_set():                  # pressed while the folder was being read
+            for f in futures:
+                f.cancel()
+        for c in xmlcut.settled_results(futures, args):
+            with JOB.lock:
+                JOB.progress += 1
+            if c.error:
+                JOB.say(f"  {c.status.upper()} {c.clip_name}: "
+                        f"{c.error.splitlines()[0][:150]}")
+            flush_warnings()
+    finally:
+        ex.shutdown(wait=True)
+    cancelled = JOB.cancel.is_set()
+    if cancelled:
+        # As main() does after a Ctrl-C: what never started is failed (so the next Resume
+        # re-cuts it), and nothing is moved aside on a stop.
+        xmlcut.mark_unstarted_after_stop(
+            tl, args, how="cancelled", again="Tick Resume and cut again to finish",
+            resume="Resume", report=lambda s: None)
+    else:
+        xmlcut.settle_folder_after_encode(tl, args, report=lambda s: None)
+    flush_warnings()
+    args.types_excluded = sorted(JOB.excluded) or None
+    csv_p, _, sheet_p = xmlcut.write_manifest_or_exit(tl, outdir, args)
+    tally = collections.Counter(c.status for c in tl.cuts)
+    if cancelled:
+        JOB.say("Cancelled. The manifest describes what was written.")
+    extra = "".join(
+        f", {tally[k]} {label}" for k, label in
+        (("skipped_existing", "already there"), ("no_audio", "silent source"),
+         ("no_render", "no render"), ("render_mismatch", "render not the range"))
+        if tally[k])
+    JOB.say(f"Done: {tally['ok']} written, {tally['failed']} failed, "
+            f"{tally['missing_source']} missing source, "
+            f"{tally['unsupported']} unsupported{extra}.")
+    JOB.say(f"Manifest: {csv_p}")
+    JOB.say(f"Sheet   : {sheet_p}  (file, clip name, timecode, original path)")
+    with JOB.lock:
+        JOB.manifest = str(csv_p)
 
 
 # --------------------------------------------------------------------------
@@ -530,6 +600,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json(JOB.snapshot())
             if path == "/api/cancel":
                 JOB.cancel.set()
+                with JOB.lock:
+                    queued = list(JOB.futures)
+                for f in queued:                   # the ones not started yet never start
+                    f.cancel()
                 JOB.say("Cancelling — running ffmpeg jobs will finish, no new ones start.")
                 return self._json({"ok": True})
             if path == "/api/reveal":
@@ -760,9 +834,10 @@ PAGE = r"""<!doctype html>
         <select id="tracks"><option>video</option><option>audio</option>
         <option>all</option></select></div>
       <div class="opt chk"><input type="checkbox" id="resume">
-        <label for="resume">Resume<span class="tip" data-tip="Skip any clip
-        whose file is already in the output folder and non-empty. Use it to pick a long run back
-        up after a cancel or a crash instead of re-encoding everything."></span></label></div>
+        <label for="resume">Resume<span class="tip" data-tip="Skip any clip this tool
+        already wrote into the output folder for the same clip, at the same settings, under the
+        name it has now (the folder's own record says so). Use it to pick a long run back up
+        after a cancel or a crash instead of re-encoding everything."></span></label></div>
     </div>
     <div class="hint">Hover any <b>?</b> for what it does. Encoding is fixed and not a
       choice: <b>x264 crf 0</b>, verified bit-exact against the decoded source, at the

@@ -44,7 +44,7 @@
                "sizeest", "savepreset", "delpreset", "crfread", "sweetcrf",
                "crfblock", "cap", "capnote",
                "rail", "railmsgs", "nextline", "step1", "step1body", "readagain",
-               "remeasure", "vcodec",
+               "remeasure", "vcodec", "encfield",
                "scale", "scaleread",
                "onlyproblab",
                "actionbar", "barready", "retry", "audiosel",
@@ -65,8 +65,10 @@
                 * array. checkIds() in tests/panel_dom.js reads the ids straight out of this
                 * literal by scanning for quoted words, so anything quoted in a comment here
                 * becomes a phantom id and the drift check fails on it. Both mistakes were
-                * made writing this comment. */
-               "modesrc", "modeseq", "vtrack", "vtrackfield",
+                * made writing this comment.
+                * 3.93 · a third button, Both, and the two small captions that say which
+                * folder the type chips and the Picture frame govern while it is lit. */
+               "modesrc", "modeseq", "modeboth", "typefor", "trackfor", "vtrack", "vtrackfield",
                "vinclude",
                /* The four framed groups that carry a caption, and the fold over the four
                 * settings that have a correct default. */
@@ -90,6 +92,9 @@
          * the destination the box last showed as ready — see doExport's destMoved(). */
         outPickedUnread: "",
         shownDir: "",
+        /* 3.93 · what a Both box showed as ready, per half — {source: raw/, render: edited/} —
+         * since a Both destination has no one folder (outDir() is ""). null for anything else. */
+        shownPair: null,
         /* 3.90 · the Output/ACT this export is about to create ("" when it already exists),
          * and whether the run that just ended did create it. See settleAct(). */
         actWanted: "",
@@ -107,6 +112,9 @@
          * different visual languages, and none of them keeping your ticks or the type
          * colours. One list with a state per row replaces all of it. */
         rowState: {},
+        /* 3.93 audit (2) · the folder a single-mode run's rowState is of (jobsReset): the rows
+         * are drawn only while Export would write there — see rowsHere(). */
+        rowsFor: "",
         /* An EXPORT is running. Kept apart from `busy`, which a scan also sets: a scan
          * deliberately leaves the settings live, because it records the settings it ran at
          * and the panel reports the difference as stale. A run cannot do that — the flags
@@ -132,6 +140,11 @@
          * and comes back without a parse step that could half-fail. */
         audioCutWant: "",
         audioHearWant: null,       // null = every audio track is heard, as Premiere renders it
+        // 3.93 audit (2) · the project and timeline audioHearWant was taken for (hearSig), the
+        // flat value an earlier build remembered (taken up once), and what taking it up said.
+        audioHearSig: "",
+        audioHearLegacy: null,
+        audioHearNote: "",
         /* WHERE A CROSS-DISSOLVE IS CUT. true = --transitions split, and it is the DEFAULT:
          * every report about the extra frame at head and tail has been a request for it, and
          * the engine has carried the flag since before the panel had any way to send it.
@@ -167,8 +180,48 @@
          * ranges Premiere rendered from the timeline, with the effects already in them.
          * Held here as well as on the select because renderVideoTracks() rebuilds the
          * track menu on every read and the choice has to survive that — the same reason
-         * audioWant is not read off the select either. */
+         * audioWant is not read off the select either.
+         *
+         * 3.93 · OR "both": one press exports the Source half into <version>/raw/ and then
+         * the Timeline half into <version>/edited/ (the product owner, 29 Sep). This is what
+         * the LIT BUTTON says, always; the half a Both export is running is state.half, and
+         * modeNow() is the one question "which mode is this computation for". */
         cutFrom: "source",
+        /* 3.93 · THE HALF OF A BOTH EXPORT THAT IS RUNNING NOW — "source" or "render" — or "",
+         * which it is at every other moment, and always in Source Render and Timeline Render.
+         * Set for the whole of a half (its render, its engine, its report) and around the
+         * synchronous computations that ask about one half; see modeNow(). */
+        half: "",
+        /* 3.93 · Both: the Timeline Render READ's cut list, the one the edited/ half is cut
+         * from. state.clips stays the Source list the table shows. They are two lists because
+         * the engine answers differently in the two modes — measured on the fixture: 21 rows
+         * in the Source read, 19 in the Timeline one (the nest is ONE cut there and three
+         * here), the .aep cuttable only there, and the numbers after it one apart — so the
+         * edited/ half could not be approximated from the Source list. See scanClips(). */
+        editClips: [],
+        // …and whether editClips belongs to the read state.clips came from (a Both pair).
+        editRead: false,
+        /* 3.93 audit · the mode the list on screen was READ in ("source", "render", "both"; ""
+         * before any read). A list is the answer to one mode's read — the nest one cut or three,
+         * the .aep cuttable or not, the numbers — so an export is refused while it is another
+         * mode's (doExport), and a read that lands under another lit mode is read again. */
+        clipsMode: "",
+        // The Timeline read's own cross-dissolve accounting — the split happens only there.
+        editOverlap: { pairs: 0, frames: 0, split: 0 },
+        /* 3.93 · THE BOTH EXPORT IN PROGRESS, from the press that started it to its end:
+         * {halves, i, step, retry, results, cancelled, actMade}. null otherwise. */
+        chain: null,
+        /* 3.93 · the Both report on screen: each half's outcome, its rows, its folder. null
+         * for a single-mode report — see chainEnd() and retryHere(). */
+        bothReport: null,
+        // 3.93 · each half's own row states, while a Both report or export is the one shown.
+        rowHalves: null,
+        // 3.93 · a Retry pressed on a Both report: each half's own failed keys.
+        retryBoth: null,
+        // 3.93 · what the run that just ended did ({built, code}) and its report's chips, kept
+        // for the Both chain, which puts two runs' reports together (halfResult, chainEnd).
+        lastRun: null,
+        lastPills: [],
         // The MASTER track: the one whose clips become files.
         vtrackWant: "",
         /* Which tracks are IN THE PICTURE, as "1,3". Separate from the master because they
@@ -196,6 +249,8 @@
         // The render phase's own progress, read off a file Premiere writes as it goes:
         // {done, total, current, failed}. Null when no render phase is running.
         renderProg: null,
+        // 3.93 audit · the folder Premiere is rendering into while a render runs ("" otherwise).
+        renderingDir: "",
         // How many cuts the last render phase failed to produce, off its manifest. Decides
         // whether the render scratch is kept for a retry — see cleanRenders().
         rendersMissing: 0,
@@ -283,6 +338,19 @@
         /* 3.90 · the sentence for "same sequence, but renamed to another version since Read"
          * ("" when it was not). See renamedAway(). */
         seqRenamed: "",
+        /* 3.93 audit · the open sequence this export's own check let through, {id, fp, name} —
+         * safe (the read's, same edit) or a "yes" to the modal — and null when the check went
+         * unanswered. renderCuts() is told to render only it (expectSeq/expectFp, the read's
+         * when null), and what its reply names is held to it (renderThenExport).
+         * `seqLate`: that check answered after its wait was given up, and unsafe. */
+        seqCleared: null,
+        seqLate: false,
+        /* 3.93 audit · the id and fingerprint the last check found open, and what a "yes" to the
+         * press's modal was given for ({id, fp, name}, null until one; cleared at each press) —
+         * so Both's Timeline half, asked again, can tell the state he said yes to from a new one. */
+        seqOpenId: "",
+        seqOpenFp: "",
+        seqConsent: null,
         /* CANCEL WAS PRESSED for the run that is going. Read by the render phase to decide
          * whether to hand over to the encode phase at all, and by the close handler so a
          * stopped run is reported as stopped rather than as finished. Cleared when a run
@@ -428,16 +496,28 @@
      * run's report read from a folder it never wrote, report/ made there, and the clash count
      * taken of the wrong clips. The Product menu is locked for the same reason: a pick moves
      * outDir() to another product. */
+    /* 3.93 · Both is locked with the other two, for the same reason: pressed mid-run it would
+     * move outDir() under the running engine. */
     var LOCK_WHILE_RUNNING = ["preset", "savepreset", "delpreset", "vcodec", "crf",
                               "fps", "scale", "cap", "remeasure", "pickout", "pickall",
-                              "readagain", "read", "modesrc", "modeseq", "productpick"];
+                              "readagain", "read", "modesrc", "modeseq", "modeboth",
+                              "productpick"];
+
+    /* ⚠️ 3.93 · LOCKED FOR THE WHOLE OF A BOTH EXPORT, not only while one of its halves runs.
+     * Between the halves state.running is false for a moment (the Source half has ended, the
+     * Timeline half not yet begun), and a control that came back to life there — a mode press,
+     * a Product pick — would move the second half's folder before it starts. */
+    function paintLocks() {
+        var lock = state.running || !!state.chain;
+        for (var i = 0; i < LOCK_WHILE_RUNNING.length; i++) {
+            var e = el[LOCK_WHILE_RUNNING[i]];
+            if (e) e.disabled = lock;
+        }
+    }
 
     function setRunning(on) {
         state.running = !!on;
-        for (var i = 0; i < LOCK_WHILE_RUNNING.length; i++) {
-            var e = el[LOCK_WHILE_RUNNING[i]];
-            if (e) e.disabled = state.running;
-        }
+        paintLocks();
         /* Every end of a run comes through here, so this is where the dest row is asked again
          * — it described the folder BEFORE the run, and measured, it went on saying "already
          * holds 23 file(s)" over a folder the run had just changed — and then where "did it
@@ -448,6 +528,12 @@
             settleClash();
         }
         paintBody();
+        /* 3.93 · AND THE END OF A BOTH HALF IS ONE OF THOSE ENDS. Every way a half can stop
+         * after it has started — the engine's close, a render that failed or was stopped, a
+         * door that refused — comes through here, so the chain is told here; the refusals
+         * before anything runs tell it themselves (halfOver). Deferred, so the close handler
+         * that called this still builds its report before the next half starts. */
+        if (!state.running) halfOver();
     }
 
     function setBusy(on, label) {
@@ -481,6 +567,59 @@
             el.step1.className = "step";
         }
     }
+
+    /* ═══════════════════════════════════════ 3.93 · WHICH MODE A COMPUTATION IS FOR
+     *
+     * "Both" (the product owner, 29 Sep 2026: one press, "cut out the extra step") is two
+     * exports, one after the other — the Source half into <version>/raw/, then the Timeline
+     * half into <version>/edited/ — and EACH HALF IS THE SAME RUN AS THE SINGLE-MODE EXPORT:
+     * the same argv, the same render spec, the same pick file, the same folders and records.
+     * The cheapest way to make that true by construction rather than by comparison is to run
+     * each half THROUGH the single-mode code, with one question answered differently:
+     *
+     *   modeNow()   the mode the computation in hand is for. state.half while a Both half
+     *               runs (or while one of its reads is spawned); state.cutFrom otherwise. It
+     *               is never "both" inside a half, so every run-side reader — the argv, the
+     *               render branch, typeOn/inRun, the render spec, the report's folder — sees
+     *               exactly "source" or "render", as it would in that mode alone.
+     *   renderNow() modeNow() is "render".
+     *   shownHas(m) the LIT BUTTON shows m's settings — Source Render or Timeline Render
+     *               itself, or Both. For what the panel DRAWS, which in Both is both modes'
+     *               settings at once, and which must not flip while a half runs.
+     *   listFor(m)  m's cut list: the Timeline read's (state.editClips) when m is "render" in
+     *               Both, state.clips in every other case — so in either single mode it is
+     *               state.clips, as it has always been.
+     *
+     * ⚠️ THE RULE FOR THE ~40 READERS OF THE MODE. Anything whose answer goes to the engine,
+     * to Premiere or into a record asks modeNow(); anything that paints asks state.cutFrom
+     * (shownHas), and in Both asks each half by name. In Source Render and Timeline Render
+     * state.half is always "" and the two agree, which is what keeps those modes byte for
+     * byte what they were. */
+    var HALF_NAME = { source: "Source Render", render: "Timeline Render" };
+    var HALVES = ["source", "render"];
+
+    function modeNow() { return state.half || state.cutFrom; }
+    function renderNow(m) { return (m || modeNow()) === "render"; }
+    function shownHas(m) { return state.cutFrom === m || state.cutFrom === "both"; }
+    function listFor(m) {
+        m = m || modeNow();
+        if (m !== "render" || state.cutFrom !== "both") return state.clips;
+        /* ⚠️ ONLY THE PAIR OF THE READ ON SCREEN. A Timeline list from any other read — the one
+         * before a switch out of Both and back, one whose read failed — is another read's
+         * leftovers, and the edited/ half cut from it would not be this read's. */
+        return state.editRead ? state.editClips : [];
+    }
+    /* One half's answer to a synchronous question, and the half put back after — whatever
+     * it was, so a question asked from inside a running half cannot end that half's say. */
+    function withHalf(m, fn) {
+        var was = state.half;
+        state.half = m;
+        try { return fn(); } finally { state.half = was; }
+    }
+    // The folder a half writes, in a sentence: "raw/", "edited/".
+    function halfDir(m) { return modeDirName(m) + "/"; }
+    // A mode by its button's name: "Source Render", "Timeline Render", "Both".
+    function modeWord(m) { return m === "both" ? "Both" : (HALF_NAME[m] || String(m)); }
 
     /* Both the scan and the export invoke xmlcut the same way — only the output folder
      * and whether the type filter applies differ. Building the argv in one place keeps
@@ -516,7 +655,8 @@
          * the flag says that once instead of twice, and it also covers the case the engine's
          * exemption cannot: a cut whose render FAILED has neither flag, so a .png on the
          * master track would be dropped by --ext on the retry. */
-        if (!allTypes && state.cutFrom !== "render") {
+        // 3.93 · the mode of THIS argv — a Both half's own, never "both".
+        if (!allTypes && !renderNow()) {
             var exts = selectedExts();
             if (exts.length) args.push("--ext", exts.join(","));
         }
@@ -554,7 +694,7 @@
          *
          * Sent from here rather than from the two call sites so that the read and the
          * export cannot disagree about it again. */
-        if (state.cutFrom === "render" && state.vtrackWant) {
+        if (renderNow() && state.vtrackWant) {
             args.push("--video-track", String(state.vtrackWant));
         }
         args = args.concat(settingArgs());
@@ -676,7 +816,7 @@
             if (state.types.hasOwnProperty(k)) o[k] = !!state.types[k].on;
         }
         try {
-            window.localStorage.setItem("xmlcut.types", JSON.stringify(o));
+            lsSet("xmlcut.types", JSON.stringify(o));
         } catch (e) {}
     }
 
@@ -728,7 +868,7 @@
      * row as "audionum" and "ramps". */
     var RAIL_KEYS = ["seq", "err", "failures", "audionum", "audio", "hear", "fps", "media",
                      "readmode",
-                     "ramps", "types", "preset", "dest", "pickout", "stall", "sizes", "rendermode",
+                     "ramps", "types", "preset", "presetfile", "dest", "pickout", "stall", "sizes", "rendermode",
                      "complete", "renders", "exportwait", "scan", "saved"];
     var railRows = {};        // key -> {sev, text, title}
 
@@ -1097,7 +1237,21 @@
             "Project ngo\u00e0i m\u1ecdi shared drive: Change \u0111\u1eb7t Save to (chung m\u1ecdi project), nh\u1eadn th\u01b0 m\u1ee5c b\u1ea5t k\u1ef3 nh\u01b0 tr\u00ean; th\u01b0 m\u1ee5c th\u01b0\u1eddng v\u00e0o <Save to>/<version>/raw|edited."
     ].concat(CL_391);
 
+    /* 3.93 · Both — Source Render into raw/ then Timeline Render into edited/, from one press
+     * (the product owner, 29 Sep). Five lines, each no longer than 3.89's longest (154): the
+     * button, what it shows, the refusal, the chain's rules, and the report and its Retry.
+     * Chained onto CL_392 (Both was built beside the 3.92 hotfix and merged onto it), so a
+     * reader who skips 3.92 is still told it. */
+    var CL_393 = [
+            "N\u00daT M\u1edaI \u00abBoth\u00bb c\u1ea1nh Source Render v\u00e0 Timeline Render: m\u1ed9t l\u1ea7n Export l\u00e0m c\u1ea3 hai \u2014 Source v\u00e0o <version>/raw/ tr\u01b0\u1edbc, r\u1ed3i Timeline v\u00e0o <version>/edited/.",
+            "\u1ede Both, panel hi\u1ec7n c\u00e0i \u0111\u1eb7t c\u1ee7a c\u1ea3 hai ch\u1ebf \u0111\u1ed9: lo\u1ea1i file (cho raw/), Master track v\u00e0 \u00e2m thanh (cho edited/). N\u00fat Export ghi hai s\u1ed1: \u00ab16 raw + 10 edited\u00bb.",
+            "M\u1ed9t n\u1eeda b\u1ecb ch\u1eb7n (th\u01b0 m\u1ee5c, \u1ed5 \u0111\u1ea7y, ch\u01b0a tick clip) th\u00ec c\u1ea3 hai kh\u00f4ng ch\u1ea1y, n\u00f3i r\u00f5 n\u1eeda n\u00e0o; \u0111\u1ed5i hay s\u1eeda sequence l\u00fac raw/ ch\u1ea1y th\u00ec edited/ kh\u00f4ng render.",
+            "N\u1eeda \u0111\u1ea7u l\u1ed7i th\u00ec n\u1eeda sau v\u1eabn ch\u1ea1y; b\u1ea5m H\u1ee7y th\u00ec d\u1eebng h\u1eb3n, n\u1eeda sau kh\u00f4ng b\u1eaft \u0111\u1ea7u. M\u1ed7i th\u01b0 m\u1ee5c c\u00f3 manifest, clips.csv, report/ ri\u00eang; chu\u00f4ng k\u00eau m\u1ed9t l\u1ea7n.",
+            "B\u00e1o c\u00e1o ghi k\u1ebft qu\u1ea3 c\u1ee7a c\u1ea3 raw/ v\u00e0 edited/; Retry ch\u1ec9 ch\u1ea1y l\u1ea1i clip l\u1ed7i c\u1ee7a t\u1eebng n\u1eeda v\u00e0o \u0111\u00fang th\u01b0 m\u1ee5c c\u1ee7a n\u00f3, b\u1ecf qua n\u1eeda kh\u00f4ng c\u00f3 l\u1ed7i."
+    ].concat(CL_392);
+
     var CHANGELOG = {
+        "3.93": CL_393,
         "3.92": CL_392,
         "3.91": CL_391,
         "3.90": CL_390,
@@ -1167,7 +1321,7 @@
         /* A fresh install gets nothing and is marked as seen: a changelog for a version you
          * never had is noise. */
         if (!seen && !hadPrior) {
-            try { window.localStorage.setItem("xmlcut.seenver", ver); } catch (e) {}
+            try { lsSet("xmlcut.seenver", ver); } catch (e) {}
             return;
         }
         /* ⚠️ THE MARKER IS WRITTEN LAST, AND THAT ORDERING IS THE WHOLE FIX.
@@ -1188,7 +1342,7 @@
          * (fresh install, or one older than the map), the newest eight. */
         var prev = (seen && CHANGELOG[seen]) ? CHANGELOG[seen] : null;
         var lines = prev ? all.slice(0, Math.max(0, all.length - prev.length)) : all.slice(0, 8);
-        try { window.localStorage.setItem("xmlcut.seenver", ver); } catch (e) {}
+        try { lsSet("xmlcut.seenver", ver); } catch (e) {}
         if (!lines.length) return;
         say("changelog", "info", "Bản " + ver + " có gì mới:\n• "
             + lines.join("\n• "), "", true);
@@ -1674,7 +1828,7 @@
             for (var t = 0; t < tried.length; t++) log("looked for xmlcut.py: " + tried[t]);
         }
         if (state.script) {
-            try { window.localStorage.setItem("xmlcut.script", state.script); } catch (e) {}
+            try { lsSet("xmlcut.script", state.script); } catch (e) {}
             // Point at the copy of tools/ that actually exists. Bundled installs have
             // lib/tools/ beside lib/xmlcut.py; a source checkout has tools/ at its root.
             // Printing a path with no tools/ in it gave a command that could not run.
@@ -1708,6 +1862,12 @@
         state.info = null;
         state.xml = null;
         state.clips = [];
+        // 3.93 · and a Both read's Timeline list, which belongs to the read it came with.
+        state.editClips = [];
+        state.editRead = false;
+        state.editOverlap = { pairs: 0, frames: 0, split: 0 };
+        state.bothReport = null;
+        state.rowHalves = null;
         state.report = [];
         state.merge = [];
         state.unpicked = {};
@@ -1765,12 +1925,21 @@
         // The HEAR reconciliation is a fact about the timeline that was read, so it dies with
         // that read: a scan that fails never reaches pruneAudioHearWant() to clear it itself.
         say("hear", "warn", "");
+        state.audioHearNote = "";     // 3.93 audit (2) · and what taking up a saved choice said
         say("complete", "info", "");
         say("sizes", "warn", "");
         say("renders", "info", "");
         say("failures", "error", "");
         // 3.92 · what the last Change press said was about the project that was open then.
         say("pickout", "info", "");
+        /* 3.93 audit (2) · and what the last export or its refusal said about ITS folder: the
+         * clash row ("v1.2/raw/ held 2 clip(s)… moved to _earlier_export/ — the report's notes
+         * say which", over a report this read hides) and a refused press ("The destination
+         * changed… it is now <the last sequence's folder>") stayed on the rail over the next
+         * sequence. A refusal that lands after this teardown (a read overtaking a press) is
+         * said by its own callback, later, and survives. */
+        say("clash", "warn", "");
+        say("export", "warn", "");
         /* And the mismatch row, which this read is about to settle one way or the other:
          * pressing Read is one of the two ways to resolve it (switching back is the other),
          * so leaving it up while the read runs would show an error about a state that has
@@ -1785,7 +1954,8 @@
         readStage(0);
         readTimer(true);
 
-        cs.evalScript("dumpActiveSequence()", function (raw) {
+        // 3.93 audit · `true`: the baseline fingerprint comes back from THIS call (see below).
+        cs.evalScript("dumpActiveSequence(true)", function (raw) {
             if (!resumeRead()) return;
             var r = hostReply(raw);
             if (!r) {
@@ -1834,7 +2004,19 @@
             state.readFp = "";
             state.seqDrift = false;
             state.seqRenamed = "";
-            cs.evalScript("activeSequenceStamp(true)", function (sraw) {
+            /* 3.93 audit · FROM THE DUMP ITSELF when the host gives it (dumpActiveSequence(true)
+             * answers `fp`, null when it could not be taken). The separate stamp call below ran
+             * once the dump had returned — and the dump holds Premiere for seconds, so a click
+             * on another timeline tab made meanwhile was handled first and the baseline was the
+             * OTHER sequence's. Only a host.jsx older than this panel still takes that path. */
+            if (Object.prototype.hasOwnProperty.call(r, "fp")) {
+                if (r.fp) {
+                    state.readFp = String(r.fp);
+                    log("read fingerprint: " + state.readFp + " (from the dump)");
+                } else {
+                    log("read fingerprint unavailable — the edited-after-read check is off");
+                }
+            } else cs.evalScript("activeSequenceStamp(true)", function (sraw) {
                 var sr = null;
                 try { sr = JSON.parse(sraw); } catch (eS) {}
                 if (sr && sr.ok && sr.fp) {
@@ -1894,7 +2076,8 @@
         readStage(1);
         var dest = state.dump.replace(/\.json$/i, ".xml");
         readTimer(true);
-        cs.evalScript("exportSequenceXML(" + jsStr(dest) + ")",
+        // 3.93 audit · and only of the sequence the dump read: host.jsx refuses another one.
+        cs.evalScript("exportSequenceXML(" + jsStr(dest) + ", " + jsStr(readSeqId()) + ")",
             function (raw) {
                 if (!resumeRead()) return;
                 // An unreadable reply means no XML — not the end of the read. This used to
@@ -1907,6 +2090,27 @@
                 }
                 for (var i = 0; i < (r.tried || []).length; i++) {
                     log("xml export · " + r.tried[i]);
+                }
+                /* 3.93 audit · THE OPEN SEQUENCE CHANGED DURING READ (another tab brought to the
+                 * front while the dump held Premiere) — not an XML Premiere could not make, so not
+                 * the dump-only fallback either: that would go on to cut a read whose XML half is
+                 * missing for a reason he has not seen. The read ends here, nothing read, and the
+                 * host's sentence says to bring the sequence back and press Read again. */
+                if (r.changed) {
+                    log("xml export refused: the open sequence changed during Read ("
+                        + (r.open_name || "?") + " [" + (r.open_id || "?") + "])");
+                    state.info = null;
+                    state.dump = null;
+                    setBusy(false);
+                    readStage(-1);
+                    show(el.seqbox, false);
+                    show(el.opts, false);
+                    show(el.step3, false);
+                    show(el.modebar, false);
+                    show(el.figstrip, false);
+                    show(el.tabbar, false);
+                    fail(r.error || "The open sequence changed during Read — press Read again.");
+                    return;
                 }
                 if (r.ok) {
                     state.xml = r.path;
@@ -1988,7 +2192,9 @@
                 // render mode Premiere resolves the Dynamic Link, so .aep is live like
                 // anything else — otherwise the one mode that can export it starts with
                 // it switched off.
-                else on = !DEAD_TYPES[ext] || state.cutFrom === "render";
+                // 3.93 · in Both the chips are the Source half's (they govern raw/), so a
+                // project file starts off there as it does in Source Render.
+                else on = !DEAD_TYPES[ext] || renderNow();
                 state.types[ext] = { count: 0, on: on };
             }
             return state.types[ext];
@@ -2022,8 +2228,9 @@
         /* ⚠️ NOT IN RENDER MODE. The rescue below exists so a timeline can never open with
          * nothing cuttable ticked — but in render mode no tick gates anything, so there is no
          * such state to rescue, and running it anyway would rememberTypeChoices() a change he
-         * never made and carry it into his next SOURCE export. */
-        if (state.cutFrom === "render") return true;
+         * never made and carry it into his next SOURCE export.
+         * 3.93 · Both runs it: its chips govern raw/, where nothing ticked is a real state. */
+        if (renderNow()) return true;
         var present = presentCuttable();
         var anyOn = false;
         for (var q = 0; q < present.length; q++) {
@@ -2214,8 +2421,9 @@
     /* What the Export button will actually write: type on, cuttable, and ticked. Counted
      * from the clip list rather than by summing type counts, which ignored both the
      * uncuttable clips and the per-clip ticks. */
-    function selectedCount() {
-        if (state.clips.length) return pickedClips().length;
+    /* @param m  3.93 · whose count: a half by name, or (omitted) the mode now in effect. */
+    function selectedCount(m) {
+        if (state.clips.length) return pickedClips(m).length;
         var n = 0;
         for (var k in state.types) {
             if (state.types.hasOwnProperty(k) && state.types[k].on) {
@@ -2223,6 +2431,21 @@
             }
         }
         return n;
+    }
+
+    /* 3.93 · How many clips the Export button is about, for what the lit button says it will
+     * make: this mode's, or in Both the two halves' together. Asked of the halves by name, so
+     * it answers the same while a Both half runs as before it started. */
+    function exportTotal() {
+        if (state.cutFrom !== "both") return selectedCount(state.cutFrom);
+        return selectedCount("source") + selectedCount("render");
+    }
+
+    /* 3.93 · the clips the lit button's export is about, for what the panel DRAWS: this mode's,
+     * or in Both the raw/ half's and then the edited/ half's. */
+    function shownPicked() {
+        if (state.cutFrom !== "both") return pickedClips(state.cutFrom);
+        return pickedClips("source").concat(pickedClips("render"));
     }
 
     function selectedExts() {
@@ -2252,12 +2475,16 @@
          * when Premiere is rendering them, and "This timeline has no media that can be cut"
          * is false of a timeline made entirely of graphics. A warning that is wrong is worse
          * than no warning: it sends him to fix something that is already right. */
+        /* 3.93 · WHAT IS LIT, not the half running: this paints. In Both the chips are the
+         * Source half's — they govern raw/ and nothing else — so every sentence below says
+         * "into raw/", and the count is the Source half's even while the Timeline half runs. */
         if (state.cutFrom === "render") return "";
+        var into = state.cutFrom === "both" ? " into raw/" : "";
         if (state.typesReset) {
             return "Nothing was selected, so this timeline's types were switched back on: "
                  + state.typesReset + ".";
         }
-        var n = selectedCount();
+        var n = selectedCount("source");
         var present = presentCuttable();
         if (n > 0) {
             /* Types this timeline HAS, that are switched off.
@@ -2275,17 +2502,19 @@
                 }
             }
             return off.length
-                ? ("Not selected: " + off.join(", ") + " — those clips will NOT be cut.")
+                ? ("Not selected: " + off.join(", ") + " — those clips will NOT be cut"
+                   + into + ".")
                 : "";
         }
         if (!present.length) {
-            return "This timeline has no media that can be cut.";
+            return "This timeline has no media that can be cut" + into + ".";
         }
         var names = [];
         for (var i = 0; i < present.length; i++) {
             names.push("." + present[i] + " (" + state.types[present[i]].count + ")");
         }
-        return "Nothing selected. Tick one of " + names.join(", ") + ".";
+        return "Nothing selected" + (into ? " for raw/" : "") + ". Tick one of "
+            + names.join(", ") + ".";
     }
 
     /* WHICH MODE THE BOTTOM BAR IS IN, derived from what is already true rather than
@@ -2311,7 +2540,9 @@
 
     function refreshExportEnabled() {
         barMode();
-        var n = selectedCount();
+        // 3.93 · in Both, both halves' clips: the button is live while either has one, and a
+        // press with one half empty is refused naming it (bothBlocked) rather than dead.
+        var n = exportTotal();
         // Neutral when the panel fixed it itself, amber when he has to act.
         say("types", state.typesReset ? "info" : "warn", typeHint());
         // `!state.busy` is load-bearing, not belt-and-braces: setBusy() disables Read and
@@ -2376,7 +2607,9 @@
      */
     function renderNext() {
         if (!el.nextline) return;
-        var n = selectedCount(), cls = "msg next", msg;
+        // 3.93 · what the lit button will make — in Both, the two halves together.
+        var n = exportTotal(), cls = "msg next", msg;
+        var shown = resolveDest(state.cutFrom);
         if (state.busy) {
             msg = "Reading the timeline…";
             cls += " busy";
@@ -2384,7 +2617,7 @@
             msg = "Cut script missing — open ⚙ and press Re-check.";
             cls += " error";
         } else if (el.report && el.report.hidden === false && failedRows().length && retryHere()
-                   && !(state.clips.length && haveDest() && resolveDest().why)) {
+                   && !(state.clips.length && haveDest() && shown.why)) {
             /* ⚠️ NOT WHEN THE DESTINATION IS REFUSED (3.90 round 3). "Retry below" then offers a
              * press that is refused — measured after a mode switch into the folder of the other
              * mode: the dest row refused while this line still said "1 clip did not write … Retry
@@ -2401,9 +2634,14 @@
             for (var b = 1; b < bad.length; b++) {
                 if ((bad[b].facts || "") !== why) { same = false; break; }
             }
-            msg = bad.length + " clip" + (bad.length === 1 ? "" : "s") + " did not write"
-                + (same && why ? " — " + why : "")
-                + ". Retry below, or see the log in Advanced.";
+            /* 3.93 · AFTER A BOTH EXPORT, BOTH FOLDERS' OUTCOMES — "raw/ 16 written · edited/ 9
+             * of 10 written, 1 failed" — because "1 clip did not write" does not say which
+             * folder is short, and the two halves are two deliveries. */
+            msg = state.bothReport
+                ? bothOutcome() + ". Retry below, or see the log in Advanced."
+                : bad.length + " clip" + (bad.length === 1 ? "" : "s") + " did not write"
+                  + (same && why ? " — " + why : "")
+                  + ". Retry below, or see the log in Advanced.";
             cls += " error";
             /* ⚠️ AND WHEN THEY DO NOT SHARE A REASON, THE REASONS THEMSELVES.
              *
@@ -2458,7 +2696,7 @@
             cls += " warn";
         } else if (!haveDest()) {
             msg = "Choose a folder to save into.";
-        } else if (resolveDest().why) {
+        } else if (shown.why) {
             /* 3.90 · A DESTINATION THAT WILL BE REFUSED IS NOT "READY". The reason itself is on
              * the dest row — setOutDest() and refuseIfNoDest() both put it there, in the one
              * sentence doExport() refuses with — so this line says only that Export is
@@ -2472,10 +2710,19 @@
                 ? "Nothing is ticked yet — pick at least one clip."
                 : "Nothing is ticked yet — pick at least one clip or file type.";
             cls += " warn";
+        } else if (state.cutFrom === "both" && bothBlockedWhy(false)) {
+            /* 3.93 · ONE HALF WITH NOTHING TO DO — or no Timeline list to do it from — blocks
+             * Both (the product owner: refuse both, start nothing), so it is said before the
+             * press, naming the half: the press would refuse with this very sentence. (The
+             * disk's free space is asked at the press, not on every repaint.) */
+            msg = bothBlockedWhy(false);
+            cls += " warn";
         } else {
             // The product and the version, which are the two things that can be wrong.
-            var rd = resolveDest();
-            msg = "Ready. " + n + " clip" + (n === 1 ? "" : "s") + " will be written into "
+            var rd = shown;
+            msg = "Ready. " + (state.cutFrom === "both"
+                    ? selectedCount("source") + " raw + " + selectedCount("render") + " edited clips"
+                    : n + " clip" + (n === 1 ? "" : "s")) + " will be written into "
                 + (rd.ok ? destTail(rd) + "/" : "the folder above") + ".";
             cls += " good";
         }
@@ -2525,6 +2772,10 @@
         } else {
             state.rowState = {};
         }
+        // 3.93 · a single-mode run's rows are its own; a Both export's are kept per half.
+        if (!state.chain) state.rowHalves = null;
+        // 3.93 audit (2) · and of this run's folder (a Both half's are the chain's: rowsHere).
+        state.rowsFor = state.chain ? "" : outDir();
         state.jobKey = {};
         el.jobtally.textContent = "";
         say("stall", "warn", "");
@@ -2577,9 +2828,11 @@
     function keyFromEngine(k) {
         var p = String(k || "").split("/");
         if (p.length !== 3 && p.length !== 4) return "";
-        var hit = "", n = 0;
-        for (var i = 0; i < state.clips.length; i++) {
-            var c = state.clips[i];
+        /* 3.93 · against the list of the run that printed the line — a Both half's own: the
+         * Timeline read's ranges are not the Source read's where a cross-dissolve was split. */
+        var hit = "", n = 0, list = listFor();
+        for (var i = 0; i < list.length; i++) {
+            var c = list[i];
             if (String(c.trackType) === p[0] && String(c.trackIndex) === p[1]
                 && String(c.timelineIn) === p[2]
                 && (p.length === 3 || String(c.timelineOut) === p[3])) {
@@ -3252,7 +3505,7 @@
         if (value) o[k] = String(value);
         var keys = Object.keys(o);
         while (keys.length > PICK_KEEP) delete o[keys.shift()];
-        try { window.localStorage.setItem(key, JSON.stringify(o)); } catch (e) {}
+        try { lsSet(key, JSON.stringify(o)); } catch (e) {}
     }
 
     function pickFor(projectPath) { return keyedFor(PICK_KEY, projectPath); }
@@ -3313,12 +3566,19 @@
             var at = function (n) { var i = ord.indexOf(n); return i < 0 ? ord.length : i; };
             lead.sort(function (a, b) { return (at(a) - at(b)) || (a < b ? -1 : a > b ? 1 : 0); });
         }
-        var pick = pickFor(pp);
-        if (pick && c.names.indexOf(pick) < 0) pick = "";
+        /* 3.93 audit (2) · A PICK SAMX_WORKSPACE DOES NOT LIST IS KEPT AS `gone`, never dropped in
+         * silence. Dropping it (3.91 review: "matched again, or the unmatched menu") sent the
+         * export to the match the editor had picked AWAY from, with nothing said: Tech renames
+         * the product, or Drive for desktop has not listed it yet, and the clips land in the
+         * product rejected by hand. The route now refuses, naming the pick (resolveDest), until
+         * a product is picked again — the match is one menu entry away. Still never "isn't
+         * reachable — reconnect": SAMX_WORKSPACE was just listed; the folder is not in it. */
+        var pick = pickFor(pp), gone = "";
+        if (pick && c.names.indexOf(pick) < 0) { gone = pick; pick = ""; }
         var auto = matches.length === 1 ? matches[0] : lead.length === 1 ? lead[0] : "";
-        var chosen = pick || auto;
+        var chosen = pick || (gone ? "" : auto);
         return { samx: c.samx, names: c.names, below: c.sd.below, folder: productFolderOf(c.sd.below),
-                 matches: matches, lead: lead, auto: auto, pick: pick, project: pp,
+                 matches: matches, lead: lead, auto: auto, pick: pick, gone: gone, project: pp,
                  product: chosen ? path.join(c.samx, chosen) : "" };
     }
 
@@ -3339,6 +3599,19 @@
             if (k && !GENERIC_FOLDER_RE.test(k)) return below[i];
         }
         return "";
+    }
+
+    /* 3.93 audit (2) · THE REFUSAL WHILE THE PICK IS NOT IN SAMX_WORKSPACE: its name, and — when
+     * the project's folders match a product — that nothing goes there either, since that is the
+     * product the pick was made over. */
+    function pickGoneWhy(r) {
+        var s = "The product picked for the open project, " + qn(r.gone) + ", isn’t in "
+            + "SAMX_WORKSPACE any more — ask Tech if it was renamed or removed — so nothing is "
+            + "exported";
+        return r.auto
+            ? s + ", not even into " + qn(r.auto) + ", the match it was picked over: pick "
+              + qn(r.auto) + " or another product below."
+            : s + ": pick the product below.";
     }
 
     /* The refusal while nothing is matched or picked — naming the project's own product
@@ -3505,8 +3778,16 @@
      * is the same walk over the same fields — d.act is the folder the VERSION folders are in
      * (Output/ACT, or the free folder itself, which d.product then holds), so the version found
      * by sameVersion, the mode folder, the FILE-in-the-way refusal, folderTaken(), legacyFlat(),
-     * outDir(), renderDir(), the box and every sentence follow without a case of their own. */
-    function resolveDest() {
+     * outDir(), renderDir(), the box and every sentence follow without a case of their own.
+     *
+     * 3.93 · @param m  whose mode folder: "source" (raw/), "render" (edited/), "both" (the
+     * pair — resolveBoth), or omitted for the mode now in effect: a running Both half's own,
+     * else the lit button's. Everything above the mode folder — the route, the product or the
+     * free folder, Output/, ACT/, the version — is the same answer for either half, so a
+     * chosen free folder gives <free>/<version>/raw and <free>/<version>/edited. */
+    function resolveDest(m) {
+        m = m || modeNow();
+        if (m === "both") return resolveBoth();
         var d = { ok: false, dir: "", product: "", from: "", output: "", act: "",
                   actExists: false, version: "", versionDir: "", versionExists: false,
                   versionPath: "", mode: "", modeDir: "", modeExists: false, legacy: null,
@@ -3534,7 +3815,7 @@
             d.from = "project";
             d.product = d.own;
         } else if (r) {
-            d.from = r.pick ? "picked" : r.auto ? "matched" : "unmatched";
+            d.from = (r.pick || r.gone) ? "picked" : r.auto ? "matched" : "unmatched";
             d.product = r.product;
         } else {
             d.from = "saveto";
@@ -3550,6 +3831,7 @@
         var notSave = d.from === "project" ? NOT_SAVE_TO : NOT_SAVE_TO_PICK;
         var why = [];
         if (d.from === "unmatched") why.push(unmatchedWhy(r) + " " + NOT_SAVE_TO_UNMATCHED);
+        if (d.from === "picked" && r && r.gone) why.push(pickGoneWhy(r) + " " + NOT_SAVE_TO_PICK);
         if (d.kind === "samxroot") why.push(handWhy(d, "samxroot"));
         if (d.kind === "root") why.push(handWhy(d, "root"));
         if (!d.product && !why.length) return d;
@@ -3611,7 +3893,7 @@
         var vd = d.actExists
             ? childDir(d.act, function (n) { return sameVersion(n, d.version); }, d.version)
             : "";
-        d.mode = modeDirName(state.cutFrom);
+        d.mode = modeDirName(m);
         var md = vd ? childDir(path.join(d.act, vd), function (n) {
             return n.toLowerCase() === d.mode; }, d.mode) : "";
         /* ⚠️ A FILE WHERE A FOLDER HAS TO GO IS A REFUSAL, NOT "WILL CREATE IT". childDir()
@@ -3665,10 +3947,67 @@
         return d.ok ? d.dir : "";
     }
 
+    /* 3.93 · BOTH'S DESTINATION: the two halves' own, side by side, and ONE answer about them.
+     * The product, Output/, ACT/ and the version are the Source half's (they are the same for
+     * both); `halves` holds each half's own resolveDest(), mode folder and all. `ok` only when
+     * BOTH may export — the product owner, 29 Sep: if either half is blocked, refuse both and
+     * start nothing — and `why` says which half is blocked.
+     *
+     * ⚠️ `dir` IS "". Both writes no one folder, so outDir() is "" whenever no half is running,
+     * and nothing that writes can land somewhere by accident: the argv's -o, manifestMtime(),
+     * reportDir() and renderDir() all go through outDir(), and every one of them runs inside a
+     * half (state.half), where resolveDest() is that half's again. */
+    function resolveBoth() {
+        var s = resolveDest("source"), r = resolveDest("render"), d = {}, k;
+        for (k in s) if (Object.prototype.hasOwnProperty.call(s, k)) d[k] = s[k];
+        d.mode = "both";
+        d.halves = { source: s, render: r };
+        d.dir = "";
+        d.ok = s.ok && r.ok;
+        d.taken = !!(s.taken || r.taken);
+        d.takenDir = s.takenDir || r.takenDir || "";
+        d.why = bothWhy(s, r);
+        return d;
+    }
+
+    /* One sentence for a Both refusal, in the voice of the single-mode ones — which it quotes.
+     * A refusal about the product or the version is the same for both halves and is said once,
+     * as it is; so is another sequence's clips in one of the two folders, which refuses both
+     * halves (once as "into it", once as "into ACT/<version>/" — the second says all of it).
+     * What only ONE half hits — a file where its mode folder has to go — names that half, and
+     * says the other half is not exported either. */
+    function bothWhy(s, r) {
+        if (!s.why && !r.why) return "";
+        if (s.why && r.why) {
+            if (s.why === r.why) return s.why;
+            if (s.taken && r.taken && s.takenDir === r.takenDir) {
+                return s.takenDir === s.dir ? r.why : s.why;
+            }
+            return "Neither half of Both can export. " + HALF_NAME.source + " (raw/): " + s.why
+                + " " + HALF_NAME.render + " (edited/): " + r.why;
+        }
+        var m = s.why ? "source" : "render", o = m === "source" ? "render" : "source";
+        var other = m === "source" ? r : s;
+        return "The " + HALF_NAME[m] + " half of Both is refused, so Both exports nothing — not "
+            + "even " + (other.versionDir ? other.versionDir + "/" : "") + halfDir(o) + ": "
+            + (s.why || r.why);
+    }
+
+    // A half's own folder, or "" when it may not write — outDir() asked of that half.
+    function outDirOf(m) {
+        var d = resolveDest(m);
+        return d.ok ? d.dir : "";
+    }
+
     /* "Brand 1.0/Output/ACT/v1.2" — the part of the path that says which product and which
      * version, for sentences. The full path is on the boxes that can open. */
     function destTail(d) {
         if (!d || !d.ok) return "";
+        // 3.93 · Both: "Brand 1.0/Output/ACT/v1.2/raw/ and edited" — the caller adds the "/".
+        if (d.halves) {
+            return path.basename(d.product) + "/" + path.relative(d.product, d.versionPath) + "/"
+                + d.halves.source.modeDir + "/ and " + d.halves.render.modeDir;
+        }
         return path.basename(d.product) + "/" + path.relative(d.product, d.dir);
     }
 
@@ -3974,6 +4313,8 @@
     function destShown(d) {
         if (d && (d.ok || d.taken) && d.dir) return (d.taken && d.takenDir) || d.dir;
         if (d && d.from === "unmatched" && d.samx) return d.samx;
+        // 3.93 audit (2) · a pick SAMX_WORKSPACE no longer lists: where it was looked for.
+        if (d && d.from === "picked" && !d.product && d.samx) return d.samx;
         // 3.92 · a refused chosen folder is the folder the sentence names, never Save to.
         if (d && d.from === "chosen") return d.product || d.chosen;
         return (d && d.from && d.from !== "saveto" && d.product) ? d.product : state.out;
@@ -4001,12 +4342,44 @@
             label = path.relative(d.act, full) + " in " + path.basename(d.product);
         } else if (d && d.from === "unmatched" && d.samx) {
             label = "no product yet — pick one below";
+        } else if (d && d.from === "picked" && !d.product && d.route && d.route.gone) {
+            label = "“" + d.route.gone + "” is gone — pick again below";
         }
         setPathLabel(el.outpath, full, 40, label);
         // What the box now names as the place an export goes — destMoved() holds the doors to it.
         state.shownDir = d && d.ok ? d.dir : "";
         if (el.destcap) el.destcap.textContent = DEST_CAPTION[(d && d.from) || "saveto"] || "Save to";
         paintProductPick(d);
+    }
+
+    /* 3.93 · THE FOLDER A DESTINATION SHOWS, Both's included: the version folder, which holds the
+     * two a Both export writes (or the folder a refusal of it names). Kept beside destShown()
+     * rather than inside it, so the single-mode answer stays exactly that function's. */
+    function shownFolder(d) {
+        if (d && d.halves && (d.ok || d.taken) && d.versionPath) {
+            return (d.taken && d.takenDir) || d.versionPath;
+        }
+        return destShown(d);
+    }
+
+    /* 3.93 · THE DESTINATION BOX FOR WHAT IS LIT. paintOutPath() paints every single-mode
+     * destination; a Both one then gets its own label on top — "v1.2/raw + edited in Brand 1.0",
+     * still the version first, which is what a docked box keeps (check_layout measures it) — or,
+     * refused over another sequence's clips, the folder the sentence names, as a single mode's. */
+    function paintBox(d) {
+        paintOutPath(d);
+        /* 3.93 · the two folders the box now names as where a Both export goes — destMoved()
+         * holds the press, the chain's start and each half's start to them. paintOutPath() has
+         * just set shownDir to "" for a Both destination (its dir is ""), so a single-mode door
+         * can never be held to a Both paint, nor a Both door to a single-mode one. */
+        state.shownPair = d && d.halves && d.ok
+            ? { source: d.halves.source.dir, render: d.halves.render.dir } : null;
+        if (!d || !d.halves || !d.act || !(d.ok || d.taken)) return;
+        var full = shownFolder(d);
+        setPathLabel(el.outpath, full, 40, d.ok
+            ? d.versionDir + "/" + d.halves.source.modeDir + " + " + d.halves.render.modeDir
+              + " in " + path.basename(d.product)
+            : path.relative(d.act, full) + " in " + path.basename(d.product));
     }
 
     /* 3.91 · THE PRODUCT MENU — shown only on the matched / picked / unmatched route. The first
@@ -4018,7 +4391,7 @@
      * without it ("Back to Brand", "Back to SAMX_WORKSPACE"), which forgets the folder; on
      * another drive the products follow, and picking one replaces the folder. The two entries'
      * values start with "/", which no folder name can. */
-    var MENU_CHOSEN = "/chosen", MENU_BACK = "/back";
+    var MENU_CHOSEN = "/chosen", MENU_BACK = "/back", MENU_GONE = "/gone";
     function paintProductPick(d) {
         var sel = el.productpick;
         if (!sel) return;
@@ -4027,7 +4400,7 @@
         show(el.productrow, !!r || chosen);
         if (!r && !chosen) return;
         var sig = (r ? r.samx + "|" + r.project + "|" + r.names.join("/") + "|" + r.auto + "|"
-                       + r.pick : "") + "|" + (chosen ? d.chosen + "|" + d.product + "|" + d.own : "");
+                       + r.pick + "|" + (r.gone || "") : "") + "|" + (chosen ? d.chosen + "|" + d.product + "|" + d.own : "");
         if (sel._sig === sig) return;
         sel._sig = sig;
         sel.innerHTML = "";
@@ -4048,6 +4421,10 @@
             return;
         }
         var several = r.matches.length > 1 ? r.matches : (r.lead && r.lead.length > 1) ? r.lead : [];
+        /* 3.93 audit (2) · a pick SAMX_WORKSPACE no longer lists is what the menu shows, first — so
+         * the match below it is a CHANGE to choose (a <select> fires none for the entry it
+         * already shows), and choosing it forgets the pick. */
+        if (!chosen && r.gone) add(MENU_GONE, "Picked: " + r.gone + " (not in SAMX_WORKSPACE)");
         // "Back to …" stands for this entry while a chosen folder is active.
         if (!chosen) {
             add("", r.auto ? "Matched: " + r.auto : (several.length ? "Pick one of the matches…"
@@ -4062,7 +4439,7 @@
         for (i = 0; i < near.length; i++) add(near[i], near[i]);
         if (near.length) add("-", "──────────", true);
         for (i = 0; i < r.names.length; i++) if (near.indexOf(r.names[i]) < 0) add(r.names[i], r.names[i]);
-        sel.value = chosen ? MENU_CHOSEN : (r.pick || "");
+        sel.value = chosen ? MENU_CHOSEN : r.gone ? MENU_GONE : (r.pick || "");
     }
 
     /* IS THERE ANYWHERE TO EXPORT INTO — Save to, or an open project inside SAMX_WORKSPACE,
@@ -4086,11 +4463,13 @@
     /* The dest row on the rail: what about the destination needs attention before Export —
      * a refusal, an Output/ACT that is not there yet, a folder that already holds files. */
     function setOutDest() {
-        var d = resolveDest();
+        /* 3.93 · WHAT IS LIT — this paints, and a Both export's halves must not flip the box and
+         * the row between raw/ and edited/ while they run. */
+        var d = resolveDest(state.cutFrom);
         // Whether the row below is a refusal — the focus handler re-asks the disk only then,
         // so a folder he has just emptied in Finder stops being refused when he comes back.
         state.destRefused = !!(state.info && !d.ok && d.why);
-        paintOutPath(d);
+        paintBox(d);
         paintDest();
         if (!state.info) {
             /* ⚠️ IS THE ROOT STILL THERE, AND CAN IT COME BACK BY ITSELF? Nothing ever stat'ed
@@ -4128,6 +4507,44 @@
             say("dest", "warn", d.why, refusalTitle(d));
             return;
         }
+        /* 3.93 · BOTH NAMES BOTH FOLDERS: each half's own sentence about its folder, and the
+         * two things that are about the version — ACT/ not there yet, 3.90's flat files — once. */
+        if (d.halves) {
+            var parts = [], sevB = "info";
+            if (!d.actExists) {
+                sevB = "warn";
+                parts.push(path.basename(d.output) + "/ACT isn’t there yet — Export will "
+                    + "create it, with " + d.versionDir + "/" + d.halves.source.modeDir + "/ and "
+                    + d.versionDir + "/" + d.halves.render.modeDir + "/ inside, in "
+                    + shortPath(d.output, 44) + ".");
+            } else {
+                for (var hi = 0; hi < HALVES.length; hi++) {
+                    var hn = destNote(d.halves[HALVES[hi]]);
+                    if (hn.text) parts.push(hn.text);
+                    if (hn.sev === "warn") sevB = "warn";
+                }
+            }
+            if (d.legacy) {
+                sevB = "warn";
+                parts.push(legacySentence(d));
+            }
+            say("dest", sevB, parts.join(" "), d.versionPath);
+            return;
+        }
+        var note = destNote(d), sev = note.sev, text = note.text;
+        /* 3.91 · 3.90's FLAT files at the version's top level — clips, its manifest, _renders/,
+         * _earlier_export/ — are never touched by an export into raw/ or edited/, and are said
+         * in amber, once, so he can tidy them by hand: SamX takes the version folder whole. */
+        if (d.legacy) {
+            sev = "warn";
+            text = (text ? text + " " : "") + legacySentence(d);
+        }
+        say("dest", sev, text, d.dir);
+    }
+
+    /* What the dest row says of ONE mode folder that may be exported into: {sev, text}. Split
+     * out of setOutDest() in 3.93 so a Both destination can say it of each of its two. */
+    function destNote(d) {
         var n = d.modeExists ? d.clips : 0;
         var leaf = path.basename(d.act) + "/" + d.versionDir + "/" + d.modeDir + "/";
         var sev = "info", text = "";
@@ -4179,14 +4596,7 @@
                 + "create it, with " + d.versionDir + "/" + d.modeDir + "/ inside, in "
                 + shortPath(d.output, 44) + ".";
         }
-        /* 3.91 · 3.90's FLAT files at the version's top level — clips, its manifest, _renders/,
-         * _earlier_export/ — are never touched by an export into raw/ or edited/, and are said
-         * in amber, once, so he can tidy them by hand: SamX takes the version folder whole. */
-        if (d.legacy) {
-            sev = "warn";
-            text = (text ? text + " " : "") + legacySentence(d);
-        }
-        say("dest", sev, text, d.dir);
+        return { sev: sev, text: text };
     }
 
     /* FAIL CLOSED, at each door an export goes through: the press (doExport), the start after
@@ -4195,11 +4605,16 @@
      * last paint, because each of those can be seconds or minutes after it. Nothing is
      * created on a refusal — not Output/, not ACT/, not _renders/ — because nothing runs.
      * Returns the destination, or null having said why. */
+    /* 3.93 · asked of the mode now in effect: at the press of a Both export that is the PAIR
+     * (resolveBoth — refused when either half is, naming it), and at a half's own start and
+     * engine doors it is that half's folder, as in a single-mode export. */
     function refuseIfNoDest(where) {
         var d = resolveDest();
         if (d.ok) return d;
         var why = d.why || (state.info ? "Choose a folder to save into first."
                                        : "Read the timeline first.");
+        // A half of Both refused at its own door (its folder changed while the other ran).
+        if (state.half && d.why) why = "The " + HALF_NAME[state.half] + " half of Both: " + why;
         log("export refused (" + where + "): " + why);
         state.destRefused = !!state.info;
         /* ⚠️ A REFUSED RETRY IS NOT KEPT FOR THE NEXT PRESS (3.90 round 3). runEngineExport()
@@ -4212,7 +4627,8 @@
         state.clashHeld = 0;
         say("clash", "warn", "");
         say("dest", "warn", why, refusalTitle(d));
-        paintOutPath(d);
+        // The box says what is lit — in Both the pair, whichever half's door refused.
+        paintBox(state.half ? resolveDest(state.cutFrom) : d);
         return null;
     }
 
@@ -4226,18 +4642,59 @@
      * and the press is refused once, naming the new folder — the next press is for what the
      * box shows. A paint that was a refusal is not held to (the remedy of a refusal is exactly
      * such a change), and the render door has its own check (runEngineExport). */
+    /* 3.93 · AND IN BOTH, FOR EACH OF ITS TWO FOLDERS. A Both box names the pair and its
+     * destination has no one folder, so the single-mode test (shownDir against d.dir) held
+     * nothing there. Three doors, each against what the box showed:
+     *   the press and the chain's start (d is the PAIR, resolveBoth): each half's folder
+     *     against the one the last Both paint showed for it (shownPair) — refused, as in a
+     *     single mode, before anything runs;
+     *   each half's own start (d is that half's, state.half set): against the folder the box
+     *     showed for THAT half when the chain started (state.chain.shown) — never the other
+     *     half's, so the switch from raw/ to edited/ is not a move, and never a repaint made
+     *     between the halves, which no press looked at. A half refused here ends that half
+     *     only; the chain carries on, as for any door that refuses a half. */
     function destMoved(d, where) {
-        var was = state.shownDir;
-        if (!was || !d || d.dir === was) return false;
+        if (!d) return false;
+        var was = "", now = "", half = state.half, i;
+        if (d.halves) {
+            var sp = state.shownPair;
+            if (!sp) return false;
+            for (i = 0; i < HALVES.length && !now; i++) {
+                if (d.halves[HALVES[i]].dir !== sp[HALVES[i]]) {
+                    was = sp[HALVES[i]];
+                    now = d.halves[HALVES[i]].dir;
+                }
+            }
+            if (!now) return false;
+        } else if (half) {
+            was = state.chain && state.chain.shown ? state.chain.shown[half] || "" : "";
+            if (!was || d.dir === was) return false;
+            now = d.dir;
+        } else {
+            was = state.shownDir;
+            if (!was || d.dir === was) return false;
+            now = d.dir;
+        }
         log("export refused (" + where + "): the destination changed since it was shown — "
-            + was + " is now " + d.dir);
+            + was + " is now " + now);
         state.retryKeys = [];
         state.clashHeld = 0;
         say("clash", "warn", "");
         setOutDest();
-        say("export", "warn", "The destination changed since the box showed it — it is now "
-            + shortPath(d.dir, 44) + " — so nothing was exported; check it, then press Export "
-            + "again.", d.dir);
+        if (half) {
+            say("export", "warn", "The destination of the " + HALF_NAME[half] + " half changed "
+                + "since the box showed it — it is now " + shortPath(now, 44) + " — so nothing "
+                + "was exported into " + halfDir(half) + "; check it, then press Export again.", now);
+        } else if (d.halves) {
+            var pair = d.versionPath ? path.join(d.versionPath, d.halves.source.modeDir) : now;
+            say("export", "warn", "The destination changed since the box showed it — it is now "
+                + shortPath(pair, 44) + " + " + d.halves.render.modeDir + " — so nothing was "
+                + "exported; check it, then press Export again.", d.versionPath || now);
+        } else {
+            say("export", "warn", "The destination changed since the box showed it — it is now "
+                + shortPath(now, 44) + " — so nothing was exported; check it, then press Export "
+                + "again.", now);
+        }
         return true;
     }
 
@@ -4254,7 +4711,9 @@
         log("created " + act);
         say("dest", "info", "Created " + path.basename(path.dirname(act)) + "/"
             + path.basename(act) + " in " + shortPath(path.dirname(act), 44) + ".", act);
-        paintOutPath(resolveDest());
+        // 3.93 · what is lit (a Both export's first half made it; the box names the pair).
+        if (state.chain) state.chain.actMade = true;
+        paintBox(resolveDest(state.cutFrom));
     }
 
     /* THE ONE CONTROL WITH NO CORRECT DEFAULT, so it is the one that lights up.
@@ -4296,7 +4755,7 @@
         state.out = p || "";
         // The box itself is painted by setOutDest() below: after a read it shows the resolved
         // destination, which may not be under Save to at all.
-        try { window.localStorage.setItem("xmlcut.out", state.out); } catch (e) {}
+        try { lsSet("xmlcut.out", state.out); } catch (e) {}
         paintDest();
         setOutDest();
         /* 3.92 fix review · a Retry belongs to its folder: after Change moves Save to, the last
@@ -4356,8 +4815,11 @@
      * further pointing at. */
     function sayMismatch(open, weak) {
         var read = readSeqName();
-        var what = state.cutFrom === "render"
-            ? qn(open) + "’s picture would go into " + qn(read) + "’s clips."
+        /* 3.93 · Both has a Timeline half, so it gets the render sentence — the stronger one,
+         * and the one that is true of edited/ (raw/ would only be the wrong list). */
+        var what = shownHas("render")
+            ? qn(open) + "’s picture would go into " + qn(read) + "’s "
+              + (state.cutFrom === "both" ? "edited/ " : "") + "clips."
             : "Export would cut " + qn(read) + ", not " + qn(open) + ".";
         say("seq", "error", "Read " + qn(read) + " · " + qn(open) + " is open now. "
             + what + " Press Read again, or switch back."
@@ -4422,7 +4884,8 @@
          * ExtendScript work that can run for minutes, and its answer would describe a moment
          * that has passed. The export check is exempt because it runs BEFORE anything starts
          * — that is the whole point of it. */
-        if (when !== "export" && (state.busy || state.running)) return;
+        // 3.93 · nor between the halves of a Both export, where nothing runs for a moment.
+        if (when !== "export" && (state.busy || state.running || state.chain)) return;
         /* Only the export check pays for the timeline walk. The focus check and the timer
          * ask the cheap question — "is this the same sequence" — several times a minute. */
         /* ⚠️ AND IT CANNOT HANG FOREVER. evalScript queues behind whatever ExtendScript is
@@ -4431,6 +4894,8 @@
          * happened". A guard that can swallow the work it guards is worse than no guard, so
          * an unanswered check proceeds and says so, the same choice already made for a reply
          * that cannot be parsed. */
+        // 3.93 audit · what an export's check lets through is decided afresh by ITS answer.
+        if (when === "export") { state.seqCleared = null; state.seqLate = false; }
         var answered = false;
         var bail = setTimeout(function () {
             if (answered) return;
@@ -4441,13 +4906,28 @@
                 say("seq", "warn", "Premiere did not answer the sequence check. Exporting "
                     + "anyway — make sure the right timeline is in front.");
             }
-            if (cb) cb(true);
+            if (cb) cb(true, "unanswered");
         }, SEQ_ANSWER_MS);
         cs.evalScript("activeSequenceStamp(" + (when === "export" ? "true" : "false")
                       + ")", function (raw) {
-            if (answered) return;
-            answered = true;
-            clearTimeout(bail);
+            /* 3.93 audit · AN ANSWER THAT COMES AFTER THE WAIT WAS GIVEN UP IS STILL READ, for the
+             * export. It used to be dropped without a word: the export had gone ahead on the
+             * bail above, and a MISMATCH or DRIFT that reached the panel before a single frame
+             * was cut — ExtendScript answers in order, so it lands before renderCuts() even
+             * starts — was thrown away, and the other sequence was rendered and cut under the
+             * read's names (measured by the audit, the late answer at 5 s naming another
+             * sequence). Now its row goes up as any answer's does, and an unsafe one stops the
+             * render it is too late to prevent (seqAnsweredLate). */
+            var done = cb;
+            if (answered) {
+                if (when !== "export") return;
+                log("sequence check (export): answered after the " + SEQ_ANSWER_MS
+                    + "ms wait had been given up — read now");
+                done = function (safe) { if (!safe) seqAnsweredLate(); };
+            } else {
+                answered = true;
+                clearTimeout(bail);
+            }
             /* ⚠️ THE READ THIS CHECK WAS MADE FOR IS GONE — a check with no subject, not a
              * mismatch. A Read pressed while the stamp is in flight tears state.info down at
              * the top of the read, so readSeqName() answers "" and everything below here
@@ -4467,7 +4947,7 @@
                 say("seq", "error", "");
                 log("sequence check (" + when + "): the read was torn down while the check "
                     + "was in flight — nothing to compare");
-                if (cb) cb(false);
+                if (done) done(false);
                 return;
             }
             var r = null;
@@ -4484,7 +4964,7 @@
                 say("seq", "warn", "Cannot tell which sequence is open — reinstall the "
                     + "panel to restore this check.");
                 log("sequence check (" + when + "): unreadable reply: " + raw);
-                if (cb) cb(true);
+                if (done) done(true, "unreadable");
                 return;
             }
             if (r.none) {
@@ -4498,14 +4978,14 @@
                  * exactly the nagging that teaches him to ignore the rail. */
                 say("seq", "error", "");
                 log("sequence check (" + when + "): no active sequence");
-                if (cb) cb(true);
+                if (done) done(true, "no sequence open");
                 return;
             }
             if (!r.ok) {
                 say("seq", "warn", "Cannot tell which sequence is open — reinstall the "
                     + "panel to restore this check.");
                 log("sequence check (" + when + "): " + (r.error || "unknown"));
-                if (cb) cb(true);
+                if (done) done(true, "unreadable");
                 return;
             }
             var openId = String(r.id || ""), openName = String(r.name || "");
@@ -4515,6 +4995,13 @@
             var weak = !readId || !openId;
             var same = weak ? (openName === readSeqName()) : (openId === readId);
             state.seqOpenName = openName;
+            state.seqOpenId = openId;
+            state.seqOpenFp = String(r.fp || "");
+            /* 3.93 audit · THIS answer's verdict only. A drift an earlier check found stayed
+             * set, so a later check that found ANOTHER sequence open still read as a drift: the
+             * press's modal said "Timeline edited since Read" over the wrong sequence, and a
+             * refused Both half gave the drift's reason for it. */
+            state.seqDrift = false;
             if (weak) {
                 log("sequence check (" + when + "): NO SEQUENCE ID (read \"" + readId
                     + "\", open \"" + openId + "\") — comparing names, which cannot tell "
@@ -4529,7 +5016,7 @@
                 say("seq", "error", state.seqRenamed);
                 log("sequence check (" + when + "): RENAMED — read \"" + readSeqName()
                     + "\", open \"" + openName + "\" [" + openId + "]");
-                if (cb) cb(false);
+                if (done) done(false);
                 return;
             }
             if (same) {
@@ -4549,17 +5036,37 @@
                         + "list, ranges and names are the old edit's. Press Read again.");
                     log("sequence check (" + when + "): DRIFT — read fp " + state.readFp
                         + ", open fp " + openFp);
-                    if (cb) cb(false);
+                    if (done) done(false);
                     return;
                 }
-                if (cb) cb(true);
+                if (when === "export") state.seqCleared = { id: openId, fp: openFp, name: openName };
+                if (done) done(true);
                 return;
             }
             sayMismatch(openName, weak);
             log("sequence check (" + when + "): MISMATCH — read \"" + readSeqName()
                 + "\" [" + readId + "], open \"" + openName + "\" [" + openId + "]");
-            if (cb) cb(false);
+            if (done) done(false);
         });
+    }
+
+    /* 3.93 audit · AN EXPORT CHECK THAT ANSWERED LATE, AND UNSAFE. Its row is already up
+     * (checkSequence). A Timeline render in progress is asked to stop after the range it is on,
+     * and its reply is refused whatever it holds (renderThenExport reads seqLate), so nothing
+     * is cut from the other sequence's or the other edit's pictures. A Source Render encode is
+     * cutting from the read's own media and carries on: the row says what is open. */
+    function seqAnsweredLate() {
+        if (!state.running || state.proc || !renderNow()) {
+            log("sequence check (export): the late answer is unsafe — "
+                + (state.running ? "the encode cuts from the read's own media, so it carries on"
+                                 : "nothing of that export is running any more"));
+            return;
+        }
+        state.seqLate = true;
+        writeRenderStop();
+        progSay("Stopping after this clip…");
+        log("sequence check (export): the late answer is unsafe — Premiere is asked to stop, and "
+            + "nothing will be cut from this render");
     }
 
     /* BOTH GATES ASK THE SAME WAY, AND BOTH ARE BOUNDED.
@@ -4628,17 +5135,18 @@
              * the right sequence is open, it has simply moved on. Naming it "wrong sequence"
              * would send him looking at the tab bar, where everything is correct. */
             msg = "Timeline edited since Read.\n\n" + read + "\n\n"
-                + (state.cutFrom === "render"
+                + (shownHas("render")
                     ? "Premiere renders the timeline as it is NOW, under the old names and timecodes."
                     : "The list, the ranges and the names are the old edit's.")
                 + "\n\nExport anyway?";
             log("export held: " + read + " edited since read — asking");
-            askExportConfirm(msg, "timeline drift", proceed);
+            askExportConfirm(msg, "timeline drift", consented(proceed));
             return;
         }
-        if (state.cutFrom === "render") {
+        if (shownHas("render")) {
             /* STRONGER IN RENDER MODE, because the consequence is different in kind rather
-             * than in degree: the files themselves would be wrong, not just the list. */
+             * than in degree: the files themselves would be wrong, not just the list.
+             * 3.93 · and in Both, whose Timeline half renders the open sequence into edited/. */
             /* SHORT ON PURPOSE. The first version explained the whole mechanism in four
              * sentences and he asked for it "shorter, more to the point" — a modal is read
              * in about two seconds, and a wall of text is skimmed and dismissed, which is
@@ -4647,7 +5155,8 @@
             msg = "Wrong sequence.\n\n"
                 + "Read:  " + read + "\n"
                 + "Open:  " + open + "\n\n"
-                + "Timeline Render uses the OPEN one. You would get " + open
+                + (state.cutFrom === "both" ? "Both's Timeline Render half" : "Timeline Render")
+                + " uses the OPEN one. You would get " + open
                 + "'s pictures under " + read + "'s names.\n\n"
                 + "Export anyway?";
         } else {
@@ -4660,7 +5169,24 @@
                 + "Export anyway?";
         }
         log("export held: read \"" + read + "\" but \"" + open + "\" is open — asking");
-        askExportConfirm(msg, "sequence mismatch", proceed);
+        askExportConfirm(msg, "sequence mismatch", consented(proceed));
+    }
+
+    /* 3.93 audit · a "yes" lets THAT open sequence through, and the render reply is held to it. */
+    function consented(proceed) {
+        return function () {
+            state.seqConsent = { id: state.seqOpenId, fp: state.seqOpenFp,
+                                 name: String(state.seqOpenName || "") };
+            state.seqCleared = state.seqConsent;
+            proceed();
+        };
+    }
+
+    // The open sequence is still exactly the one the press's "Export anyway?" was answered for.
+    function consentHolds() {
+        var c = state.seqConsent;
+        return !!c && !!state.info && !state.seqRenamed && c.id === state.seqOpenId
+            && c.fp === state.seqOpenFp && c.name === state.seqOpenName;
     }
 
     /* THE EXPORT, in one or two phases.
@@ -4677,8 +5203,16 @@
          * a host call that never answered — because the ordinary success path says nothing.
          * Every export now leaves a first line, so silence above this line and silence below
          * it mean different things. */
-        log("export requested: " + state.cutFrom + " mode, " + pickedClips().length
-            + " clip(s) picked");
+        /* 3.93 · A Both press names both counts. The single-mode line is left exactly as it
+         * was: it is the first line of every report/panel-log.txt. */
+        if (state.cutFrom === "both") {
+            log("export requested: both mode, " + selectedCount("source") + " raw + "
+                + selectedCount("render") + " edited clip(s) picked"
+                + (state.retryBoth ? " (retry of each half's failed rows)" : ""));
+        } else {
+            log("export requested: " + state.cutFrom + " mode, " + pickedClips().length
+                + " clip(s) picked");
+        }
         /* ⚠️ ONE PRESS, ONE EXPORT.
          *
          * Nothing has STARTED yet at this point — checkSequence gives Premiere up to
@@ -4687,7 +5221,8 @@
          * through all of it. MEASURED: a second press inside it ran doExport twice, and two
          * engines started with identical argv into the same folder, concurrently, each
          * overwriting the other's clips as it went. */
-        if (state.exportPending || state.running) {
+        // 3.93 · and a Both export is ONE export, from its first half's start to its second's end.
+        if (state.exportPending || state.running || state.chain) {
             log("export ignored: one is already starting");
             return;
         }
@@ -4695,30 +5230,52 @@
          * than left for something else to notice, so this row can never be a stale reason
          * sitting over a run that is starting — the failure the "?" mismatch row was. */
         say("export", "warn", "");
+        /* 3.93 audit · THE LIST MUST BE THE LIT MODE'S. A read that landed under another lit mode
+         * is read again (scanLanded); should that re-read fail, the list left on screen is the
+         * other mode's, and its pick file and render spec would be that mode's — nothing runs. */
+        if (state.clips.length && state.clipsMode && state.clipsMode !== state.cutFrom) {
+            log("export refused: the list was read for " + state.clipsMode + ", and "
+                + state.cutFrom + " is lit");
+            say("export", "warn", "The list on screen was read for " + modeWord(state.clipsMode)
+                + ", not " + modeWord(state.cutFrom) + ", so nothing was exported — press Read "
+                + "again, then Export.");
+            return;
+        }
         // 3.91 · the press asks the drive again, SAMX_WORKSPACE's product folders included.
         dropSamxCache();
         /* 3.90 · NO DESTINATION, NO EXPORT — and nothing asked of Premiere either. Refused
          * here, before the sequence check, with the same sentence the dest row already shows:
          * no Output/ in the product, no version in the sequence name, or two of them. The
          * press is logged above, so the log still tells a refused press from a lost one. */
+        /* 3.93 · in Both, `pressed` is the PAIR (resolveBoth) and destMoved() holds each of its
+         * two folders to the one the box showed for it. */
         var pressed = refuseIfNoDest("export");
         if (!pressed || destMoved(pressed, "export")) return;
+        /* 3.93 · BOTH: EVERY OTHER BLOCKER OF EITHER HALF, BEFORE ANYTHING IS ASKED OF ANYONE —
+         * nothing ticked for one half, the Timeline half's read missing, the render cache's disk
+         * short of space. Its folders were asked just above (resolveBoth). The product owner:
+         * if either half is blocked, refuse both and start nothing. */
+        if (state.cutFrom === "both" && !refuseIfBothBlocked("export")) return;
         /* The folder may have changed since the row was painted — he may have moved the
          * other export's clips out, as the refusal told him to — and the press has just
          * re-asked the disk, so the row says what the press found rather than an old refusal
          * over a run that is starting. */
         if (state.destRefused) setOutDest();
         state.exportPending = true;
+        // 3.93 audit · a "yes" to an earlier press's modal is not this press's.
+        state.seqConsent = null;
         /* THE AUTHORITATIVE CHECK, and the reason the rail row is not enough on its own: the
          * row can be up to SEQ_CHECK_MS old and he may never have looked at it. This one runs
          * at the moment the export is asked for, and nothing starts until it has answered. */
-        checkSequence("export", function (safe) {
+        checkSequence("export", function (safe, how) {
             /* ⚠️ WRAPPED. A throw in here used to vanish: this runs inside an evalScript
              * callback, so nothing above it catches, the button stays enabled and the panel
              * looks like it ignored the click. Now it says so. */
             try {
                 if (safe) {
-                    log("sequence check passed — starting");
+                    // 3.93 audit · "passed" only when it did: an unanswered check is not a pass.
+                    log(how ? "sequence check " + how + " — starting anyway"
+                            : "sequence check passed — starting");
                     // Cleared as the run BEGINS, not after: from here setRunning(true) holds
                     // the door, and leaving both flags up would need two things to be
                     // cleared correctly instead of one.
@@ -4783,15 +5340,25 @@
      * deliver. Nothing is encoded from a stopped render.
      */
 
-    /* Where the panel tells host.jsx to stop. renderCuts() reads this between ranges. */
+    /* Where the panel tells host.jsx to stop. renderCuts() reads this between ranges.
+     * 3.93 audit · WHILE A RENDER RUNS, THE FOLDER PREMIERE WAS GIVEN (state.renderingDir), not
+     * renderDir() asked again: the cache key is the destination, which is re-asked of the disk
+     * at every ask — a product folder that lost its Output/ (another key), a team drive that
+     * dropped out (none) — and host.jsx looks only in the folder it is rendering into. Measured
+     * by the audit: the stop file went to another cache entry, or nowhere and unlogged, while
+     * Premiere rendered every remaining range under "Stopping…". */
     function renderStopFile() {
-        var d = renderDir();
+        var d = state.renderingDir || renderDir();
         return d ? path.join(d, "_render_stop") : "";
     }
 
     function writeRenderStop() {
         var f = renderStopFile();
-        if (!f) return false;
+        if (!f) {
+            log("cancel: no render folder to write the stop file into — Premiere finishes the "
+                + "ranges it has, and nothing is cut from them");
+            return false;
+        }
         try {
             /* ⚠️ THE FOLDER MAY NOT EXIST YET. renderCuts() creates it, but Cancel can be
              * pressed in the seconds before Premiere gets that far — and writeFileSync into a
@@ -4864,17 +5431,41 @@
         }, 1500);
     }
 
+    /* 3.93 · THE PROGRESS LINE NAMES THE HALF of a Both export — "Source Render (1 of 2) ·
+     * [3/16] …", "Timeline Render (2 of 2) · Rendering 4 of 10" — so a bar that goes back to 0
+     * half way reads as the second job starting, not as the first one resetting. In either
+     * single mode there is no chain and the text is exactly what it was. */
+    function progSay(text) {
+        var ch = state.chain;
+        el.progtext.textContent = ((ch && state.half)
+            ? HALF_NAME[state.half] + " (" + (ch.i + 1) + " of " + ch.halves.length + ") · " : "")
+            + text;
+    }
+
     function cancelRun() {
-        if (!state.running && !state.proc) return;
+        if (!state.running && !state.proc) {
+            /* 3.93 · BETWEEN A BOTH EXPORT'S HALVES nothing is running for a moment — the Source
+             * half has ended and the Timeline half has not begun — and a Cancel there must still
+             * stop the second one starting. */
+            if (state.chain) {
+                state.chain.cancelled = true;
+                state.cancelled = true;
+                log("cancel: the Both export stops before its next half");
+            }
+            return;
+        }
         state.cancelled = true;
+        /* 3.93 · AND IN A BOTH EXPORT IT STOPS THE CHAIN, not only the half it lands in. The flag
+         * above is cleared as each run begins (beginExport), so the chain keeps its own. */
+        if (state.chain) state.chain.cancelled = true;
         if (state.proc) {
             log("cancel: killing the encode (pid " + state.proc.pid + ") and its group");
             killTree(state.proc);
-            el.progtext.textContent = "Stopping…";
+            progSay("Stopping…");
         } else {
             // No subprocess, so this is the render phase.
             writeRenderStop();
-            el.progtext.textContent = "Stopping after this clip…";
+            progSay("Stopping after this clip…");
         }
         // One call, after both branches. It used to sit in the render branch only, so the
         // button went on offering a stop it had already delivered for the whole encode.
@@ -4903,6 +5494,10 @@
     }
 
     function startExport() {
+        /* 3.93 · BOTH IS TWO OF THESE, ONE AFTER THE OTHER — startChain() runs this very
+         * function once per half, with state.half set, so each half's clash count, doors,
+         * render and engine are the single-mode export's own. */
+        if (state.cutFrom === "both" && !state.chain) return startChain();
         /* NO REPLACE QUESTION. He asked for it gone: "make it auto overwrite all exissting
          * file". A re-export now overwrites the names it reproduces and starts immediately.
          *
@@ -4958,6 +5553,550 @@
      * neither the version nor the delivery. */
     function clashLeaf(dir) {
         return path.basename(path.dirname(dir)) + "/" + path.basename(dir) + "/";
+    }
+
+    /* ═════════════════════════════════════════ 3.93 · BOTH — TWO EXPORTS, ONE PRESS
+     *
+     * The product owner, 29 Sep 2026: export both modes in ONE press, to cut out the step of
+     * Source Render + Export, wait, Timeline Render + Export. His rules, and where each is kept:
+     *
+     *   ORDER      the Source half first, into <version>/raw/, then the Timeline half, into
+     *              <version>/edited/ — one job at a time, never concurrently. startChain()
+     *              runs chainRun(0); the next half starts only from chainNext(), which runs
+     *              only once the half before it has no process and is not running.
+     *   REFUSE     either half blocked — its folder refused (resolveBoth), nothing ticked for
+     *   BOTH       it, the Timeline read missing, the render cache's disk short — and NOTHING
+     *              starts: asked at the press (doExport) and again at the start after the
+     *              sequence check (startChain), before Premiere is asked for anything and before
+     *              the engine is spawned. The sentence names the half (bothWhy, bothBlockedWhy).
+     *   CARRY ON   once started, a failed clip — or a failed engine run — in the first half
+     *              never stops the second: every end of a half goes to chainNext(), which
+     *              looks at nothing but Cancel.
+     *   CANCEL     stops the whole chain: the second half does not start (state.chain.cancelled,
+     *              kept apart from state.cancelled, which each run clears as it begins).
+     *   RECORDS    each folder gets its own manifest, clips.csv and report/ — they are the
+     *              engine's and the report's own writes into -o, and each half has its own -o.
+     *   REPORT     both folders' outcomes, and failed rows that say which folder (chainEnd,
+     *              bothOutcome, mergedRow). RETRY re-runs each half's own failed rows into its
+     *              own folder, as that mode's Retry would, and skips a half with none.
+     *   CHIME      once, at the end of the chain, clean only if both halves were.
+     *
+     * ⚠️ EACH HALF IS THE SINGLE-MODE EXPORT, NOT A COPY OF IT. chainRun() sets state.half and
+     * calls startExport(): the clash count, the three doors, the render spec, the pick file, the
+     * argv and the close handler are the ones a Source Render or Timeline Render export runs —
+     * modeNow() is what makes them that half's (see the block above argsFor). The Timeline half's
+     * list is the Timeline READ's (state.editClips, scanEdit), so its --pick, its render spec and
+     * its numbering are that mode's, not an approximation made from the Source list. */
+
+    // The halves a Both export (or its Retry) runs: both, or those with failed rows to retry.
+    function bothHalvesToRun(retry) {
+        var out = [];
+        for (var i = 0; i < HALVES.length; i++) {
+            if (!retry || (retry[HALVES[i]] || []).length) out.push(HALVES[i]);
+        }
+        return out;
+    }
+
+    /* A question asked AS a half would run — its Retry keys and the report its Retry reads, as
+     * well as its mode — with all three put back after. For the checks made before a chain
+     * starts; the chain itself sets them for real (chainRun). */
+    function asHalf(m, retry, fn) {
+        var was = { half: state.half, keys: state.retryKeys, report: state.report };
+        state.half = m;
+        state.retryKeys = retry ? (retry[m] || []).slice() : [];
+        if (retry && state.bothReport && state.bothReport[m]) state.report = state.bothReport[m].rows;
+        try { return fn(); } finally {
+            state.half = was.half;
+            state.retryKeys = was.keys;
+            state.report = was.report;
+        }
+    }
+
+    /* NOTHING TO DO IN ONE HALF, said the way the single modes say it, naming the half. Also the
+     * next-action line's (renderNext), so the press is never the first place it is heard. ""
+     * for a Retry, which runs the halves that have failures and only those. */
+    function bothEmptyWhy() {
+        if (state.cutFrom !== "both" || state.chain || state.retryBoth || !state.clips.length) return "";
+        if (!selectedCount("source")) {
+            return "Nothing is ticked for raw/ (the Source Render half), so Both exports nothing — "
+                + "tick at least one clip or file type, or press Timeline Render to export edited/ "
+                + "alone.";
+        }
+        if (!state.editRead) return "";
+        var spec = asHalf("render", null, renderSpec);
+        if (!spec.length) {
+            return "Nothing to render for edited/ (the Timeline Render half): no ticked video "
+                + "clips on V" + (state.vtrackWant || "?") + ", so Both exports nothing — tick some, "
+                + "pick a different Master track, or press Source Render to export raw/ alone.";
+        }
+        return "";
+    }
+
+    /* Everything but the folders that blocks a Both export: the Timeline read missing, a half
+     * with nothing to do, and — `space` — the render cache's disk, asked exactly as the Timeline
+     * half's own render door will ask it (renderSpaceWhy over that half's render spec), and
+     * pruned first the same way. "" when nothing blocks. */
+    function bothBlockedWhy(space) {
+        var retry = state.retryBoth, halves = bothHalvesToRun(retry);
+        var ren = halves.indexOf("render") >= 0;
+        if (ren && !state.editRead) {
+            return "The Timeline Render half has no cut list of its own yet — its read did not "
+                + "finish — so Both exports nothing, not even raw/. Press Read again, then export.";
+        }
+        var empty = bothEmptyWhy();
+        if (empty) return empty;
+        if (space && ren) {
+            var short = asHalf("render", retry, function () {
+                var spec = renderSpec();
+                if (!spec.length) return "";      // a Retry that only re-encodes renders nothing
+                var dir = renderDir();
+                pruneRenderCache(dir);
+                return renderSpaceWhy(dir, spec);
+            });
+            if (short) {
+                return "The Timeline Render half cannot render, so Both exports nothing — not even "
+                    + "raw/. " + short;
+            }
+        }
+        return "";
+    }
+
+    /* The door for everything bothBlockedWhy() finds. Refused the way the single-mode render
+     * door refuses (fail(), logged as a refusal), and like every door it leaves nothing behind:
+     * no Retry narrowing the next press, no clash row about a run that never happened. */
+    function refuseIfBothBlocked(where) {
+        var why = bothBlockedWhy(true);
+        if (!why) return true;
+        log("export refused (" + where + "): " + why);
+        state.retryKeys = [];
+        state.retryBoth = null;
+        state.clashHeld = 0;
+        say("clash", "warn", "");
+        fail(why);
+        return false;
+    }
+
+    /* THE START OF A BOTH EXPORT, after the sequence check and any modal: every door asked
+     * again — the press was seconds or minutes ago — and then the first half. */
+    function startChain() {
+        // 3.93 · the pair, and (destMoved) each of its folders still the one the box showed.
+        var pair = refuseIfNoDest("start");
+        if (!pair || destMoved(pair, "start")) { state.retryBoth = null; return; }
+        if (!refuseIfBothBlocked("start")) return;
+        var retry = state.retryBoth;
+        state.retryBoth = null;
+        var halves = bothHalvesToRun(retry);
+        if (!halves.length) return;
+        /* `shown`: the two folders the box showed at this start (the pair just held to them) —
+         * what each half's own start is held to (destMoved), whatever is painted in between. */
+        /* 3.93 audit · `dest`: that pair's product, Output/ and ACT/ — what the report's "in …"
+         * and "this export created …" name at the end, not the destination as it resolves then
+         * (a folder that gained or lost an Output/ in between is another one). */
+        state.chain = { halves: halves, i: -1, step: 0, retry: retry, results: {},
+                        cancelled: false, actMade: false,
+                        shown: { source: pair.halves.source.dir, render: pair.halves.render.dir },
+                        dest: { product: pair.product || "", output: pair.output || "",
+                                act: pair.act || "" } };
+        state.cancelled = false;
+        // The rows the table shows while it runs — each half's own, from the report a Retry
+        // continues, or none at all for a fresh export (jobsReset clears them anyway).
+        if (!retry || !state.rowHalves) state.rowHalves = { source: {}, render: {} };
+        var names = [];
+        for (var i = 0; i < halves.length; i++) names.push(HALF_NAME[halves[i]] + " into " + halfDir(halves[i]));
+        log("both: " + names.join(", then ") + (retry ? " — each half's own failed rows" : ""));
+        paintLocks();
+        chainRun(0);
+    }
+
+    /* ONE HALF, as its mode's own export: its Retry keys, the report its Retry reads, its row
+     * states and its notes are the ones that mode would have, and then startExport(). */
+    function chainRun(i) {
+        var ch = state.chain, m = ch.halves[i];
+        ch.i = i;
+        ch.step++;
+        state.half = m;
+        state.retryKeys = ch.retry ? (ch.retry[m] || []).slice() : [];
+        state.report = (ch.retry && state.bothReport && state.bothReport[m])
+            ? state.bothReport[m].rows.slice() : [];
+        var rows = state.rowHalves[m] || {}, copy = {};
+        for (var k in rows) if (Object.prototype.hasOwnProperty.call(rows, k)) copy[k] = rows[k];
+        state.rowState = copy;
+        state.merge = [];
+        state.lastRun = null;
+        // This half's error, if it has one, is its own — the chain's end says each half's.
+        clearError();
+        log("both: " + HALF_NAME[m] + " (" + (i + 1) + " of " + ch.halves.length + ") into "
+            + (outDir() || "no folder"));
+        /* 3.93 audit · THE OPEN SEQUENCE IS ASKED AGAIN BEFORE A HALF THAT RENDERS — unless it is
+         * the chain's first step, which the press's own check was made for a moment ago. The
+         * Source half runs in ffmpeg for minutes with Premiere free to use, and renderCuts()
+         * renders app.project.activeSequence: whatever is open, in whatever state, when raw/
+         * ends. MEASURED before this: another sequence opened while raw/ was written (or this
+         * one edited, or renamed to the next version) was rendered into edited/ under the
+         * read's names, numbers and ranges, and the chime was the clean one. In Timeline Render
+         * alone the check runs a moment before the render; this puts the same check that close.
+         * Unsafe refuses THAT half and says why (halfSeqWhy) — never a modal minutes after the
+         * press, with nobody looking at it. */
+        if (m === "render" && i > 0) {
+            var step = ch.step;
+            checkSequence("export", function (safe) {
+                if (state.chain !== ch || ch.step !== step) return;
+                /* The state the press's "Export anyway?" was answered yes for, unchanged since:
+                 * that answer stands for this half too (the press asked it for both). */
+                if (!safe && consentHolds()) {
+                    log("both: the open sequence is still the one the press's “Export anyway” was "
+                        + "answered for — " + HALF_NAME[m] + " goes ahead");
+                    state.seqCleared = state.seqConsent;
+                    safe = true;
+                }
+                if (safe && !ch.cancelled) { startExport(); return; }
+                if (!safe) {
+                    var why = halfSeqWhy();
+                    log("both: " + HALF_NAME[m] + " refused before it rendered — " + why);
+                    // As every door that refuses a half: its Retry keys and clash row go too.
+                    state.retryKeys = [];
+                    say("clash", "warn", "");
+                    fail(why);
+                }
+                halfOver();
+            });
+            return;
+        }
+        startExport();
+    }
+
+    /* Why the Timeline half of a Both export was refused by the check made just before it would
+     * have rendered: the single-mode reason, what edited/ and raw/ now hold, and the way on. */
+    function halfSeqWhy() {
+        var read = qn(readSeqName());
+        var tail = " — so nothing was rendered or cut into edited/ (raw/ is as written).";
+        if (!state.info) return "The read was gone before the Timeline Render half began" + tail;
+        if (state.seqRenamed) {
+            return state.seqRenamed + " Nothing was rendered or cut into edited/ (raw/ is as written).";
+        }
+        if (state.seqDrift) {
+            return read + " was edited while raw/ was being written, so the read's list, ranges and "
+                + "names are the old edit's" + tail + " Press Read again, then export both folders again.";
+        }
+        return "Premiere has " + qn(state.seqOpenName) + " open now, not " + read + ", and this half "
+            + "renders the open sequence" + tail + " Open " + read + ", then export edited/ with "
+            + "Timeline Render.";
+    }
+
+    /* A HALF HAS ENDED — from setRunning(false), or from a door that refused it before it ran.
+     * The next step is taken after the caller has finished (the close handler still builds this
+     * half's report), and only for the half that was running: a second report of the same end
+     * finds the step moved on and does nothing. */
+    function halfOver() {
+        var ch = state.chain;
+        if (!ch) return;
+        var step = ch.step;
+        setTimeout(function () { chainNext(step); }, 0);
+    }
+
+    function chainNext(step) {
+        var ch = state.chain;
+        if (!ch || ch.step !== step) return;
+        // Not over yet — its engine's close is still to come, and will say so again.
+        if (state.proc || state.running) return;
+        ch.step++;
+        var m = ch.halves[ch.i];
+        ch.results[m] = halfResult(m);
+        state.rowHalves[m] = state.rowState;
+        if (ch.cancelled || state.cancelled) {
+            log("both: stopped by Cancel in " + HALF_NAME[m]
+                + (ch.i + 1 < ch.halves.length ? " — " + HALF_NAME[ch.halves[ch.i + 1]]
+                   + " was not started" : ""));
+            ch.cancelled = true;
+            chainEnd();
+            return;
+        }
+        if (ch.i + 1 < ch.halves.length) {
+            chainRun(ch.i + 1);
+            return;
+        }
+        chainEnd();
+    }
+
+    // What a half did, off the state its run left: kept for the Both report and its Retry.
+    function halfResult(m) {
+        var ran = !!state.lastRun, built = !!(state.lastRun && state.lastRun.built);
+        var ch = state.chain;
+        return {
+            ran: ran, built: built, code: ran ? state.lastRun.code : null,
+            cancelled: !!state.cancelled,
+            /* 3.93 audit · the folder this half's engine was GIVEN (lastRun.dir), or for a half
+             * that never ran the one the box showed for it when the chain started — never the
+             * destination as it resolves now. */
+            dir: built ? state.reportFor
+                : ((ran && state.lastRun.dir) || (ch && ch.shown && ch.shown[m]) || outDirOf(m)),
+            rows: built ? state.report.slice() : [],
+            pills: built ? (state.lastPills || []).slice() : [],
+            merge: state.merge.slice(),
+            complete: built ? String(state.completeness || "") : "",
+            err: railRows.err ? railRows.err.text : "",
+            clash: railRows.clash ? { sev: railRows.clash.sev, text: railRows.clash.text } : null
+        };
+    }
+
+    /* THE END OF A BOTH EXPORT: the two halves put together as one report — both folders'
+     * outcomes, every row's state in each folder, the Retry of each half's own failures — and
+     * one chime. A Retry's report keeps the half it did not run as it was. */
+    function chainEnd() {
+        var ch = state.chain, prev = state.bothReport, i, j, m;
+        state.chain = null;
+        state.half = "";
+        state.retryKeys = [];
+        var br = { cancelled: !!ch.cancelled, actMade: ch.actMade, ran: ch.halves.slice(), dirs: {},
+                   dest: ch.dest || null };
+        for (i = 0; i < HALVES.length; i++) {
+            m = HALVES[i];
+            br[m] = ch.results[m] || (ch.retry && prev ? prev[m] : null) || null;
+            br.dirs[m] = (br[m] && br[m].dir) || (ch.shown && ch.shown[m]) || outDirOf(m);
+        }
+        /* 3.93 audit · the version folder the two halves' OWN folders are in — Show in Finder and
+         * Copy on this report open what it names — not the one resolveDest() gives at the end. */
+        br.version = br.dirs.source ? path.dirname(br.dirs.source)
+                   : (br.dirs.render ? path.dirname(br.dirs.render) : "");
+        state.bothReport = br;
+        state.report = [];
+        state.merge = [];
+        for (i = 0; i < HALVES.length; i++) {
+            m = HALVES[i];
+            var r = br[m];
+            if (!r) continue;
+            for (j = 0; j < r.rows.length; j++) {
+                var row = {}, f;
+                for (f in r.rows[j]) if (Object.prototype.hasOwnProperty.call(r.rows[j], f)) row[f] = r.rows[j][f];
+                row.half = m;
+                row.name = halfDir(m) + row.name;
+                state.report.push(row);
+            }
+            if (ch.results[m] && r.merge.length) {
+                state.merge.push(HALF_NAME[m] + " → " + halfDir(m));
+                state.merge = state.merge.concat(r.merge);
+            }
+        }
+        state.reportFor = "";
+        state.rowState = mergedRowMap();
+        paintLocks();
+        var errs = [], clash = [], clashWarn = false, built = false;
+        for (i = 0; i < ch.halves.length; i++) {
+            m = ch.halves[i];
+            var res = ch.results[m];
+            if (!res) continue;
+            if (res.err) errs.push(HALF_NAME[m] + " (" + halfDir(m) + "): " + res.err);
+            if (res.clash) {
+                clash.push(res.clash.text);
+                if (res.clash.sev === "warn") clashWarn = true;
+            }
+        }
+        /* 3.93 audit · A HALF A RETRY DID NOT RUN, AND THAT WAS NEVER DELIVERED, IS STILL NOT.
+         * A Retry runs only the halves with failed rows, and a half that wrote no report has
+         * none; its error went with this chain's clearError() (chainRun), so the report line's
+         * "the message above says why" pointed at nothing. It is said again, as the export's
+         * before this Retry. */
+        for (i = 0; i < HALVES.length; i++) {
+            m = HALVES[i];
+            if (ch.results[m] || !br[m] || br[m].built || !br[m].err) continue;
+            errs.push(HALF_NAME[m] + " (" + halfDir(m) + "), not run again by this Retry: " + br[m].err);
+        }
+        for (i = 0; i < HALVES.length; i++) if (br[HALVES[i]] && br[HALVES[i]].built) built = true;
+        if (errs.length) fail(errs.join("\n"));
+        /* 3.93 audit · SAID AGAIN WHENEVER ANY HALF HAD ONE, not only when both did. The Timeline
+         * half's start clears the row when edited/ held nothing (startExport), so raw/'s — "…
+         * N earlier file(s) were moved to _earlier_export/" — was gone from the rail whenever
+         * only raw/ held clips: the first Both export over a Source Render one. */
+        if (clash.length) say("clash", clashWarn ? "warn" : "info", clash.join(" "));
+        if (built) {
+            state.reportFresh = true;
+            showReport(true);
+            paintBothReport();
+            renderReport();
+            renderMerge();
+        } else if (state.clips.length) {
+            renderClips();
+        }
+        setOutDest();
+        if (br.actMade) settleBothAct();
+        refreshExportEnabled();
+        /* 3.93 audit · CLEAN MEANS BOTH FOLDERS ARE — each half of the report this chain leaves,
+         * run now or carried from the export a Retry continues: built, exit 0, no failed row.
+         * Over the halves THIS chain ran only, a Retry of raw/'s failures chimed clean while
+         * edited/ had never been delivered. */
+        var clean = !br.cancelled;
+        for (i = 0; i < HALVES.length && clean; i++) {
+            var hr = br[HALVES[i]];
+            if (!hr || !hr.built || hr.code !== 0) clean = false;
+            else for (j = 0; j < hr.rows.length; j++) if (hr.rows[j].bad) clean = false;
+        }
+        log("both: " + (br.cancelled ? "stopped" : "done") + " — " + bothOutcome());
+        chime(clean);
+    }
+
+    // "Created Output/ACT in …" after a Both export whose first half made it — setOutDest()
+    // at the chain's end has just repainted the row over the note the half's own end left.
+    function settleBothAct() {
+        // 3.93 audit · the ACT/ this chain made, as its pair named it.
+        var d = (state.bothReport && state.bothReport.dest) || resolveDest("source");
+        if (!d.act || !isDir(d.act)) return;
+        say("dest", "info", "Created " + path.basename(path.dirname(d.act)) + "/"
+            + path.basename(d.act) + " in " + shortPath(path.dirname(d.act), 44) + ".", d.act);
+    }
+
+    // "v1.2/raw/ and v1.2/edited/" — the two folders a Both report is of.
+    function bothFolders() {
+        var br = state.bothReport, dd = (br && br.dirs) || {};
+        return (dd.source ? clashLeaf(dd.source) : "raw/") + " and "
+            + (dd.render ? clashLeaf(dd.render) : "edited/");
+    }
+
+    /* "raw/ 16 written · edited/ 9 of 10 written, 1 failed" — both folders, always both, so the
+     * line is never read as the whole export's when it is one folder's. */
+    function bothOutcome() {
+        var br = state.bothReport;
+        if (!br) return "";
+        var bits = [];
+        for (var i = 0; i < HALVES.length; i++) {
+            bits.push(halfDir(HALVES[i]) + " " + halfOutcome(br[HALVES[i]], br.cancelled,
+                (br.ran || HALVES).indexOf(HALVES[i]) < 0 ? HALVES[i] : ""));
+        }
+        return bits.join(" · ");
+    }
+
+    /* @param carried  3.93 audit · the half's mode when this chain (a Retry) did not run it, its
+     *                 outcome being the export's before; "" otherwise. A carried half that never
+     *                 wrote a report has no failed rows, so no Retry can deliver it — its outcome
+     *                 says how to, rather than point at a message. */
+    function halfOutcome(r, stopped, carried) {
+        if (!r) {
+            if (carried && !stopped) return "not delivered — export it with " + HALF_NAME[carried];
+            return stopped ? "not run (stopped)" : "not run";
+        }
+        if (!r.built) {
+            if (carried && !r.cancelled) {
+                return "not delivered — a Retry does not run it again; export it with "
+                    + HALF_NAME[carried];
+            }
+            return r.cancelled ? "stopped — nothing to report"
+                               : "nothing written — the message above says why";
+        }
+        var ok = 0, bad = 0, kept = 0;
+        for (var i = 0; i < r.rows.length; i++) {
+            if (r.rows[i].wrote) ok++;
+            else if (r.rows[i].bad) bad++;
+            if (r.rows[i].kept) kept++;
+        }
+        var s = bad ? ok + " of " + (ok + bad) + " written, " + bad + " failed" : ok + " written";
+        if (kept) s += ", " + kept + " already there";
+        return s + (r.cancelled ? " (stopped)" : "");
+    }
+
+    /* The report's own blocks for a Both export: each half's chips, named by folder; the
+     * outcome line; and the version folder, which holds the two. */
+    function paintBothReport() {
+        var br = state.bothReport;
+        if (!br) return;
+        var pills = [], comp = [], i, j, m;
+        for (i = 0; i < HALVES.length; i++) {
+            m = HALVES[i];
+            var r = br[m];
+            if (!r || !r.built) continue;
+            for (j = 0; j < r.pills.length; j++) {
+                pills.push({ t: halfDir(m) + " " + r.pills[j].t, c: r.pills[j].c, tip: r.pills[j].tip });
+            }
+            if (r.complete) comp.push(halfDir(m) + " " + r.complete);
+        }
+        paintTally(pills);
+        state.completeness = comp.join(" · ");
+        say("complete", "info", state.completeness);
+        // 3.93 audit · named from the chain's own pair (br.dest) and its folders, not re-resolved.
+        var d = br.dest || {};
+        var where = (d.product && br.version && br.version.indexOf(d.product + path.sep) === 0)
+            ? path.basename(d.product) + "/" + path.relative(d.product, br.version) + "/"
+            : shortPath(br.version, 60);
+        el.repdestlbl.textContent = bothOutcome() + " — in " + where
+            + (br.actMade && d.output && d.act ? " — this export created " + path.basename(d.output)
+               + "/" + path.basename(d.act) : "");
+        show(el.repdestlbl, true);
+        setPathLabel(el.repdest, br.version, 60);
+        show(el.repdestrow, !!br.version);
+    }
+
+    /* ONE ROW'S STATE IN BOTH, from each folder's: a row that is running shows it; a row that
+     * failed in either folder is failed, and its reason SAYS WHICH FOLDER ("edited/: …"); a row
+     * written in both is written. While a half runs, that half's own live states stand in for
+     * the ones it had. */
+    function mergedRow(key) {
+        var hs = state.rowHalves || {}, got = [], i;
+        for (i = 0; i < HALVES.length; i++) {
+            var m = HALVES[i];
+            var rs = (state.chain && state.half === m) ? state.rowState[key] : (hs[m] || {})[key];
+            if (rs) got.push({ m: m, rs: rs });
+        }
+        if (!got.length) return null;
+        for (i = 0; i < got.length; i++) if (got[i].rs.st === "run") return got[i].rs;
+        var bad = [];
+        for (i = 0; i < got.length; i++) if (got[i].rs.st === "bad") bad.push(got[i]);
+        if (bad.length) {
+            var out = {}, f;
+            for (f in bad[0].rs) if (Object.prototype.hasOwnProperty.call(bad[0].rs, f)) out[f] = bad[0].rs[f];
+            var why = [];
+            for (i = 0; i < bad.length; i++) why.push(halfDir(bad[i].m) + ": " + (bad[i].rs.why || "failed"));
+            out.why = why.join(" · ");
+            return out;
+        }
+        for (i = 0; i < got.length; i++) if (got[i].rs.st === "ok") return got[i].rs;
+        return got[0].rs;
+    }
+
+    function mergedRowMap() {
+        var hs = state.rowHalves || {}, keys = {}, out = {}, i, k;
+        for (i = 0; i < HALVES.length; i++) {
+            for (k in (hs[HALVES[i]] || {})) {
+                if (Object.prototype.hasOwnProperty.call(hs[HALVES[i]], k)) keys[k] = 1;
+            }
+        }
+        for (k in keys) if (Object.prototype.hasOwnProperty.call(keys, k)) out[k] = mergedRow(k);
+        return out;
+    }
+
+    /* 3.93 audit (2) · WHOSE ROWS THE TABLE MAY DRAW. A finished run's states are keyed by cut
+     * id, and the Source and Timeline reads give the same ids: after a Source export into raw/,
+     * pressing Timeline Render drew every row "✓ 10 B" and "2 written" for an edited/ that did
+     * not exist, and after a Both run a single mode drew the other folder's failures. So a
+     * run's rows are drawn only while Export would write where they are of — the same test
+     * retryHere() makes for the report's Retry; otherwise the list is drawn as not yet
+     * exported for the lit mode, and the report block stays as it is. While a run or a Both
+     * chain is going, its own rows are drawn, as ever.
+     *   "own"  — state.rowState, a single-mode run's, into outDir();
+     *   "both" — a Both run's merged rows, with Both lit and both halves' folders unchanged;
+     *   "half" — the lit mode's half of a Both run, whose folder that half wrote;
+     *   ""     — nothing: the rows are of another folder. */
+    function rowsHere() {
+        if (state.running || state.proc || state.chain) {
+            return (state.rowHalves && state.cutFrom === "both") ? "both" : "own";
+        }
+        if (state.rowHalves) {
+            var dirs = (state.bothReport && state.bothReport.dirs) || null;
+            if (!dirs) return "";
+            if (state.cutFrom === "both") {
+                return (outDirOf("source") === dirs.source && outDirOf("render") === dirs.render)
+                    ? "both" : "";
+            }
+            return (dirs[state.cutFrom] && outDir() === dirs[state.cutFrom]) ? "half" : "";
+        }
+        return (state.rowsFor && state.rowsFor === outDir()) ? "own" : "";
+    }
+
+    // What the table shows for a row: in Both, both folders' (mergedRow); otherwise the run's.
+    // `here` is rowsHere(), asked once per paint by renderClips (it reads the destination).
+    function rowStateOf(key, here) {
+        if (here === undefined) here = rowsHere();
+        if (!here) return null;
+        if (here === "both") return mergedRow(key);
+        if (here === "half") return ((state.rowHalves || {})[state.cutFrom] || {})[key] || null;
+        return state.rowState[key] || null;
     }
 
     /* Files directly inside <dir>/_earlier_export/ — the engine's move-aside folder, whose
@@ -5043,7 +6182,10 @@
          * creates its folder with every missing parent, so a destination that stopped being
          * valid in between would have had Output/ made for it by the host. */
         var dest = refuseIfNoDest("start");
-        if (!dest || destMoved(dest, "start")) return;
+        /* 3.93 · a Both half refused here — its folder refused, or not the one the box showed
+         * for that half when the chain started (destMoved) — ends that half; the chain carries
+         * on (halfOver). Outside a chain halfOver() does nothing. */
+        if (!dest || destMoved(dest, "start")) { halfOver(); return; }
         // Whether THIS export is the one that creates Output/ACT — settled in settleAct().
         state.actWanted = dest.actExists ? "" : dest.act;
         state.actMade = false;
@@ -5051,8 +6193,10 @@
         else if (dest.versionDir !== dest.version) {
             log("destination: " + dest.version + " goes into the existing " + dest.versionDir + "/");
         }
+        state.renderingDir = "";               // no render of this export has started yet
         clearRenderStop();
-        if (state.cutFrom !== "render") return runEngineExport(null);
+        // 3.93 · the mode of THIS export — a Both half's own.
+        if (!renderNow()) return runEngineExport(null);
         renderThenExport();
     }
 
@@ -5076,12 +6220,12 @@
             state.renderProg = o;
             var pct = Math.max(0, Math.min(100, (o.done / o.total) * 100));
             el.barfill.style.width = pct.toFixed(1) + "%";
-            el.progtext.textContent = "Rendering " + Math.min(o.done + 1, o.total)
+            progSay("Rendering " + Math.min(o.done + 1, o.total)
                 + " of " + o.total
                 + (o.current ? " · " + o.current : "")
-                + (o.failed ? " · " + o.failed + " failed" : "");
+                + (o.failed ? " · " + o.failed + " failed" : ""));
         }, 400);
-        el.progtext.textContent = "Asking Premiere to render " + total + " cut(s)…";
+        progSay("Asking Premiere to render " + total + " cut(s)…");
     }
 
     function renderThenExport() {
@@ -5090,6 +6234,7 @@
             fail("Nothing to render: no ticked video clips on V"
                 + (state.vtrackWant || "?") + ".\nPick a different track under "
                 + "\u201cShots from\u201d, or tick some clips.");
+            halfOver();
             return;
         }
         var dir = renderDir();
@@ -5107,6 +6252,7 @@
             state.actWanted = "";
             say("clash", "warn", "");
             fail(short);
+            halfOver();
             return;
         }
         /* What the render folder held before Premiere renders into it — null when it is not
@@ -5134,12 +6280,26 @@
         el.barfill.style.width = "0";
         log("render: " + spec.length + " cut(s) -> " + dir);
         pollRenderProgress(dir, spec.length);
+        state.renderingDir = dir;              // 3.93 audit · where a Cancel's stop file goes
 
+        /* 3.93 audit · AND PREMIERE IS TOLD WHICH SEQUENCE, IN WHICH EDIT, THIS IS FOR: the one
+         * this export's check let through (seqCleared), or the read's when the check went
+         * unanswered. host.jsx refuses anything else before a folder, a track or an in/out is
+         * touched (refused: "sequence" / "edited") — the one moment that cannot be stale, the
+         * render starting from it. And the audio tracks the ticks OFFERED, so a track the panel
+         * never showed (an AE comp's sound) is left as found rather than muted. An older
+         * host.jsx ignores all three. */
+        var pass = state.seqCleared;
+        var expectSeq = pass ? pass.id : readSeqId();
+        var expectFp = pass ? pass.fp : String(state.readFp || "");
+        var offered = (state.audioTracks || []).map(function (t) { return t.index; }).join(",");
         cs.evalScript("renderCuts(" + jsStr(dir) + ", " + jsStr(spec.join(";"))
             + ", " + renderMbps() + ", 1, " + jsStr(includeList().join(","))
-            + ", " + jsStr(hearList().join(",")) + ")",
+            + ", " + jsStr(hearList().join(",")) + ", " + jsStr(expectSeq) + ", " + jsStr(expectFp)
+            + ", " + jsStr(offered) + ")",
             function (raw) {
                 stopRenderPoll();
+                state.renderingDir = "";
                 var i, t, r = hostReply(raw);
                 if (!r) {
                     log("render: unreadable reply: " + raw);
@@ -5156,6 +6316,25 @@
                         log("render: " + r.renders[i].label + ": " + r.renders[i].tried[t]);
                     }
                 }
+                /* 3.93 audit · PREMIERE REFUSED: another sequence in front, or the edit changed since
+                 * the check — nothing was rendered and the timeline was not touched. Its own
+                 * sentence says so and what to do; it ends the run (a Both half: that half) as
+                 * every refused door does. */
+                if (!r.ok && r.refused) {
+                    log("render: REFUSED by Premiere (" + r.refused + ") — expected " + expectSeq
+                        + (expectFp ? " / fp " + expectFp : "") + ", open " + (r.sequence_id || "?")
+                        + (r.fp ? " / fp " + r.fp : ""));
+                    state.retryKeys = [];
+                    state.clashHeld = 0;
+                    state.actWanted = "";
+                    say("clash", "warn", "");
+                    show(el.prog, false);
+                    setRunning(false);
+                    setBusy(false);
+                    fail(r.error || "Premiere refused to render: the open sequence is not the one "
+                        + "this export was checked against. Press Read again.");
+                    return;
+                }
                 if (!r.ok) {
                     show(el.prog, false);
                     setRunning(false);
@@ -5166,6 +6345,39 @@
                 }
                 log("render: " + r.written + " written, " + (r.failed || 0)
                     + " failed, in " + r.folder);
+
+                /* 3.93 audit · WHAT PREMIERE RENDERED IS HELD TO WHAT THE CHECK LET THROUGH, before
+                 * anything is cut from it. renderCuts() renders app.project.activeSequence and
+                 * names it in its reply (res.sequence), which nothing read. Refused: a check that
+                 * answered late and unsafe (seqAnsweredLate), and a reply naming a sequence that is
+                 * neither the read's nor the one this export's check let through (seqCleared: its
+                 * safe answer, or a "yes" to the modal) — an unanswered check lets none through.
+                 * The renders it made are taken back, so no Retry can cut them under the read's
+                 * names. A host older than the reply's name says nothing, and nothing is held. */
+                var rendered = String(r.sequence || ""), late = state.seqLate;
+                state.seqLate = false;
+                if (late || (rendered && rendered !== readSeqName()
+                             && rendered !== (state.seqCleared ? state.seqCleared.name : ""))) {
+                    log("render: REFUSED — " + (late ? "the sequence check answered late, and unsafe"
+                        : "Premiere rendered \"" + rendered + "\", the read is \"" + readSeqName() + "\""));
+                    dropRefusedRenders(dir);
+                    state.retryKeys = [];
+                    state.clashHeld = 0;
+                    state.actWanted = "";
+                    say("clash", "warn", "");
+                    show(el.prog, false);
+                    setRunning(false);
+                    setBusy(false);
+                    cancelLabel();
+                    fail(late
+                        ? "Premiere answered the sequence check only after the render had started, "
+                          + "and the answer was not safe (the row above says why) — so nothing was "
+                          + "cut from this render. Put that right, then export again."
+                        : "Premiere rendered " + qn(rendered) + ", not the read " + qn(readSeqName())
+                          + ", so nothing was cut from it. Open " + qn(readSeqName())
+                          + " (or press Read again), then export again.");
+                    return;
+                }
 
                 /* ⚠️ A STOPPED RENDER IS NOT HANDED TO THE ENCODE. `stopped` is renderCuts()
                  * honouring the stop file between ranges; state.cancelled covers the case
@@ -5282,7 +6494,12 @@
             setBusy(false);
             return;
         }
-        var args = argsFor(outDir(), false);
+        /* 3.93 audit · THE RUN'S OWN FOLDER, taken once, here: the -o, the manifest's mtime before
+         * it, the inputs saved beside it, and — at the close — the report, the run log and the
+         * Retry's folder. The destination is re-asked of the disk at every ask (3.92), so at the
+         * close it can be another folder than the one this engine was given. */
+        var runDest = resolveDest(), runOut = outDir();
+        var args = argsFor(runOut, false);
         if (renderDirPath) {
             args.push("--render-dir", renderDirPath);
             /* --video-track used to be pushed here, and ONLY here, which is why the read
@@ -5325,7 +6542,7 @@
         // Remember the manifest's mtime BEFORE starting. Cancelling used to leave the
         // previous run's manifest in place, which then rendered as though it described
         // the run that was just abandoned.
-        state.manifestBefore = manifestMtime();
+        state.manifestBefore = manifestMtime(runOut);
         // Belongs to THIS run. A leftover count would keep the render scratch for ever.
         state.rendersMissing = 0;
         say("renders", "info", "");
@@ -5338,7 +6555,7 @@
         show(el.prog, true);
         setRunning(true);
         el.barfill.style.width = "0";
-        el.progtext.textContent = "Starting…";
+        progSay("Starting…");
         // In render mode the run is limited to one video track, so the ticked total —
         // which counts every track — would leave the bar short of the end.
         jobsReset(retry.length || renderCount || selectedCount(), retry);
@@ -5346,7 +6563,7 @@
 
         log("$ " + state.python + " " + args.join(" "));
         // Before the spawn, so a run that dies still leaves what it was given.
-        saveReadInputs();
+        saveReadInputs(runOut);
 
         var proc;
         try {
@@ -5421,12 +6638,12 @@
                 var done = parseInt(m[1], 10), all = parseInt(m[2], 10);
                 state.jobTotal = all;
                 el.barfill.style.width = Math.round(done / all * 100) + "%";
-                el.progtext.textContent = "[" + done + "/" + all + "] " + (m[4] || m[3]);
+                progSay("[" + done + "/" + all + "] " + (m[4] || m[3]));
                 if (m[4]) jobDone(m[4], m[3]);
                 return;
             }
             if (line.indexOf("Cutting with") === 0 || line.indexOf("  Cutting") === 0) {
-                el.progtext.textContent = "Encoding…";
+                progSay("Encoding…");
             }
         }
 
@@ -5444,12 +6661,20 @@
         proc.on("error", function (e) {
             jobsStop();
             show(el.prog, false);
+            /* 3.93 · IN A BOTH EXPORT THIS HALF IS OVER HERE. Node may or may not send a close
+             * after an error; the chain does not wait on one that may never come, and one that
+             * does come must not report into the next half's folder. */
+            if (state.chain) {
+                proc._over = true;
+                if (state.proc === proc) state.proc = null;
+            }
             setRunning(false);
             setBusy(false);
             fail("python3 could not run:\n" + e);
         });
 
         proc.on("close", function (code) {
+            if (proc._over) return;
             state.proc = null;
             if (tail) onLine(tail);
             jobsStop();
@@ -5486,14 +6711,25 @@
                  * so the panel's one sentence about the way forward described the opposite of
                  * what the next export would do, with nothing else on screen to contradict it.
                  *
-                 * A stopgap, and worth revisiting: once a half-written clip never wears its
-                 * delivery name, --resume cannot mistake wreckage for a finished file and the
-                 * original sentence is true again in both states. */
-                say("renders", "warn", state.resume
-                    ? "Stopped. “skip clips already there” is on, so exporting again "
-                      + "KEEPS any half-written clip. Untick it to re-cut everything."
-                    : "Stopped. The clips already written are in the folder; "
-                      + "exporting again rewrites them.");
+                 * 3.93 audit (2) · THE STOPGAP IS RETIRED, because its condition is met: since
+                 * 3.72 a clip is written under a hidden partial name and renamed onto its own
+                 * only once its frames check out, and the stop handler removes the partials —
+                 * measured, a Cancel leaves only whole clips under clip names, and --resume
+                 * keeps exactly those. "KEEPS any half-written clip. Untick it" sent the editor
+                 * to re-encode the whole timeline for nothing. What the tick does now differs
+                 * by mode: Timeline Render renders every range again in Premiere, and the
+                 * engine keeps a clip only when its new render is byte-identical — which a
+                 * fresh render rarely is — so there the finished clips are usually made again. */
+                say("renders", "warn", !state.resume
+                    ? "Stopped. The clips already written are in the folder; "
+                      + "exporting again rewrites them."
+                    : modeNow() === "render"
+                    ? "Stopped. Nothing half-written is under a clip's name. Timeline Render "
+                      + "renders the clips again in Premiere, so exporting again usually makes "
+                      + "them again too, “skip clips already there” or not."
+                    : "Stopped. “skip clips already there” is on, so exporting again keeps "
+                      + "the clips that finished and makes the rest — nothing half-written is "
+                      + "ever under a clip's name.");
                 log("run stopped by Cancel (exit " + code + ")");
             }
             cancelLabel();
@@ -5503,7 +6739,16 @@
             // A non-zero exit still leaves a manifest behind when some clips were
             // written, so the report is built either way — a partial run is exactly
             // when knowing which clips made it matters most.
-            var built = buildReport();
+            var built = buildReport(runOut, runDest);
+            /* 3.93 audit · and if the destination is another folder now, that is said: this run's
+             * clips and report are in its own -o, and the next Export goes where the box says. */
+            var nowOut = outDir();
+            if (nowOut !== runOut) {
+                log("destination moved during the run: -o " + runOut + ", now " + (nowOut || "none"));
+                say("export", "warn", "The destination changed while this export ran: its clips "
+                    + "and report are in " + shortPath(runOut, 44) + ", and Export now goes to "
+                    + (nowOut ? shortPath(nowOut, 44) : "no folder — the row above says why") + ".");
+            }
             if (built) {
                 /* Revealed BEFORE it is rendered, because renderReport() ends by deciding
                  * which row of the action bar belongs on screen and that decision reads
@@ -5521,13 +6766,24 @@
             /* Same place, same reason: the report is what knows whether this went cleanly.
              * A cancel is NOT clean — the whole point of the two tones is that you can tell
              * from across the room whether to come back. */
-            saveRunLog();
-            chime(code === 0 && built && !state.cancelled && !failedRows().length);
+            saveRunLog(runOut);
+            /* 3.93 · A BOTH HALF CHIMES NOTHING: the chain sounds once, at its end, clean only if
+             * both halves were (chainEnd). What this run did is kept for it — 3.93 audit · and
+             * the folder it was given, which the Both report names and opens. */
+            state.lastRun = { built: built, code: code, dir: runOut };
+            if (!state.chain) chime(code === 0 && built && !state.cancelled && !failedRows().length);
 
             if (code === 0) {
                 if (!built) fail("The run finished but wrote no manifest to report on.");
             } else if (code === null) {
                 log("cancelled");
+            } else if (/error: another export is already writing into /.test(stderr)) {
+                /* 3.93 audit · THE ENGINE HOLDS ITS -o FOR ONE RUN AT A TIME (.xmlcut-running),
+                 * and a second run into that folder is refused before touching it. Said as the
+                 * one thing it is, not as an exit code over six lines of stderr. */
+                var busyWhy = /error: (another export is already writing into [\s\S]*?)\.?\s*$/.exec(stderr);
+                fail("Nothing was exported: " + (busyWhy ? busyWhy[1]
+                     : "another export is already writing into this folder") + ".");
             } else {
                 fail("xmlcut exited with code " + code
                      + (stderr ? ("\n" + stderr.split("\n").slice(-6).join("\n")) : "")
@@ -5572,6 +6828,9 @@
         var rescan = state.clips.length > 0;
         if (!rescan) {
             state.clips = [];
+            // 3.93 · and no Timeline list either: a first read has no pair until it lands.
+            state.editClips = [];
+            state.editRead = false;
             show(el.tablewrap, false);
         }
         el.tablewrap.className = rescan ? "tablewrap rescanning" : "tablewrap";
@@ -5590,13 +6849,24 @@
          * would also have loaded the previous read's manifest as this one's. Nothing here is
          * anyone's delivery: exports go to outDir(), never to this folder. */
         rmTree(scanDir);
-        var args = argsFor(scanDir, /* allTypes */ true);
-        args.push("--manifest-only");
-        /* ⚠️ NOT --render-dir. No render exists at scan time, and handing the engine a
-         * folder of nothing would mark every clip as having none. This says only that one
-         * is COMING, so the cut list is reported as it will be — which is what makes an
-         * .aep and an offline clip tickable instead of greyed out. */
-        if (state.cutFrom === "render") args.push("--render-planned");
+        /* 3.93 · BOTH READS TWICE: this scan as the Source half (state.clips — the list the
+         * table shows, the chips, the audio tracks), then the Timeline half's own read into a
+         * folder of its own (scanEdit), because the two modes' cut lists are not the same list
+         * and the edited/ half has to be cut from exactly what a Timeline Render read gives.
+         * Done at READ time rather than at the Export press so the button can say both counts
+         * and the table can mark the rows only one folder gets; it costs a second
+         * --manifest-only run on every read in Both, and nothing in the other two modes. */
+        var both = state.cutFrom === "both";
+        /* 3.93 audit · THE MODE THIS READ IS FOR, kept for when it lands. The mode buttons stay
+         * live during a re-read (a Re-measure, a tick, a relink — setCutFrom skips its own
+         * re-read while busy), and a Timeline Render read landing under a lit Source Render
+         * was loaded as Source's list, and the reverse: measured by the audit, edited/ got 16
+         * of 19 clips with a false "Premiere did not produce" for the three the Source list
+         * shapes differently, and raw/ lost a nest's three clips to a --pick of the Timeline
+         * read's nest id, said nowhere but a merge note. */
+        var readMode = state.cutFrom, readTrack = String(state.vtrackWant || "");
+        var probe = state.wantProbe;
+        var args = withHalf(both ? "source" : "", function () { return scanArgs(scanDir); });
         log("$ " + state.python + " " + args.join(" "));
 
         var proc;
@@ -5664,6 +6934,22 @@
                  + (rescan ? "\nThe list shown is the one read before." : ""));
         });
         proc.on("close", function (code) {
+            // 3.93 · Both: the Source read has landed; the Timeline read goes next, and the
+            // read is over when IT is — one list without its pair is not a Both read.
+            if (both && code === 0) {
+                if (errbuf) log("stderr: " + errbuf);
+                if (!rescan) readStage(2, "and the Timeline Render list, for edited/");
+                scanEdit(probe, function (code2, err2) {
+                    scanLanded(code2, err2, code2 === 0 ? "" : "the Timeline Render cut list");
+                });
+                return;
+            }
+            scanLanded(code, errbuf, "");
+        });
+
+        /* The end of the read, whatever it was: `what` names the Timeline read of a Both pair
+         * when that is the one that failed ("" for the read itself). */
+        function scanLanded(code, errbuf, what) {
             endRescan();
             if (errbuf) log("stderr: " + errbuf);
             if (code !== 0) {
@@ -5679,7 +6965,7 @@
                  * was disabled and read "Nothing selected" — measured on two real failures,
                  * an unknown sequence name and a missing ffmpeg. The line above it is the
                  * actionable one; this one contradicted it. */
-                fail("Reading the cut list failed (exit " + code + ")."
+                fail("Reading " + (what || "the cut list") + " failed (exit " + code + ")."
                      + (errbuf ? "\n" + errbuf.split("\n").slice(-4).join("\n") : "")
                      + (rescan
                         ? "\nThe list shown is the one read before; you can still export."
@@ -5687,6 +6973,21 @@
                 return;
             }
             var _loaded = loadClips(scanDir);
+            if (_loaded) state.clipsMode = readMode;
+            /* 3.93 · AND ITS PAIR. The Timeline read of a Both scan goes in beside the Source one
+             * only when both landed; a single-mode read leaves no Timeline list behind it, so a
+             * later switch to Both can never be handed another read's leftovers (editRead). */
+            if (_loaded && both) {
+                state.editRead = loadClips(editScanDir(), "edit");
+                if (!state.editRead) {
+                    fail("Reading the Timeline Render cut list failed: the engine finished but wrote "
+                         + "no cut list (no manifest.json in " + editScanDir() + "). Both cannot "
+                         + "export edited/ without it — press Read again.");
+                }
+            } else if (_loaded) {
+                state.editClips = [];
+                state.editRead = false;
+            }
             state.readNoCuts = _loaded && !state.clips.length;
             /* ⚠️ AN EXIT 0 WITH NO CUT LIST IS A READ THAT DID NOT FINISH, AND THE RAIL SAYS SO
              * (3.90 round 3). The next line tells him "the message above says why" — and here
@@ -5741,7 +7042,73 @@
             // there is one. Cheap, and it keeps the count in one place.
             if (state.info) renderSequence();
             setBusy(false);
+            /* 3.93 · A MODE PRESS WHILE THIS READ WAS OUT: the list that just landed is not the
+             * one the lit button needs (a Both read is a pair), so it is read again — the press
+             * itself could not, the panel being busy. 3.93 audit · ANY mode press, not only one
+             * into or out of Both: Source Render and Timeline Render read different lists too. */
+            if (readMode !== state.cutFrom
+                || (shownHas("render") && readTrack !== String(state.vtrackWant || ""))) {
+                rescanForSetting("Re-reading…");
+            }
+        }
+    }
+
+    /* 3.93 · THE ARGV OF A READ, for the mode now in effect: the export's own argv (argsFor —
+     * its --video-track, its settings) plus --manifest-only, plus --render-planned in Timeline
+     * Render. One function, so a Both pair's Timeline read is the argv a Timeline Render read
+     * would spawn, by construction, and not by a copy of it. */
+    function scanArgs(dir) {
+        var args = argsFor(dir, /* allTypes */ true);
+        args.push("--manifest-only");
+        /* ⚠️ NOT --render-dir. No render exists at scan time, and handing the engine a
+         * folder of nothing would mark every clip as having none. This says only that one
+         * is COMING, so the cut list is reported as it will be — which is what makes an
+         * .aep and an offline clip tickable instead of greyed out. */
+        if (renderNow()) args.push("--render-planned");
+        return args;
+    }
+
+    /* 3.93 · the Both pair's Timeline read lands here: a sub-folder of the panel's own scratch,
+     * EMPTIED FIRST exactly as scan/ is (anything already in it can only lie — see scanClips),
+     * and never the Source read's folder, so neither read of a pair can load the other's
+     * manifest. */
+    function editScanDir() { return path.join(workDir(), "scan-edited"); }
+
+    /* 3.93 · Both's second read — a Timeline Render read of the same sequence, as that mode's
+     * own Read would spawn it (scanArgs under the render half). Its '++' / '!!' notes join the
+     * read's, once each: most are the same facts the Source read already printed. Calls
+     * done(code, stderr) once. */
+    function scanEdit(probe, done) {
+        var dir = editScanDir();
+        rmTree(dir);
+        var args = withHalf("render", function () {
+            // A Re-measure measures both halves' lists, as each mode's own read would.
+            state.wantProbe = probe;
+            return scanArgs(dir);
         });
+        log("$ " + state.python + " " + args.join(" "));
+        var proc, err = "", tail = "", over = false;
+        try {
+            proc = spawn(state.python, args, spawnOpts());
+        } catch (e) {
+            done(-1, String(e));
+            return;
+        }
+        proc.stdout.on("data", function (c) {
+            tail += String(c);
+            var parts = tail.split("\n");
+            tail = parts.pop();
+            for (var i = 0; i < parts.length; i++) {
+                var ln = parts[i].replace(/\r$/, "");
+                if (ln) log(ln);
+                var mm = ln.match(/^\s*\+\+\s*(.+)$/), mw = ln.match(/^\s*!!\s*(.+)$/);
+                var note = mm ? mm[1] : (mw ? "⚠ " + mw[1] : "");
+                if (note && state.merge.indexOf(note) < 0) state.merge.push(note);
+            }
+        });
+        proc.stderr.on("data", function (c) { err += String(c); });
+        proc.on("error", function (e) { if (!over) { over = true; done(-1, String(e)); } });
+        proc.on("close", function (code) { if (!over) { over = true; done(code, err); } });
     }
 
     /* Both halves of "the scan is over", together. They were separate lines at four
@@ -5756,13 +7123,28 @@
         refreshExportEnabled();
     }
 
-    function loadClips(dir) {
+    /* @param into  3.93 · "edit" for the Timeline read of a Both pair: its rows go to
+     *              state.editClips, and of the timeline's facts only the one that read alone
+     *              knows — the cross-dissolve split, which the engine makes only in Timeline
+     *              Render — is kept. Everything else (the audio tracks, the frame size, the
+     *              probe's settings) is the Source read's, which is what the panel shows. */
+    function loadClips(dir, into) {
         var data;
         try {
             data = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
         } catch (e) {
             log("no cut list to show: " + e);
             return false;
+        }
+        var edit = into === "edit";
+        // The mode this list was read in — Timeline for a pair's second read.
+        var render = edit || renderNow();
+        if (edit) {
+            var eset = data.settings || {};
+            state.editOverlap = { pairs: Number(eset.overlapping_pairs || 0),
+                                  frames: Number(eset.overlapping_frames || 0),
+                                  split: Number(eset.transitions_split || 0) };
+            return loadRows(data, render, []);
         }
         state.clips = [];
         /* The settings the scan's probe actually ran at, taken from the manifest rather
@@ -5818,6 +7200,12 @@
          * older engine has no `sequence` block; state.info.fps then answers instead. */
         state.seqFps = Number((data.sequence || {}).fps || 0);
         sayAudioRenumbered();
+        return loadRows(data, render, state.clips);
+    }
+
+    /* The manifest's rows into `list` — state.clips, or (3.93) a Both pair's Timeline list,
+     * which then becomes state.editClips. `render`: the mode the list was read in. */
+    function loadRows(data, render, list) {
         var clips = data.clips || [];
         /* Does this manifest publish timeline_index AT ALL — see the fallback below. Asked
          * of the raw JSON rather than of the parsed row, because the parsed row cannot tell
@@ -5855,13 +7243,13 @@
              * render really is sequence-sized whether or not a source file exists. What still
              * selects the right population here is `kind === "bad"`, which a row with a
              * readable source never is. Do not drop that clause thinking the basis carries it. */
-            if (kind === "bad" && cuttable && state.cutFrom === "render"
+            if (kind === "bad" && cuttable && render
                 && String(c.estimate_basis || "") === "sequence") {
                 kind = "warn";
             }
             var spd = Number(c.speed_percent || 100);
 
-            state.clips.push({
+            list.push({
                 // What --pick matches on: (track type, track index, timeline in-point in
                 // frames). Stable against filtering and re-indexing, and unique — two
                 // clips cannot start on the same frame of the same track.
@@ -5965,10 +7353,11 @@
          * So the question is asked of the MANIFEST, once: if it publishes the field at all,
          * every value in it is the engine's answer, zero included. */
         if (!sawTlField) {
-            for (var ti = 0; ti < state.clips.length; ti++) {
-                if (!state.clips[ti].tlIndex) state.clips[ti].tlIndex = ti + 1;
+            for (var ti = 0; ti < list.length; ti++) {
+                if (!list[ti].tlIndex) list[ti].tlIndex = ti + 1;
             }
         }
+        if (list !== state.clips) state.editClips = list;
         return true;
     }
 
@@ -6014,8 +7403,10 @@
      * cannot disagree about it. There is nothing to gate there: the picture comes out of
      * Premiere, not out of the source file, so anything sitting on the master track is a
      * shot — a still, an adjustment layer, a title with no <file> path at all. */
-    function typeOn(c) {
-        if (state.cutFrom === "render") return true;
+    /* 3.93 · @param m  whose answer: omitted, the mode now in effect (a Both half's own). In
+     * Both itself — what the table draws — the chips are the Source half's, as here. */
+    function typeOn(c, m) {
+        if (renderNow(m)) return true;
         /* ⚠️ THE "(none)" BUCKET IS ALWAYS ON, AND THIS LINE IS LOAD-BEARING.
          * Its chip is gone (see renderTypes), but the tick was remembered in
          * localStorage "xmlcut.types" — so anyone who unticked it in an earlier version
@@ -6046,8 +7437,9 @@
      * every track is listed again", because with the ticks defaulting off audioCutOn() was
      * false for every track and EVERY audio row vanished. Membership here; the tick in
      * trackPicked() below. */
-    function inRun(c) {
-        if (state.cutFrom !== "render") return true;
+    // 3.93 · @param m  as typeOn's. In Both itself every row is listed, as in Source Render.
+    function inRun(c, m) {
+        if (!renderNow(m)) return true;
         // Audio rows are LISTED in Timeline Render too — they are cut from their source in
         // every mode now, and the file ticks decide which are exported. Only picture rows
         // are tied to the rendered video track.
@@ -6075,11 +7467,14 @@
         return audioCutOn(c.premTrack);
     }
 
-    function pickedClips() {
-        var out = [];
-        for (var i = 0; i < state.clips.length; i++) {
-            var c = state.clips[i];
-            if (c.group === 0 && typeOn(c) && isPicked(c) && inRun(c) && trackPicked(c)) {
+    /* @param m  3.93 · whose clips: a half by name, or (omitted) the mode now in effect — which
+     * inside a Both half is that half, so the pick file, the render spec and the engine's count
+     * are the single-mode export's own, off that half's own list (listFor). */
+    function pickedClips(m) {
+        var out = [], list = listFor(m);
+        for (var i = 0; i < list.length; i++) {
+            var c = list[i];
+            if (c.group === 0 && typeOn(c, m) && isPicked(c) && inRun(c, m) && trackPicked(c)) {
                 out.push(c);
             }
         }
@@ -6090,21 +7485,23 @@
      * hundreds of clips. Returns the path, or "" when everything is selected and the flag
      * is not needed. */
     function writePickFile(dir, onlyKeys) {
-        var all = [], chosen;
+        /* 3.93 · the list of the export this file is for — a Both half's own (listFor). The
+         * Timeline half's lines are therefore the ones a Timeline Render export would write. */
+        var all = [], chosen, list = listFor();
         if (onlyKeys && onlyKeys.length) {
             /* A RETRY. Not the ticked set — the clips that failed, whatever is ticked now.
              * Re-ticking the list to express this would destroy a selection he made, and
              * reading it back afterwards would be guesswork. */
             chosen = [];
-            for (var q = 0; q < state.clips.length; q++) {
-                var cc = state.clips[q];
+            for (var q = 0; q < list.length; q++) {
+                var cc = list[q];
                 if (cc.group === 0 && onlyKeys.indexOf(clipKey(cc)) >= 0) chosen.push(cc);
             }
         } else {
             chosen = pickedClips();
         }
-        for (var i = 0; i < state.clips.length; i++) {
-            var c = state.clips[i];
+        for (var i = 0; i < list.length; i++) {
+            var c = list[i];
             if (c.group === 0 && typeOn(c)) all.push(c);
         }
         if (chosen.length === all.length) return "";
@@ -6120,8 +7517,8 @@
          * counts.missing_sources to 0. Unticking a clip is not a request to stop being
          * told that media is broken. They arrive as warnings, exactly as they do in a run
          * with no selection at all. */
-        for (var u = 0; u < state.clips.length; u++) {
-            var d = state.clips[u];
+        for (var u = 0; u < list.length; u++) {
+            var d = list[u];
             if (d.group !== 0 && typeOn(d)) lines.push(clipKey(d));
         }
         var p = path.join(dir, "pick.txt");
@@ -6190,6 +7587,85 @@
     /* groupDef() is gone with the headings. Nothing looks a group up by key any more: the
      * row's colour comes from _grp directly and the counts walk GROUPS in order. */
 
+    /* ═══════════════════════════════════════════════ 3.93 · THE TABLE IN BOTH
+     *
+     * Every row of the Source read, as in Source Render (the product owner: "the clip list
+     * shows every row"), each with its part in the edited/ half beside it; and the Timeline
+     * read's own rows — a nest rendered as ONE clip where the Source read has its three
+     * inner clips, which match nothing there — put in at their place on the timeline. A row
+     * only one folder gets is marked "raw/ only" (an overlay track, a nest's inner clip) or
+     * "edited/ only" (a comp, a title, the nest as one). A row is cuttable when EITHER half can
+     * cut it, and its tick is shared: ticks are keyed by cut_id, which the two reads agree on.
+     *
+     * Each row is a VIEW onto its list's own row (Object.create): the key, the tick, the size
+     * and the status read that row, and what the table writes — its number, its group — stays
+     * on the view, so drawing the table cannot touch either list the halves are cut from. */
+    function bothRows() {
+        var src = state.clips, ed = listFor("render");
+        var byKey = {}, seen = {}, out = [], i, j;
+        for (i = 0; i < ed.length; i++) byKey[clipKey(ed[i])] = ed[i];
+        for (i = 0; i < src.length; i++) {
+            var k = clipKey(src[i]);
+            seen[k] = 1;
+            out.push(bothRow(src[i], src[i], byKey[k] || null));
+        }
+        for (i = 0; i < ed.length; i++) {
+            if (seen[clipKey(ed[i])]) continue;
+            var at = out.length;
+            for (j = 0; j < out.length; j++) {
+                if (timelineAfter(out[j], ed[i])) { at = j; break; }
+            }
+            out.splice(at, 0, bothRow(ed[i], null, ed[i]));
+        }
+        return out;
+    }
+
+    // Does a come after b in the engine's own order (in-point, video first, track)?
+    function timelineAfter(a, b) {
+        if (a.timelineIn !== b.timelineIn) return a.timelineIn > b.timelineIn;
+        var av = a.trackType === "video" ? 0 : 1, bv = b.trackType === "video" ? 0 : 1;
+        if (av !== bv) return av > bv;
+        return a.trackIndex > b.trackIndex;
+    }
+
+    function bothRow(base, s, e) {
+        var v = Object.create(base);
+        var rawIn = !!s && typeOn(s, "source"), edIn = !!e && inRun(e, "render");
+        v._both = true;
+        v._src = s;
+        v._edit = e;
+        v._rawCut = rawIn && s.group === 0;
+        v._editCut = edIn && e.group === 0;
+        // Listed when either half lists it — a type switched off hides a row only raw/ had.
+        v._shown = rawIn || edIn;
+        v._dead = !v._rawCut && !v._editCut;
+        // Until the Timeline read has come back nothing is "raw/ only" — it is not known yet.
+        v._mark = !state.editRead ? ""
+                : (v._rawCut && !v._editCut) ? "raw/ only"
+                : (v._editCut && !v._rawCut) ? "edited/ only" : "";
+        return v;
+    }
+
+    // "raw/ 03 · edited/ 02" — where a Both row goes, and under which numbers.
+    function bothRowTip(v) {
+        var bits = [];
+        if (v._rawCut) bits.push("raw/ " + (v._src.tlIndex ? pad2(v._src.tlIndex) : "—"));
+        if (v._editCut) bits.push("edited/ " + (v._edit.tlIndex ? pad2(v._edit.tlIndex) : "—"));
+        return bits.join(" · ");
+    }
+
+    // A row neither half can cut — in Both; in either single mode, its own group.
+    function deadRow(v) { return v._both ? v._dead : v.group !== 0; }
+
+    // A row's size on screen: its own, or — a Both row only edited/ gets — its render's.
+    function sizeOf(v, qs) {
+        if (!v._both) return clipBytes(v, qs);
+        var ed = !v._rawCut && v._editCut;
+        return withHalf(ed ? "render" : "source", function () {
+            return clipBytes(ed ? v._edit : v, qs);
+        });
+    }
+
     function renderClips() {
         var anyStatus = false;   // 3.89 · see the end of this function
         var body = el.clipbody;
@@ -6198,16 +7674,26 @@
         var qs = settings(), lim = capBytes();
         /* "only problems" filters THIS table now, rather than a separate report list. It
          * only bites once a run has produced something to have an opinion about. */
-        var onlyProb = !!(el.onlyprob && el.onlyprob.checked && state.report.length);
+        // 3.93 audit (2) · the rows a run left are drawn only where they are of (rowsHere), and
+        // "only problems" bites only then — over rows drawn as not yet exported it hid them all.
+        var rowsLit = rowsHere();
+        var onlyProb = !!(el.onlyprob && el.onlyprob.checked && state.report.length && rowsLit);
         var visible = [];
-        for (var i = 0; i < state.clips.length; i++) {
+        /* 3.93 · WHAT IS LIT, asked by name: this paints, and while a Both half runs the mode in
+         * effect is that half's. In Both the table is every row of both reads (bothRows). */
+        var shown = state.cutFrom;
+        if (shown === "both") {
+            var br = bothRows();
+            for (var bi = 0; bi < br.length; bi++) if (br[bi]._shown) visible.push(br[bi]);
+        }
+        for (var i = 0; shown !== "both" && i < state.clips.length; i++) {
             var r = state.clips[i];
             /* ⚠️ THROUGH typeOn(), NOT A SECOND COPY OF IT. This line held its own inline
              * `state.types[r.ext] ? ... : true`, which is how the list came to disagree with
              * everything computed from typeOn() — in render mode the chips filtered the rows
              * on screen while the argv, the count and the pick file had stopped caring. One
              * definition, one answer. */
-            if (typeOn(r) && inRun(r)) visible.push(r);
+            if (typeOn(r, shown) && inRun(r, shown)) visible.push(r);
         }
 
         /* ⚠️ A ROW THAT CANNOT BE CUT IS NOT A CUT, AND IT WAS BURYING THE ONES THAT ARE.
@@ -6220,12 +7706,12 @@
          * first would report "0 cannot be cut" and lose the only trace of them. */
         var deadCount = 0;
         for (var dq = 0; dq < visible.length; dq++) {
-            if (visible[dq].group !== 0) deadCount++;
+            if (deadRow(visible[dq])) deadCount++;
         }
         if (deadCount && !state.showDead) {
             var live = [];
             for (var lq = 0; lq < visible.length; lq++) {
-                if (visible[lq].group === 0) live.push(visible[lq]);
+                if (!deadRow(visible[lq])) live.push(visible[lq]);
             }
             visible = live;
         }
@@ -6245,23 +7731,26 @@
         // a synthetic row) still falls back to an em dash at the cell, below.
         for (var q = 0; q < visible.length; q++) {
             var vv = visible[q];
-            vv.n = vv.tlIndex || 0;
+            // 3.93 · Both: raw/'s number — the table is Source Render's — and "—" for a row only
+            // edited/ gets; its edited/ number is on the row's tooltip.
+            vv.n = vv._both ? ((vv._rawCut || !vv._editCut) && vv._src ? vv._src.tlIndex || 0 : 0)
+                            : (vv.tlIndex || 0);
         }
         /* Each row's group is worked out ONCE, here, and the list is sorted by it —
          * stably, so timeline order survives inside every group. */
         var qsLim = lim;
         for (var g = 0; g < visible.length; g++) {
             var gv = visible[g];
-            var grs = state.rowState[clipKey(gv)] || null;
+            var grs = rowStateOf(clipKey(gv), rowsLit);
             var grst = grs ? String(grs.st || "") : "";
-            var gEb = clipBytes(gv, qs);
+            var gEb = sizeOf(gv, qs);
             var gAct = (grs && grs.done && grs.bytes > 0) ? grs.bytes : 0;
             var gOver = (qsLim > 0 && (gAct || gEb) > qsLim && isPicked(gv)
-                         && gv.group === 0 && grst !== "bad");
+                         && !deadRow(gv) && grst !== "bad");
             var gRail = grst === "bad" ? "bad" : grst === "run" ? "run"
                 : gOver && grst ? "over" : grst === "kept" ? "kept"
                 : grst === "ok" ? "ok" : "";
-            gv._grp = groupOf(gRail, grst, gv.group !== 0);
+            gv._grp = groupOf(gRail, grst, deadRow(gv));
         }
         /* ⚠️ NO SORT. `visible` stays in the order the manifest gave it, which is timeline
          * order, which is what the heading over this table promises and what the index
@@ -6273,11 +7762,11 @@
         var counts = {};
         for (var cq = 0; cq < visible.length; cq++) {
             var cv = visible[cq];
-            var crs = state.rowState[clipKey(cv)] || null;
+            var crs = rowStateOf(clipKey(cv), rowsLit);
             var crst = crs ? String(crs.st || "") : "";
             if (onlyProb && cv._grp !== "bad" && cv._grp !== "dead"
                 && !(crst && cv._grp === "ok" && capBytes() > 0
-                     && ((crs.bytes || clipBytes(cv, qs)) > capBytes()))) continue;
+                     && ((crs.bytes || sizeOf(cv, qs)) > capBytes()))) continue;
             counts[cv._grp] = (counts[cv._grp] || 0) + 1;
         }
 
@@ -6290,18 +7779,18 @@
             var picked = isPicked(v) && trackPicked(v);
             // Sized at the CURRENT settings, so both the number and the flag move with
             // the sliders. Computed before the row class, which needs to know.
-            var eb = clipBytes(v, qs);
+            var eb = sizeOf(v, qs);
             /* WHAT THIS ROW IS DOING, if a run has touched it. The same cell that held the
              * estimate holds the finished size once the file exists — the estimate is not
              * kept beside it, because two numbers in one column is how you end up reading
              * the wrong one. The end-of-run comparison lives once, in the action bar. */
-            var rs = state.rowState[clipKey(v)] || null;
+            var rs = rowStateOf(clipKey(v), rowsLit);
             var rst = rs ? String(rs.st || "") : "";
             var actual = (rs && rs.done && rs.bytes > 0) ? rs.bytes : 0;
-            var shown = actual || eb;
+            var onScreen = actual || eb;
             // The flag is re-applied to whichever number is on screen, so typing a new
             // threshold re-marks a finished run as readily as a planned one.
-            var over = (lim > 0 && shown > lim && picked && v.group === 0
+            var over = (lim > 0 && onScreen > lim && picked && !deadRow(v)
                         && rst !== "bad");
             /* One rail per row, and the precedence is what needs attention rather than what
              * is nicest to report: failed, then running, then bigger than you asked for,
@@ -6314,7 +7803,7 @@
                 : rst === "ok" ? "ok" : "";
             /* Filtered AFTER numbering, never before: the numbers are the filenames the
              * run produced, so hiding a row must not renumber the ones that remain. */
-            if (onlyProb && rst !== "bad" && !over && v.group === 0) continue;
+            if (onlyProb && rst !== "bad" && !over && !deadRow(v)) continue;
             /* ⚠️ NO GROUP HEADING HERE ANY MORE, and the reason is the missing sort above.
              * A heading was written before the first row of its group; with the rows in
              * timeline order that heading would appear wherever its first member happened to
@@ -6337,7 +7826,7 @@
                  * appear to work and change nothing, because trackPicked() would still say
                  * no. The control that governs it is the track's own tick, and the row's
                  * tooltip says which one — no new text on screen. */
-                box.disabled = (clip.group !== 0) || state.running || !trackPicked(clip);
+                box.disabled = deadRow(clip) || state.running || !trackPicked(clip);
                 box.title = trackPicked(clip) ? clip.clip
                     : clip.clip + " — tick A" + clip.premTrack + " under Audio tracks"
                       + " to export this track";
@@ -6365,7 +7854,9 @@
                         // WHY THIS ROW FAILED, in full. The cell has room for a word.
                         (rs && rs.why) ? rs.why : "",
                         v.notes, v.source,
-                        over ? "over the " + state.cap + " MB flag" : ""
+                        over ? "over the " + state.cap + " MB flag" : "",
+                        // 3.93 · Both: which folders this row goes into, and under which numbers.
+                        v._both ? bothRowTip(v) : ""
                        ].filter(function (s) { return !!s; }).join(" · ");
             /* The size cell, in whichever of its three lives applies. A mark as well as a
              * colour every time, because the row tint alone would be the only thing saying
@@ -6392,7 +7883,10 @@
             var lastText = rst === "run" ? secs(nowMs() - (rs.t0 || nowMs()))
                 : (rs && rs.done)
                     ? (rs.note || ((rs.t1 && rs.t0) ? secs(rs.t1 - rs.t0) : ""))
-                    : (v.group === 0 && /^ready/i.test(v.status)
+                    /* 3.93 · Both: a row only one folder gets says so — "raw/ only",
+                     * "edited/ only" — in the column that already carries "needs a render". */
+                    : v._mark ? v._mark
+                    : (!deadRow(v) && /^ready/i.test(v.status)
                         ? "" : shortStatus(v.status));
             if (lastText) anyStatus = true;
             var cells = [
@@ -6446,7 +7940,7 @@
         }
         var cuttable = 0, chosen = 0;
         for (var m = 0; m < visible.length; m++) {
-            if (visible[m].group !== 0) continue;
+            if (deadRow(visible[m])) continue;
             cuttable++;
             if (isPicked(visible[m])) chosen++;
         }
@@ -6515,15 +8009,31 @@
 
     /* The header tick reflects the rows: on when all are on, off when none are, and
      * indeterminate in between — so it never claims a state the table contradicts. */
+    /* 3.93 · the rows the master tick is about: in Both, the table's own (bothRows), each
+     * cuttable in either half; otherwise the list's, as the lit mode sees it. */
+    function tickableRows() {
+        var out = [], m = state.cutFrom, i, c;
+        if (m === "both") {
+            var br = bothRows();
+            for (i = 0; i < br.length; i++) if (br[i]._shown && !br[i]._dead) out.push(br[i]);
+            return out;
+        }
+        for (i = 0; i < state.clips.length; i++) {
+            c = state.clips[i];
+            if (c.group === 0 && typeOn(c, m)) out.push(c);
+        }
+        return out;
+    }
+
     function syncPickAll() {
-        var total = 0, on = 0;
-        for (var i = 0; i < state.clips.length; i++) {
-            var c = state.clips[i];
+        var total = 0, on = 0, rows = tickableRows();
+        for (var i = 0; i < rows.length; i++) {
+            var c = rows[i];
             /* ⚠️ trackPicked() SKIPS, IT DOES NOT COUNT AS UNTICKED. An audio row on an
              * unticked track has a DISABLED box, so counting it as "off"
              * would leave the master tick permanently indeterminate on any timeline with
              * audio in the list — a tri-state nothing on screen could resolve. */
-            if (c.group !== 0 || !typeOn(c) || !trackPicked(c)) continue;
+            if (!trackPicked(c)) continue;
             total++;
             if (isPicked(c)) on++;
         }
@@ -6601,6 +8111,55 @@
 
     var https = null;
     try { https = node ? node.require("https") : null; } catch (e) { https = null; }
+    /* 3.93 audit (2) · AND THE DIGEST THE CHANNEL PUBLISHES FOR IT. From 3.93 on, Publish writes
+     * latest.json with a "sha256" map over every released file, and the engine's updater refuses
+     * a release without it (SHA256_REQUIRED_FROM and release_digest_complaint in xmlcut.py). The
+     * panel's own download of a missing engine checked the VERSION line and three markers only,
+     * so a stale CDN copy carrying the right VERSION — or any body shaped like the engine — was
+     * written as it. The same rule as the engine's, for the one file this route fetches. */
+    // Named apart from the browser's own window.crypto, which this is not.
+    var nodeCrypto = null;
+    try { nodeCrypto = node ? node.require("crypto") : null; } catch (e) { nodeCrypto = null; }
+    var SHA256_REQUIRED_FROM = "3.93";
+    // A release number compared group by group, as xmlcut.py's version_key() does.
+    function releaseBefore(a, b) {
+        var x = String(a || "").split("."), y = String(b || "").split("."), i;
+        for (i = 0; i < Math.max(x.length, y.length); i++) {
+            var p = /^\d+$/.test(x[i] || "") ? parseInt(x[i], 10) : 0;
+            var q = /^\d+$/.test(y[i] || "") ? parseInt(y[i], 10) : 0;
+            if (p !== q) return p < q;
+        }
+        return false;
+    }
+    /* What latest.json vouches for xmlcut.py with: {hex} to check the download against, {} when
+     * a release before SHA256_REQUIRED_FROM carries no map (published before it existed), or
+     * {why} — asked BEFORE the download, as the engine asks. A map that names no digest for the
+     * file is a refusal, not a pass (release_file_stale). */
+    function engineDigest(info, want) {
+        var map = info ? info.sha256 : null;
+        var isMap = !!map && typeof map === "object" && Object.prototype.toString.call(map) !== "[object Array]";
+        var before = releaseBefore(want, SHA256_REQUIRED_FROM);
+        if (before && !isMap) return {};
+        if (!isMap || (!before && !Object.keys(map).length)) {
+            return { why: "latest.json for " + want + " carries no sha256 for its files, which every "
+                + "release from " + SHA256_REQUIRED_FROM + " on is published with, so the download "
+                + "cannot be checked" };
+        }
+        var d = map["xmlcut.py"];
+        if (typeof d !== "string" || !/^[0-9a-fA-F]{64}$/.test(d)) {
+            return { why: "latest.json for " + want + " has no sha256 for xmlcut.py, so the download "
+                + "cannot be checked" };
+        }
+        return { hex: d.toLowerCase() };
+    }
+    function digestComplaint(text, hex) {
+        if (!hex) return "";
+        var got = "";
+        try { got = nodeCrypto.createHash("sha256").update(text, "utf8").digest("hex"); } catch (e) { got = ""; }
+        if (!got) return "this panel could not work out its sha256 to check it against latest.json";
+        return got === hex ? "" : "it is not the xmlcut.py this release published (its sha256 differs "
+            + "from latest.json's)";
+    }
 
     /* Contents API first, then raw — the same order and the same reason as xmlcut.py:
      * raw.githubusercontent is CDN-cached for five minutes and can answer with a stale
@@ -6814,10 +8373,16 @@
                      + "). Press Find and point at xmlcut.py, or re-run the installer.");
                 return;
             }
-            var want = "";
-            try { want = String(JSON.parse(text).version || ""); } catch (e) {}
+            var want = "", info = null;
+            try { info = JSON.parse(text); want = String(info.version || ""); } catch (e) {}
             if (!want) {
                 stop("error", "the release channel did not name a version.");
+                return;
+            }
+            // 3.93 audit (2) · the digest it will be checked against, before anything is fetched.
+            var digest = engineDigest(info, want);
+            if (digest.why) {
+                stop("error", "refused the download — " + digest.why + ". Nothing was written.");
                 return;
             }
             setEngineStat("busy", "Downloading xmlcut.py " + want + "…");
@@ -6826,7 +8391,7 @@
                     stop("error", "the download failed (" + err2 + ").");
                     return;
                 }
-                var bad = engineComplaint(body, want);
+                var bad = engineComplaint(body, want) || digestComplaint(body, digest.hex);
                 if (bad) {
                     // Nothing is written. A rejected download leaves the panel exactly as
                     // it was: missing an engine and saying so.
@@ -6891,12 +8456,14 @@
             audioCut: String(state.audioCutWant || ""),
             // Timeline Render clips carry the render's own sound when at least one track is
             // ticked to be heard; the engine strips it otherwise, as it always has.
-            renderAudio: state.cutFrom === "render" && hearList().length > 0,
+            // 3.93 · of the run these settings go to — a Both half's own, so --render-audio
+            // rides on the Timeline half's argv and never on the Source half's.
+            renderAudio: renderNow() && hearList().length > 0,
             // Not in settingArgs(): --render-dir is added by the EXPORT only. The scan
             // runs before any render exists, and handing it a folder of nothing would
             // report every clip as having no render.
-            cutFrom: state.cutFrom,
-            vtrack: state.cutFrom === "render" ? Number(state.vtrackWant || 0) : 0
+            cutFrom: modeNow(),
+            vtrack: renderNow() ? Number(state.vtrackWant || 0) : 0
         };
     }
 
@@ -7129,7 +8696,8 @@
          *
          * ⚠️ RENDER MODE ONLY. In source mode these rows cannot be cut at all, so a number
          * would describe a file that is never going to exist. */
-        if (!d && state.cutFrom === "render" && state.seqW > 0 && state.seqH > 0) {
+        // 3.93 · priced as the half it is asked for (renderClips asks a Both row's edited/ half).
+        if (!d && renderNow() && state.seqW > 0 && state.seqH > 0) {
             var sd = scaledDims(state.seqW, state.seqH, pct);
             // The sequence's real rate, which the read already reported. Only if it did:
             // inventing one would put a number on screen with nothing behind it.
@@ -7222,7 +8790,7 @@
         try { old = window.localStorage.getItem(AUDIO_KEY_OLD); } catch (e) {}
         // Gone either way: a key left behind is a key that gets read again by mistake.
         if (old !== null) {
-            try { window.localStorage.removeItem(AUDIO_KEY_OLD); } catch (e) {}
+            try { lsDel(AUDIO_KEY_OLD); } catch (e) {}
         }
         if (now !== null) {
             state.audioWant = String(now);
@@ -7243,7 +8811,7 @@
     }
 
     function rememberAudioWant() {
-        try { window.localStorage.setItem(AUDIO_KEY, state.audioWant); } catch (e) {}
+        try { lsSet(AUDIO_KEY, state.audioWant); } catch (e) {}
     }
 
     /* Said ONCE, and only when the engine that read this timeline is the one whose numbers
@@ -7349,7 +8917,7 @@
     }
 
     function rememberAudioCutWant() {
-        try { window.localStorage.setItem(AUDIOCUT_KEY, state.audioCutWant); } catch (e) {}
+        try { lsSet(AUDIOCUT_KEY, state.audioCutWant); } catch (e) {}
     }
 
     // The ticked A-numbers as an array of numbers. One parser, so the ticks, inRun() and the
@@ -7373,20 +8941,86 @@
      * Per track, like the "In the picture" video ticks: the unticked tracks are muted in
      * Premiere for the duration of the render and put back afterwards, so the render's own
      * mix — which the engine keeps under --render-audio — holds only what was chosen. null
-     * means "every track", which is what Premiere renders when nobody touches it. Remembered
-     * as a flat list because muting is about THIS render, not about which timeline it was. */
-    var AUDIOHEAR_KEY = "xmlcut.audiohear";
+     * means "every track", which is what Premiere renders when nobody touches it.
+     *
+     * ⚠️ 3.93 audit (2) · REMEMBERED PER PROJECT AND TIMELINE, NOT FLAT. The flat list ("muting is
+     * about THIS render") carried one job's choice into the next: A1 unticked on a project whose
+     * A1 is music muted the NEXT project's A1 — its voice-over — in every edited/ clip, and a
+     * remembered untick-all stripped the sound from all of them, the rail silent and the ticks on
+     * a tab nobody had open. The failure the xmlcut.types lesson describes: a remembered exclusion
+     * applied to something present. So the ticks are kept under the open project's path and the
+     * timeline's audio track numbers (hearSig), as the picture ticks are kept per layout, and a
+     * timeline not seen before hears every track. The flat key is still written, for a rollback.
+     * A store from before this (the flat key, no map) is taken up ONCE, by the first timeline
+     * read — most likely the one it was chosen on — and said, since it may not have been. */
+    var AUDIOHEAR_KEY = "xmlcut.audiohear", AUDIOHEAR_BY = "xmlcut.audiohear.by", AUDIOHEAR_KEEP = 24;
     function loadAudioHearWant() {
+        state.audioHearWant = null;
+        state.audioHearSig = "";
+        state.audioHearNote = "";
         try {
             var v = window.localStorage.getItem(AUDIOHEAR_KEY);
-            state.audioHearWant = (v === null) ? null : String(v);
-        } catch (e) { state.audioHearWant = null; }
+            var by = window.localStorage.getItem(AUDIOHEAR_BY);
+            state.audioHearLegacy = (by === null || by === undefined) && v !== null && v !== undefined
+                ? String(v) : null;
+        } catch (e) { state.audioHearLegacy = null; }
+    }
+    // The open project and this timeline's audio track numbers — "" before a read has any.
+    function hearSig() {
+        var have = state.audioTracks || [], ix = [];
+        for (var i = 0; i < have.length; i++) ix.push(have[i].index);
+        if (!ix.length) return "";
+        return String((state.info && state.info.project_path) || "") + "|" + ix.join(",");
+    }
+    function savedHearSets() {
+        try {
+            var o = JSON.parse(window.localStorage.getItem(AUDIOHEAR_BY) || "{}");
+            return (o && typeof o === "object" && Object.prototype.toString.call(o) !== "[object Array]") ? o : {};
+        } catch (e) { return {}; }
     }
     function rememberAudioHearWant() {
         try {
-            if (state.audioHearWant === null) window.localStorage.removeItem(AUDIOHEAR_KEY);
-            else window.localStorage.setItem(AUDIOHEAR_KEY, state.audioHearWant);
+            if (state.audioHearWant === null) lsDel(AUDIOHEAR_KEY);
+            else lsSet(AUDIOHEAR_KEY, state.audioHearWant);
+            var sig = state.audioHearSig;
+            if (!sig) return;
+            // Oldest first with this timeline last, so the cap drops the one touched longest ago.
+            var o = savedHearSets(), keys = [], k, next = {};
+            for (k in o) {
+                if (Object.prototype.hasOwnProperty.call(o, k) && k !== sig && typeof o[k] === "string") keys.push(k);
+            }
+            for (var i = Math.max(0, keys.length - (AUDIOHEAR_KEEP - 1)); i < keys.length; i++) next[keys[i]] = o[keys[i]];
+            // Every track heard is the default, so it is kept by leaving this timeline out.
+            if (state.audioHearWant !== null) next[sig] = state.audioHearWant;
+            lsSet(AUDIOHEAR_BY, JSON.stringify(next));
         } catch (e) {}
+    }
+    /* What this timeline's ticks start as, when the timeline on screen is not the one
+     * audioHearWant was taken for: its own saved ticks, else — once — an earlier build's flat
+     * value, else every track. */
+    function takeHearWant(sig) {
+        var seen = savedHearSets();
+        state.audioHearSig = sig;
+        state.audioHearNote = "";
+        if (Object.prototype.hasOwnProperty.call(seen, sig) && typeof seen[sig] === "string") {
+            state.audioHearWant = seen[sig];
+            return;
+        }
+        var legacy = state.audioHearLegacy;
+        state.audioHearWant = null;
+        if (legacy === null) return;
+        state.audioHearLegacy = null;
+        state.audioHearWant = legacy;
+        rememberAudioHearWant();
+        var have = state.audioTracks || [], off = [];
+        for (var i = 0; i < have.length; i++) if (!audioHearOn(have[i].index)) off.push("A" + have[i].index);
+        if (off.length) {
+            state.audioHearNote = "Sound in the clips: " + (off.length === have.length
+                ? "every track is left out, so the clips have no sound"
+                : off.join(", ") + (off.length === 1 ? " is" : " are") + " left out")
+                + " — a choice saved before this update, perhaps on another timeline. Check the "
+                + "ticks in Settings; from now on each timeline keeps its own.";
+        }
     }
     /* The remembered choice, reconciled against the timeline that was just read.
      *
@@ -7401,7 +9035,12 @@
      * asked for; rewriting it would also throw A3 away for the timeline they came from. */
     function pruneAudioHearWant() {
         var have = state.audioTracks || [];
-        if (state.audioHearWant === null || !have.length) { say("hear", "warn", ""); return; }
+        // 3.93 audit (2) · this project's and timeline's own ticks, first (takeHearWant).
+        var sig = hearSig();
+        if (sig && sig !== state.audioHearSig) takeHearWant(sig);
+        // Said while this read stands, and only where the ticks are in force (Timeline Render).
+        var note = shownHas("render") ? state.audioHearNote : "";
+        if (state.audioHearWant === null || !have.length) { say("hear", "warn", note); return; }
         var parts = String(state.audioHearWant).split(","), named = [], kept = 0, i, j;
         for (i = 0; i < parts.length; i++) {
             var n = parseInt(parts[i], 10);
@@ -7411,7 +9050,8 @@
         }
         // No number at all is the deliberate untick-all, which is a choice this timeline can
         // honour perfectly well: every track muted, no --render-audio, no sound in the clips.
-        if (!named.length || kept) { say("hear", "warn", ""); return; }
+        if (!named.length || kept) { say("hear", "warn", note); return; }
+        state.audioHearNote = "";
         state.audioHearWant = null;
         rememberAudioHearWant();
         say("hear", "warn", "The saved “hear” choice named A" + named.join(", A")
@@ -7468,7 +9108,8 @@
      * shape the eye has not already met in this strip. */
     function renderAudioCutTracks() {
         var have = state.audioTracks || [];
-        var render = state.cutFrom === "render";
+        // 3.93 · the HEAR column is the Timeline half's, so Both shows it too.
+        var render = shownHas("render"), both = state.cutFrom === "both";
         // Shown in BOTH modes, and it still must be: the "own file" tick is mode-free — a
         // whole-track mp3 is mixed from the timeline's audio whichever way the PICTURE is
         // cut. Only the "in clip" column is render-only, and that is gated on `render` at the
@@ -7487,9 +9128,12 @@
          * each is its own row with its own sentence; the ticks, their data-h / data-a
          * attributes, their state and their callbacks are exactly what they were. */
         el.atracks.className = "atq";
+        /* 3.93 · in Both, which folder each governs: a whole-track file is written by each
+         * half into its own folder, and what the clips HEAR is the Timeline half's alone. */
         var fileRow = atQuestion("Audio files",
-            "Tick a track to get it as one file, start to end — e.g. the voice-over.");
-        var hearRow = render ? atQuestion("Sound in the clips",
+            both ? "Tick a track to get it as one file, start to end — in raw/ and in edited/."
+                 : "Tick a track to get it as one file, start to end — e.g. the voice-over.");
+        var hearRow = render ? atQuestion(both ? "Sound in the edited/ clips" : "Sound in the clips",
             "Ticked tracks are heard inside each video clip. Untick one to leave it out.") : null;
         for (var i = 0; i < have.length; i++) atRow(have[i]);
 
@@ -7546,6 +9190,8 @@
                     }
                     state.audioHearWant = (keep.length === have.length) ? null : keep.join(",");
                     rememberAudioHearWant();
+                    // 3.93 audit (2) · a tick changed here is this timeline's own choice now.
+                    if (state.audioHearNote) { state.audioHearNote = ""; say("hear", "warn", ""); }
                     renderSettings();
                 }, label));
             }
@@ -7593,6 +9239,16 @@
     function renderDissolveNote() {
         if (!el.dissnote) return;
         var txt = "";
+        /* 3.93 · BOTH, IN BOTH FOLDERS' TERMS: the split happens only in the Timeline read
+         * (edited/), and the Source half keeps the overlap it always has (raw/). */
+        if (state.cutFrom === "both") {
+            var eo = state.editOverlap || {}, bits = [];
+            if (eo.split > 0) bits.push("edited/ " + eo.split + " split");
+            else if (eo.pairs > 0) bits.push("edited/ " + eo.pairs + " overlap");
+            if (state.overlapPairs > 0) bits.push("raw/ " + state.overlapPairs + " overlap");
+            el.dissnote.textContent = bits.join(" · ");
+            return;
+        }
         if (state.transSplit > 0) {
             txt = state.transSplit + " split";
         } else if (state.overlapPairs > 0) {
@@ -7619,7 +9275,7 @@
 
     function rememberSplitTrans() {
         try {
-            window.localStorage.setItem(SPLIT_KEY, state.splitTrans ? "split" : "ignore");
+            lsSet(SPLIT_KEY, state.splitTrans ? "split" : "ignore");
         } catch (e) {}
     }
 
@@ -7842,9 +9498,11 @@
      * would be offering an empty export.
      */
     function videoTracksPresent() {
-        var seen = {}, out = [], i, c;
-        for (i = 0; i < state.clips.length; i++) {
-            c = state.clips[i];
+        /* 3.93 · the Timeline half's list in Both — the master track governs edited/, and its
+         * counts are what that half will cut. In either single mode, state.clips as before. */
+        var seen = {}, out = [], i, c, list = listFor("render");
+        for (i = 0; i < list.length; i++) {
+            c = list[i];
             if (c.trackType !== "video") continue;
             /* ⚠️ ONLY THE CLIPS THAT WOULD ACTUALLY BE CUT. This counted every video
              * clipitem, so the menu offered "V1 · 11 clips" beside a list reading "10 of 10
@@ -7949,8 +9607,12 @@
      * suddenly shows a third of the clips otherwise reads as a fault. */
     function renderListLabel() {
         if (!el.listlbl) return;
+        /* 3.93 · Both lists every cut, as Source Render does; the Timeline half's master track
+         * is said beside it, since that is what edited/ is cut from. */
         var txt = (state.cutFrom === "render" && state.vtrackWant)
             ? ("Every cut on V" + state.vtrackWant + ", in timeline order")
+            : (state.cutFrom === "both" && state.vtrackWant)
+            ? ("Every cut, in timeline order · edited/ from V" + state.vtrackWant)
             : "Every cut, in timeline order";
         /* The tip marker is a child ELEMENT, so only the leading text node may be replaced.
          *
@@ -8027,7 +9689,7 @@
             /* ⚠️ THE FLAT KEY IS STILL WRITTEN, and not for nothing: it is what a build
              * without this change reads, so rolling one back leaves his last choice in place
              * instead of a panel that has forgotten every tick. */
-            window.localStorage.setItem("xmlcut.vinclude", state.vIncludeWant);
+            lsSet("xmlcut.vinclude", state.vIncludeWant);
             if (!sig) return;
             var o = savedIncludeSets(), keys = [], k;
             for (k in o) {
@@ -8041,7 +9703,7 @@
                 next[keys[i]] = o[keys[i]];
             }
             next[sig] = state.vIncludeWant;
-            window.localStorage.setItem("xmlcut.vinclude.by", JSON.stringify(next));
+            lsSet("xmlcut.vinclude.by", JSON.stringify(next));
         } catch (e) {}
     }
 
@@ -8157,15 +9819,15 @@
      * degrading the other one, which is the same rule the sliders and the primary button
      * follow. No new colour: --accent and --glow are the tokens that were already there.
      */
+    /* 3.93 · THREE BUTTONS, ONE LIT — and the lit one is always what Export will make: Both
+     * stays lit through both of its halves, whichever one is running. */
+    var MODE_BTN = { source: "modesrc", render: "modeseq", both: "modeboth" };
     function paintMode() {
-        var render = state.cutFrom === "render";
-        if (el.modesrc) {
-            el.modesrc.className = "modebtn" + (render ? "" : " on");
-            el.modesrc.setAttribute("aria-pressed", render ? "false" : "true");
-        }
-        if (el.modeseq) {
-            el.modeseq.className = "modebtn" + (render ? " on" : "");
-            el.modeseq.setAttribute("aria-pressed", render ? "true" : "false");
+        for (var m in MODE_BTN) {
+            if (!Object.prototype.hasOwnProperty.call(MODE_BTN, m) || !el[MODE_BTN[m]]) continue;
+            var on = state.cutFrom === m;
+            el[MODE_BTN[m]].className = "modebtn" + (on ? " on" : "");
+            el[MODE_BTN[m]].setAttribute("aria-pressed", on ? "true" : "false");
         }
     }
 
@@ -8181,18 +9843,23 @@
      * different kind of choice, and putting it in a preset would mean applying a saved
      * preset could silently switch a run from Source Render to Timeline Render.
      *
-     * @param m  "source" | "render"
+     * @param m  "source" | "render" | "both" (3.93)
      */
     function setCutFrom(m) {
-        var want = (m === "render") ? "render" : "source";
+        var want = (m === "render" || m === "both") ? m : "source";
         if (want === state.cutFrom) return;   // clicking the lit one is not a change
-        // Locked while an export is starting or running — see LOCK_WHILE_RUNNING.
-        if (state.running || state.exportPending) {
+        // Locked while an export is starting or running — see LOCK_WHILE_RUNNING. 3.93 · and
+        // for the whole of a Both export, its gap between halves included.
+        if (state.running || state.exportPending || state.chain) {
             log("mode not changed: an export is running");
             return;
         }
         state.cutFrom = want;
-        try { window.localStorage.setItem("xmlcut.cutfrom", state.cutFrom); } catch (e) {}
+        /* 3.93 · Both needs its Timeline read. Nothing to reset here: every single-mode read
+         * drops the last pair's (scanLanded), so a list from another mode is never taken for
+         * one, and the re-read below brings the pair. (A reset on this line was tried and
+         * could not be told from no reset by any check — removed, not kept as decoration.) */
+        try { lsSet("xmlcut.cutfrom", state.cutFrom); } catch (e) {}
         applyCutFrom();
         /* 3.91 · THE MODE IS IN THE PATH AGAIN — <version>/raw or <version>/edited — so the
          * destination line and the dest row follow the switch at once, and a report's Retry is
@@ -8221,10 +9888,14 @@
         }
     }
 
-    /* Source Render or Timeline Render. The track field only exists in Timeline Render. */
+    /* Source Render or Timeline Render. The track field only exists in Timeline Render.
+     * 3.93 · Both shows BOTH modes' settings together — the chips (raw/) and the Picture
+     * frame (edited/) — and the two small captions saying which folder each governs. */
     function applyCutFrom() {
-        var render = state.cutFrom === "render";
+        var render = shownHas("render"), both = state.cutFrom === "both";
         paintMode();
+        if (el.typefor) show(el.typefor, both);
+        if (el.trackfor) show(el.trackfor, both);
         show(el.vtrackfield, render);
         /* THE TRACKS FRAME, and it is hidden ENTIRELY when there is nothing in it to
          * answer: source mode on a timeline with no audio tracks. A caption over a disabled
@@ -8259,8 +9930,8 @@
          * And it is not a control he could go looking for and fail to find: the mode is a
          * deliberate press on one of two lit buttons, and pressing the other one brings the
          * whole block back visibly in the same gesture. */
-        show(el.typelbl, !render);
-        show(el.types, !render);
+        show(el.typelbl, shownHas("source"));
+        show(el.types, shownHas("source"));
         renderStripFoot();
     }
 
@@ -8268,7 +9939,7 @@
      * These were four separate labels living inside four different fields, which is most
      * of why the strip read as busy. */
     function renderStripFoot() {
-        if (state.cutFrom !== "render") {
+        if (!shownHas("render")) {
             say("rendermode", "info", "");
             return;
         }
@@ -8284,7 +9955,9 @@
         var out = [];
         // Plain text, no <b>. The bold was the only inline emphasis left in the panel and it
         // was carrying a number that is already the only number in the sentence.
-        out.push("Premiere renders each cut at ~"
+        // 3.93 · in Both, said of the half it is about.
+        out.push((state.cutFrom === "both" ? "For edited/, Premiere" : "Premiere")
+                 + " renders each cut at ~"
                  + (mb < 10 ? mb.toFixed(1) : Math.round(mb))
                  + " Mbps, then ffmpeg encodes at your quality.");
         // Said because it is not obvious and it is wrong for a retimed clip: the scan runs
@@ -8484,6 +10157,21 @@
         } else if (missing) {
             why = missing + " cut" + (missing === 1 ? "" : "s") + " had no render";
         }
+        /* 3.93 audit · A RUN THAT BUILT NO REPORT HAS NO RETRY to keep them for — a Cancel, an
+         * engine that wrote no manifest — and a fresh Export renders every range again (renderSpec
+         * reuses only on a Retry; host.jsx deletes a render before writing its range). So the
+         * note says what is true, and it never replaces the stop sentence the close handler has
+         * just put on this row: that warning is the one account of a Cancel, and an Info-tab line
+         * promising a Retry that does not exist took its place (measured by the audit). */
+        if (why && !built) {
+            var kept = "Premiere's renders stay in this Mac's cache, " + shortPath(dir, 60) + ": "
+                + why + ", so there is no report to retry from, and exporting again renders from "
+                + "the start. The next clean run of this folder removes them, and so does any "
+                + "render run " + RENDER_CACHE_DAYS + " days from now.";
+            if (railRows.renders && railRows.renders.sev !== "info") log(kept);
+            else say("renders", "info", kept);
+            return;
+        }
         if (why) {
             /* Said out loud, because a folder that is sometimes there and sometimes not is a
              * thing you go looking for an explanation of.
@@ -8552,7 +10240,12 @@
      * no_render or render_mismatch is always rendered again — reusing a render of the wrong
      * length would fail it the same way for ever. `reused` on the returned list counts the rest. */
     var ENGINE_RENDER_EXTS = [".mp4", ".mov", ".m4v", ".mxf", ".mkv"];
-    var RENDER_FAULTS = { no_render: 1, render_mismatch: 1 };
+    /* 3.93 audit · and "render_short": the panel's word for a row the engine files under plain
+     * `failed` whose own sentence says the RENDER came up short — 1–2 frames, inside the engine's
+     * RENDER_FRAME_SLACK, so encoded and then failed on its frame count (xmlcut.py, the
+     * _short_render sentence). Reused, it failed the same way on every Retry for ever. */
+    var RENDER_FAULTS = { no_render: 1, render_mismatch: 1, render_short: 1 };
+    var RENDER_SHORT_RE = /\bthe RENDER came up short\b/;
 
     function keptRender(dir, label) {
         if (!dir) return "";
@@ -8575,11 +10268,12 @@
             for (i = 0; i < state.report.length; i++) {
                 var rr = state.report[i];
                 if (rr && rr.key && Object.prototype.hasOwnProperty.call(retry, rr.key)) {
-                    retry[rr.key] = String(rr.status || "");
+                    retry[rr.key] = rr.renderShort ? "render_short" : String(rr.status || "");
                 }
             }
         }
-        var pool = retry ? state.clips : pickedClips(), out = [], reused = 0;
+        // 3.93 · the list of the run this spec is for (listFor) — a Both half's own.
+        var pool = retry ? listFor() : pickedClips(), out = [], reused = 0;
         var dir = retry ? renderDir() : "";
         for (i = 0; i < pool.length; i++) {
             c = pool[i];
@@ -8620,7 +10314,8 @@
         // The clips that will actually be CUT, not every clip on the timeline: an
         // unticked 3000x3000 still would otherwise turn a uniform 1080x1920 export into
         // "mixed sources" on the strength of a file nobody is exporting.
-        var picked = pickedClips();
+        // 3.93 · what the lit button exports — in Both, both halves' clips.
+        var picked = shownPicked();
         var seen = {}, dims = null, n = 0;
         for (var i = 0; i < picked.length; i++) {
             var c = picked[i];
@@ -8718,12 +10413,19 @@
         if (!el.capnote) return;
         var lim = capBytes();
         if (!lim) { el.capnote.textContent = ""; el.capnote.className = "capnote"; return; }
-        var picked = pickedClips(), s = settings();
+        // 3.93 · in Both, the raw/ half's, whose numbers are the table's.
+        var picked = pickedClips(state.cutFrom === "both" ? "source" : state.cutFrom), s = settings();
         var hits = [];
-        for (var i = 0; i < picked.length; i++) {
-            var b = clipBytes(picked[i], s);
-            if (b > lim) hits.push(picked[i].n ? pad2(picked[i].n) : "?");
-        }
+        // Priced as the lit mode (raw/'s in Both), whichever half of a Both export is running.
+        withHalf(state.cutFrom === "both" ? "source" : state.half, function () {
+            for (var i = 0; i < picked.length; i++) {
+                var b = clipBytes(picked[i], s);
+                // The table's number: in Both it is on the table's own view of the row, which
+                // is the raw/ read's tlIndex (renderClips).
+                var num = state.cutFrom === "both" ? picked[i].tlIndex : picked[i].n;
+                if (b > lim) hits.push(num ? pad2(num) : "?");
+            }
+        });
         el.capnote.className = "capnote" + (hits.length ? " hit" : " clear");
         if (!picked.length) { el.capnote.textContent = ""; return; }
         if (!hits.length) {
@@ -8748,9 +10450,15 @@
     /* 3.89 · THE BUTTON STATES THE COUNT AND THE SIZE. The size had its own line under the
      * Save-to row ("~167.4 MB for 20 clips · estimated"), which was the count said a third
      * time to add one number. The number is on the thing you press now. */
+    /* 3.93 · AND IN BOTH, WHAT EACH FOLDER GETS: "Export 16 raw + 10 edited". The two counts
+     * are the halves' own — the Source list's ticks and chips, the Timeline list's master
+     * track — so a clip the two lists count differently (a nest, an .aep) is counted as each
+     * half will write it. */
     function exportLabel(n) {
         if (!(n > 0)) return "Nothing selected";
-        var s = "Export " + n + " clip" + (n === 1 ? "" : "s");
+        var s = state.cutFrom === "both"
+            ? "Export " + selectedCount("source") + " raw + " + selectedCount("render") + " edited"
+            : "Export " + n + " clip" + (n === 1 ? "" : "s");
         if (state.figBytes > 0) s += "  \u00b7  " + humanBytes(state.figBytes);
         return s;
     }
@@ -8758,11 +10466,15 @@
     function renderFigs(totalBytes) {
         state.figBytes = totalBytes > 0 ? totalBytes : 0;
         if (el["export"] && /^Export /.test(el["export"].textContent || "")) {
-            el["export"].textContent = exportLabel(selectedCount());
+            el["export"].textContent = exportLabel(exportTotal());
         }
         if (!el.figclips) return;
-        var picked = pickedClips();
-        el.figclips.textContent = picked.length ? String(picked.length) : "—";
+        // 3.93 · Both: "16+10", raw/ and edited/.
+        var np = state.cutFrom === "both"
+            ? [pickedClips("source").length, pickedClips("render").length] : null;
+        var picked = np ? [] : pickedClips(state.cutFrom);
+        el.figclips.textContent = np ? ((np[0] || np[1]) ? np[0] + "+" + np[1] : "—")
+                                     : (picked.length ? String(picked.length) : "—");
         el.figsize.textContent = (totalBytes > 0) ? humanBytes(totalBytes) : "—";
         el.figfps.textContent = state.seqFps ? String(state.seqFps) : "—";
     }
@@ -8781,18 +10493,28 @@
             show(el.remeasure, !!state.clips.length && (staleSizes() || !measured()));
             el.remeasure.className = "mini" + (staleSizes() ? " on" : "");
         }
-        var picked = pickedClips();
-        if (!picked.length) {
+        /* 3.93 · WHAT THE LIT BUTTON EXPORTS: in Both, the raw/ half's clips priced from their
+         * sources and the edited/ half's priced as renders — each as its own mode prices it. */
+        var both = state.cutFrom === "both";
+        var picked = both ? pickedClips("source") : pickedClips(state.cutFrom);
+        var pickedEd = both ? pickedClips("render") : [];
+        if (!picked.length && !pickedEd.length) {
             show(el.sizeest, false);
             renderFigs(0);
             say("sizes", "warn", "");
             return;
         }
         var s = settings(), total = 0, known = 0;
-        for (var i = 0; i < picked.length; i++) {
-            var b = clipBytes(picked[i], s);
-            if (b > 0) { total += b; known++; }
-        }
+        var price = function (list, m) {
+            withHalf(m, function () {
+                for (var i = 0; i < list.length; i++) {
+                    var b = clipBytes(list[i], s);
+                    if (b > 0) { total += b; known++; }
+                }
+            });
+        };
+        price(picked, both ? "source" : state.half);
+        price(pickedEd, "render");
         // The readout beside the slider is the same number, so it is set HERE rather than
         // recomputed in renderSettings — which only ran on a settings change, leaving the
         // readout showing the boot value after a scan.
@@ -8822,8 +10544,9 @@
                + " · " + state.probeScale + "%")
             : (measured() ? "measured" : "estimated");
         el.sizeest.className = "abfact" + (stale ? " warn" : "");
-        el.sizeest.textContent = "~" + humanBytes(total) + " for " + picked.length
-            + " clip" + (picked.length === 1 ? "" : "s") + " · " + how;
+        el.sizeest.textContent = "~" + humanBytes(total) + " for "
+            + (both ? picked.length + " raw + " + pickedEd.length + " edited clips"
+                    : picked.length + " clip" + (picked.length === 1 ? "" : "s")) + " · " + how;
         show(el.sizeest, true);
         // Never a scaled number. The sizes shown are the ones that were measured, and this
         // says which settings they belong to and what would refresh them.
@@ -8945,11 +10668,15 @@
             if (!vs) return "";
             return vs + " The render is resampled — frame_exact = false.";
         }
-        var picked = pickedClips(), n = 0, unknown = 0;
+        // 3.93 · the raw/ half's clips in Both: each is resampled from its own camera rate.
+        var picked = pickedClips("source"), n = 0, unknown = 0;
+        var both = state.cutFrom === "both";
+        // …and the edited/ half's render, which comes out at the sequence rate.
+        var edNote = (both && vs) ? " edited/: the render is resampled — frame_exact = false." : "";
         /* NO LIST YET — the rate can be chosen before a read, and it is remembered across
          * sessions. The mismatch is still worth saying; a count over an empty list is not,
          * and "0 of 0 clips resampled" beside a rate that IS wrong reads as reassurance. */
-        if (!picked.length) return vs;
+        if (!picked.length) return vs + edNote;
         for (var i = 0; i < picked.length; i++) {
             var sf = Number(picked[i].srcFps || 0);
             if (!(sf > 0)) { unknown++; n++; continue; }
@@ -8959,11 +10686,11 @@
          * wrong. A mismatch with no clip affected still speaks — the sources happen to sit at
          * the forced rate while the timeline does not, and the cut LENGTHS come off the
          * timeline. */
-        if (!n) return vs;
-        return (vs ? vs + " " : "") + n + " of " + picked.length + " ticked clip"
-            + (picked.length === 1 ? "" : "s") + " resampled"
+        if (!n) return vs + edNote;
+        return (vs ? vs + " " : "") + (both ? "raw/: " : "") + n + " of " + picked.length
+            + " ticked clip" + (picked.length === 1 ? "" : "s") + " resampled"
             + (unknown ? ", " + unknown + " of them at an unreadable rate" : "")
-            + " — frame_exact = false.";
+            + " — frame_exact = false." + edNote;
     }
 
     /* Called from BOTH renderSettings and renderClips: the note is a function of the rate
@@ -9026,7 +10753,7 @@
 
     function rememberSetOpen() {
         try {
-            window.localStorage.setItem(SETOPEN_KEY,
+            lsSet(SETOPEN_KEY,
                                         (el.setdet && el.setdet.open) ? "open" : "shut");
         } catch (e) {}
     }
@@ -9048,7 +10775,7 @@
 
     function rememberSettings() {
         try {
-            window.localStorage.setItem("xmlcut.export", JSON.stringify({
+            lsSet("xmlcut.export", JSON.stringify({
                 crf: state.crfVal, fps: el.fps.value,
                 scale: state.scale,
                 // Kept here rather than in a preset: presets are the ENGINE's file and
@@ -9075,6 +10802,13 @@
     function loadPresets(then) {
         runJson(["--list-presets-json"], function (r) {
             state.presets = (r && r.presets) || {};
+            /* 3.93 audit (2) · AN UNREADABLE presets.json IS SAID, not shown as an empty menu. The
+             * engine reports it as `error` (a hand edit's trailing comma, a file cut short) and
+             * refuses to write over it; the menu showing only "Custom" looked like no presets. */
+            say("presetfile", "warn", (r && r.error)
+                ? "The saved presets cannot be read — " + r.error + " — so none is listed, and "
+                  + "Save and Delete are refused until the file is fixed or moved aside."
+                : "");
             var keep = el.preset.value;
             el.preset.innerHTML = "";
             var blank = document.createElement("option");
@@ -9111,10 +10845,26 @@
         // Both halves below can be unrepresentable at once, so the refusals are collected
         // and said together rather than one of them overwriting the other.
         var refused = [];
+        var vc = s.vcodec ? String(s.vcodec) : "libx264";
+        /* 3.93 audit (2) · WHILE THE ENCODER FIELD IS HIDDEN THE PANEL WRITES H.264 ONLY (3.32: "the
+         * panel writes H.264 in .mp4 and offers no choice"), and a preset saved with libx265 —
+         * from a terminal, or by a panel from the one morning the field was shown — switched the
+         * hidden encoder to H.265 with nothing on screen naming it; Custom did not switch it back,
+         * and a restart did (rememberSettings keeps no encoder), so one press gave two encodes.
+         * Refused like a bitrate preset: said, and H.264 stands. Its CRF goes with it — an H.265
+         * number (crf 28 is about x264's 23), not a quality this encode would have. Showing the
+         * field again (deleting its `hidden`) lets such a preset apply as it always did. */
+        var h265 = vc !== "libx264" && PANEL_VCODECS.indexOf(vc) >= 0 && (!el.encfield || !!el.encfield.hidden);
         if (s.bitrate) {
             refused.push("\u201c" + name + "\u201d targets bitrate " + s.bitrate
                 + ", which this panel cannot do — CRF " + state.crfVal + " still stands. "
                 + "Use xmlcut.py --bitrate " + s.bitrate + " from a terminal.");
+        } else if (h265) {
+            refused.push("\u201c" + name + "\u201d was saved for " + codecName(vc) + " (" + vc
+                + "), which this panel does not export — it writes H.264 in .mp4 — so its encoder"
+                + (s.crf ? " and its CRF " + s.crf + ", an " + codecName(vc) + " number," : "")
+                + " are not applied: H.264 at CRF " + state.crfVal + " still stands. Use "
+                + "xmlcut.py --export-preset \u201c" + name + "\u201d from a terminal.");
         } else {
             // parseFloat, not parseInt: a preset saved at crf 18.5 must not come back
             // as 18 while still calling itself by the same name.
@@ -9133,8 +10883,9 @@
          * field. Leaving the current encoder standing instead would make one preset mean
          * different things depending on what happened to be on screen before it, which is
          * the same fault in the other direction. */
-        var vc = s.vcodec ? String(s.vcodec) : "libx264";
-        if (PANEL_VCODECS.indexOf(vc) < 0) {
+        if (h265) {
+            el.vcodec.value = "libx264";
+        } else if (PANEL_VCODECS.indexOf(vc) < 0) {
             /* A presets.json is meant to be hand-editable, so it can name an encoder this
              * panel has no option for. Same rule as the bitrate half: refuse it out loud.
              * Falling back to H.264 silently would export something the preset's name says
@@ -9323,9 +11074,11 @@
      * The manifest is the authoritative record of what each cut actually is, and it
      * carries the numbers needed to check a clip without doing arithmetic: the frame
      * count, the native length, the speed, and the length it occupied on the timeline. */
-    function manifestMtime() {
+    /* @param dir  3.93 audit · the folder to look in — the run's own -o (runEngineExport); the
+     *             destination as it resolves now when omitted. */
+    function manifestMtime(dir) {
         // Never a relative "manifest.json": with no destination that would stat the cwd's.
-        var d = outDir();
+        var d = dir !== undefined ? dir : outDir();
         if (!d) return 0;
         try {
             return fs.statSync(path.join(d, "manifest.json")).mtimeMs;
@@ -9502,11 +11255,19 @@
      * An advisory that throws is how a completed run got a traceback and a non-zero exit
      * earlier in this file's history, and this one runs while clips are still being written.
      */
-    function reportDir() {
+    /* @param dir        3.93 audit · the run's own -o; outDir() when omitted.
+     * @param mustExist  only when that folder is there: the run log is written after the run,
+     *                   and a -o that has gone since (moved, renamed, unmounted — the engine
+     *                   recreates nothing then) must not be made again just to hold it. */
+    function reportDir(dir, mustExist) {
         // outDir(), not state.out: with no destination there is no report folder to make, and
         // a relative "report" would be made in the cwd.
-        var od = (fs && path) ? outDir() : "";
+        var od = (fs && path) ? (dir !== undefined ? dir : outDir()) : "";
         if (!od) return "";
+        if (mustExist && !isDir(od)) {
+            log("report folder: " + od + " is not there any more — the run log is not written");
+            return "";
+        }
         try {
             var d = path.join(od, "report");
             if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
@@ -9517,8 +11278,8 @@
         }
     }
 
-    function saveReadInputs() {
-        var d = reportDir();
+    function saveReadInputs(dir) {
+        var d = reportDir(dir);
         if (!d) return;
         var copied = [];
         try {
@@ -9539,15 +11300,16 @@
         if (copied.length) log("report/: " + copied.join(", "));
     }
 
-    function saveRunLog() {
-        var d = reportDir();
+    function saveRunLog(dir) {
+        var d = reportDir(dir, dir !== undefined);
         if (!d) return;
         try {
             var body = el.log.textContent === "\u2014" ? "" : el.log.textContent;
             var head = "Raw-cutter " + ((el.ver && el.ver.textContent) || "?")
                 + "\nsequence: " + ((state.info && state.info.sequence) || "?")
-                + "\ncut from: " + state.cutFrom
-                + "\nfolder:   " + outDir() + "\n\n";
+                // 3.93 · the mode of the run this folder holds — a Both half's own.
+                + "\ncut from: " + modeNow()
+                + "\nfolder:   " + (dir !== undefined ? dir : outDir()) + "\n\n";
             fs.writeFileSync(path.join(d, "panel-log.txt"), head + body, "utf8");
             log("report/panel-log.txt written");
         } catch (e) {
@@ -9555,10 +11317,17 @@
         }
     }
 
-    function buildReport() {
+    /* @param dir  3.93 audit · THE FOLDER THE ENGINE WAS GIVEN (its -o), and `rd` the destination
+     *             it was resolved as at the spawn. The report is of that run, so it is read there:
+     *             asked of outDir() at the close instead, a free folder that gained an Output/
+     *             while the engine ran (or a product folder that lost one) read another folder —
+     *             "wrote no manifest" over clips that were there, or an OLDER export's rows shown
+     *             as this run's, with a Retry into it. Both omitted: the destination as it is now. */
+    function buildReport(dir, rd) {
+        if (dir === undefined) dir = outDir();
         state.report = [];
         state.reportFresh = true;
-        if (manifestMtime() === state.manifestBefore) {
+        if (manifestMtime(dir) === state.manifestBefore) {
             // Nothing was written this run — do not present an older manifest as this
             // run's result.
             log("no manifest written by this run; not reporting");
@@ -9566,15 +11335,21 @@
         }
         var data;
         try {
-            if (!outDir()) throw new Error("there is no destination to read a manifest from");
-            data = JSON.parse(fs.readFileSync(path.join(outDir(), "manifest.json"),
+            if (!dir) throw new Error("there is no destination to read a manifest from");
+            data = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"),
                                               "utf8"));
         } catch (e) {
             log("no manifest to report on: " + e);
             return false;
         }
         // 3.91 · the folder this report is of — its Retry belongs there (retryHere).
-        state.reportFor = outDir();
+        state.reportFor = dir;
+        /* 3.93 · a single-mode report replaces a Both one on screen, its halves and their rows
+         * with it; a Both half's report is one of the two chainEnd() puts together. */
+        if (!state.chain) {
+            state.bothReport = null;
+            state.rowHalves = null;
+        }
 
         var clips = data.clips || [];
         for (var i = 0; i < clips.length; i++) {
@@ -9678,6 +11453,8 @@
                 // that was missing or wrong (render again) from an encode that failed on a good
                 // render (re-encode from the one kept) — renderSpec().
                 status: st,
+                // 3.93 audit · a failure the engine says is the RENDER's (see RENDER_FAULTS).
+                renderShort: st === "failed" && RENDER_SHORT_RE.test(String(c.error || "")),
                 problem: bad || warn
             });
         }
@@ -9739,17 +11516,9 @@
         if (n.retimed) pill(n.retimed + " retimed", "", PILL_TIP.retimed);
         if (n.reversed) pill(n.reversed + " reversed", "", PILL_TIP.reversed);
 
-        el.tally.innerHTML = "";
-        for (var p = 0; p < pills.length; p++) {
-            var d = document.createElement("span");
-            d.className = "pill " + pills[p].c;
-            d.textContent = pills[p].t;
-            if (pills[p].tip) {
-                d.setAttribute("data-tip", pills[p].tip);
-                wireTip(d, pills[p].tip);
-            }
-            el.tally.appendChild(d);
-        }
+        // 3.93 · kept, so a Both report can show each half's beside the other's (chainEnd).
+        state.lastPills = pills;
+        paintTally(pills);
 
         /* Where 25-matched became 18-written.
          *
@@ -9775,16 +11544,33 @@
         // Named in words too — the product and the version, the two things that can be wrong
         // — and whether this export is the one that made Output/ACT, which the dest row said
         // it would do before the run.
-        var rd = resolveDest();
-        el.repdestlbl.textContent = rd.ok
+        // 3.93 audit · of the run's own folder: its destination as resolved at the spawn.
+        if (!rd || rd.dir !== dir) rd = resolveDest();
+        var same = rd.ok && rd.dir === dir;
+        el.repdestlbl.textContent = same
             ? ("Clips are in " + destTail(rd) + "/"
                + (state.actMade ? " — this export created " + path.basename(rd.output)
                   + "/" + path.basename(rd.act) : ""))
             : "Clips are in:";
-        show(el.repdestlbl, !!outDir());
-        setPathLabel(el.repdest, outDir(), 60);
-        show(el.repdestrow, !!outDir());
+        show(el.repdestlbl, !!dir);
+        setPathLabel(el.repdest, dir, 60);
+        show(el.repdestrow, !!dir);
         return true;
+    }
+
+    // The report's chips — one run's, or (3.93) a Both run's two halves', each named.
+    function paintTally(pills) {
+        el.tally.innerHTML = "";
+        for (var p = 0; p < pills.length; p++) {
+            var d = document.createElement("span");
+            d.className = "pill " + pills[p].c;
+            d.textContent = pills[p].t;
+            if (pills[p].tip) {
+                d.setAttribute("data-tip", pills[p].tip);
+                wireTip(d, pills[p].tip);
+            }
+            el.tally.appendChild(d);
+        }
     }
 
     /* The end of a run, said once — and NOT as a second list.
@@ -9802,7 +11588,17 @@
      * on screen after a switch to Timeline Render while outDir() has moved to edited/: its
      * Retry would render and cut the Source run's failed rows into the other folder. 3.90's
      * mixed-mode refusal is what stopped that press; with the modes apart, this does. */
+    /* 3.93 · AND A BOTH REPORT'S RETRY BELONGS TO BOTH OF ITS FOLDERS: offered while Both is
+     * lit and each half would still write where that half's report is of. Its Retry re-runs
+     * each half's own failed rows into that half's own folder, so in Source Render or Timeline
+     * Render alone — one of the two folders, and the wrong list for the other — it is not
+     * offered; and a single-mode report's Retry is not offered in Both (outDir() is "" there). */
     function retryHere() {
+        var br = state.bothReport;
+        if (br) {
+            return state.cutFrom === "both" && !!br.dirs
+                && outDirOf("source") === br.dirs.source && outDirOf("render") === br.dirs.render;
+        }
         return !!state.reportFor && outDir() === state.reportFor;
     }
 
@@ -9816,6 +11612,19 @@
             if (state.report[i].bad && state.report[i].key) out.push(state.report[i]);
         }
         return out;
+    }
+
+    /* 3.93 · A BOTH REPORT'S RETRY SAYS WHICH FOLDERS IT RE-RUNS: " (edited/)", " (1 raw/, 2
+     * edited/)". "" for a single-mode report, whose button reads as it always has. */
+    function retryFolders(failed) {
+        if (!state.bothReport) return "";
+        var n = { source: 0, render: 0 }, bits = [];
+        for (var i = 0; i < failed.length; i++) if (n[failed[i].half] !== undefined) n[failed[i].half]++;
+        for (var j = 0; j < HALVES.length; j++) {
+            if (n[HALVES[j]]) bits.push(n[HALVES[j]] + " " + halfDir(HALVES[j]));
+        }
+        if (bits.length === 1) return " (" + halfDir(n.source ? "source" : "render") + ")";
+        return bits.length ? " (" + bits.join(", ") + ")" : "";
     }
 
     function renderReport() {
@@ -9841,7 +11650,7 @@
         // reads correctly out of the general form, and a hard-coded branch beside a computed
         // one is where an off-by-one hides — the fixture has exactly one failure, so the
         // computed half was never exercised by a test at all.
-        el.retry.textContent = "Retry the " + failed.length + " that failed";
+        el.retry.textContent = "Retry the " + failed.length + " that failed" + retryFolders(failed);
         el.retry.disabled = state.busy || state.running;
         /* Two primaries would compete, so only one of them is ever the primary: retrying is
          * the next move when something failed, and exporting again is the next move when
@@ -9906,7 +11715,19 @@
         if (over.length) {
             out.push(over.length + " clip(s) over " + state.cap + " MB, marked ▲");
         }
-        if (outDir()) out.push(outDir());
+        // 3.93 · a Both report names both folders it wrote.
+        if (state.bothReport) {
+            var bd = state.bothReport.dirs || {};
+            if (bd.source) out.push(bd.source);
+            if (bd.render) out.push(bd.render);
+        } else {
+            /* 3.93 audit · THE FOLDER THE REPORT IS OF (state.reportFor), as the report's own Copy
+             * and Show in Finder have been since the 3.91 review — outDir() follows the lit mode,
+             * so after a switch the pasted report sent a colleague to edited/ for raw/'s clips,
+             * and in Both (outDir() "") it named no folder at all. */
+            var rf = state.reportFor || outDir();
+            if (rf) out.push(rf);
+        }
         if (state.merge.length) {
             out.push("");
             for (var m = 0; m < state.merge.length; m++) out.push("  " + state.merge[m]);
@@ -10028,7 +11849,10 @@
         say("pickout", "info", "");
         if (!state.info) return false;
         var at = String(p).replace(/\/+$/, "") || "/";
-        if (state.running || state.exportPending) {
+        /* 3.93 · and a Both export is running from its first half's start to its second's end:
+         * between the halves state.running is false for a moment, and a folder dialog answered
+         * there would move the second half's folder under a press made for the first's. */
+        if (state.running || state.exportPending || state.chain) {
             log("destination not changed: an export is starting or running");
             /* Worded to stay true once the export has ended: the row outlives the run on
              * purpose, as the reminder to choose the folder again (fix review, 29 Sep — it said
@@ -10145,6 +11969,7 @@
      * failed. See refuseIfNoDest() for the refusal that measured it. */
     el["export"].addEventListener("click", function () {
         state.retryKeys = [];
+        state.retryBoth = null;
         doExport();
     });
 
@@ -10184,6 +12009,38 @@
         var bad = failedRows();
         for (var i = 0; i < bad.length; i++) keys.push(bad[i].key);
         if (!keys.length) return;
+        /* 3.93 · A BOTH REPORT'S RETRY: each half's own failed rows, into its own folder — the
+         * Source half's re-cut into raw/, the Timeline half's re-rendered or re-encoded into
+         * edited/ from the renders its run kept, exactly as each mode's Retry does — and a half
+         * with no failures is not run at all (startChain). */
+        if (state.bothReport) {
+            if (!retryHere()) {
+                log("retry refused: the report is of a Both export, and " + (state.cutFrom === "both"
+                    ? "Both no longer goes to its folders (" + bothFolders() + ")"
+                    : "Both is not what Export makes now (" + state.cutFrom + ")"));
+                /* 3.92 × 3.93 · with Both lit, the folders themselves have moved — Change, the
+                 * Product menu, Save to, or the disk — so "press Both" would name the button that
+                 * is already lit: the way back is the destination those folders are in. */
+                say("export", "warn", "Those " + keys.length + " clip(s) failed in a Both export — "
+                    + bothFolders() + " — and "
+                    + (state.cutFrom === "both"
+                       ? "Both now exports somewhere else: go back to "
+                         + (state.bothReport.version ? shortPath(state.bothReport.version, 44)
+                                                     : "that destination")
+                         + " to retry them there."
+                       : "Export now makes " + HALF_NAME[state.cutFrom]
+                         + ": press Both to retry them there."));
+                paintRetry();
+                return;
+            }
+            state.retryBoth = { source: [], render: [] };
+            for (var b2 = 0; b2 < bad.length; b2++) {
+                var hk = state.retryBoth[bad[b2].half];
+                if (hk && hk.indexOf(bad[b2].key) < 0) hk.push(bad[b2].key);
+            }
+            doExport();
+            return;
+        }
         if (!retryHere()) {
             log("retry refused: the report is of " + state.reportFor + ", the destination is now "
                 + (outDir() || "none"));
@@ -10212,12 +12069,12 @@
     });
 
     el.pickall.addEventListener("change", function () {
-        var on = el.pickall.checked;
-        for (var i = 0; i < state.clips.length; i++) {
-            var c = state.clips[i];
+        var on = el.pickall.checked, rows = tickableRows();
+        for (var i = 0; i < rows.length; i++) {
+            var c = rows[i];
             // Same skip as syncPickAll(), so the master tick acts on exactly the rows it
             // counted — an audio row on an unticked track is governed by that track.
-            if (c.group !== 0 || !typeOn(c) || !trackPicked(c)) continue;
+            if (!trackPicked(c)) continue;
             if (on) delete state.unpicked[clipKey(c)];
             else state.unpicked[clipKey(c)] = true;
         }
@@ -10265,7 +12122,7 @@
 
     el.resume.addEventListener("change", function () {
         state.resume = el.resume.checked;
-        try { window.localStorage.setItem("xmlcut.resume",
+        try { lsSet("xmlcut.resume",
                                           state.resume ? "1" : ""); } catch (e) {}
     });
 
@@ -10318,7 +12175,8 @@
      * so on a refusal about the open project it put Save to on the clipboard beside a box
      * showing the project's product (measured by the 3.90 review round's verifier). */
     el.copyout.addEventListener("click", function () {
-        copyText(destShown(resolveDest()), el.copyout, "Copy");
+        // 3.93 · what the box shows — the lit mode's, in Both the version folder.
+        copyText(shownFolder(resolveDest(state.cutFrom)), el.copyout, "Copy");
     });
     /* 3.91 · THE PRODUCT MENU. A pick is remembered for this project's path and wins over the
      * match; the first entry ("Matched: …" or "Pick the product…") forgets it. */
@@ -10332,8 +12190,9 @@
              * unchanged _sig), and picking that product again then fired no change at all.
              * Measured: the engine wrote into the matched product, the box said so, the menu said
              * the other one. Only the menu is repainted here: the rail is the running export's. */
-            if (!state.info || state.running || state.exportPending || v === "-"
-                || v === MENU_CHOSEN) {
+            // 3.93 · state.chain: the gap between a Both export's halves is inside the export.
+            if (!state.info || state.running || state.exportPending || state.chain || v === "-"
+                || v === MENU_CHOSEN || v === MENU_GONE) {
                 el.productpick._sig = "";
                 if (state.info) paintProductPick(resolveDest());
                 return;
@@ -10361,7 +12220,9 @@
      * FOLLOWS the mode since 3.91, so after a switch to the other mode "Show in Finder" on a
      * Source report opened <version>/ (edited/ did not exist yet) or edited/. */
     function reportShownFor() {
-        return (state.reportFor && el.repsum && !el.repsum.hidden) ? state.reportFor : "";
+        // 3.93 · a Both report is of two folders: the version folder that holds them.
+        var of = state.bothReport ? state.bothReport.version : state.reportFor;
+        return (of && el.repsum && !el.repsum.hidden) ? of : "";
     }
     el.copydest.addEventListener("click", function () {
         copyText(reportShownFor() || outDir(), el.copydest, "Copy");
@@ -10383,11 +12244,12 @@
      * the folder the refusal names and the one the box shows, and Save to is not used while
      * the project is open. Save to only when there is no destination at all. */
     function revealDest() {
-        var d = resolveDest();
+        // 3.93 · the lit mode's folder (in Both, the version folder holding raw/ and edited/).
+        var d = resolveDest(state.cutFrom);
         /* 3.91 · the mode folder when it is the destination; the folder a refusal names when
          * another export owns the version (takenDir); the matched or picked product, or
          * SAMX_WORKSPACE itself while nothing is. */
-        var want = (d.ok || d.taken || (d.from && d.from !== "saveto")) ? destShown(d) : "";
+        var want = (d.ok || d.taken || (d.from && d.from !== "saveto")) ? shownFolder(d) : "";
         var at = want;
         while (at && !exists(at) && path.dirname(at) !== at) at = path.dirname(at);
         reveal(want && exists(at) ? at : state.out);
@@ -10819,7 +12681,15 @@
     }
     el.preset.addEventListener("change", function () {
         el.delpreset.disabled = !el.preset.value;
-        if (el.preset.value) applyPreset(el.preset.value);
+        if (el.preset.value) {
+            applyPreset(el.preset.value);
+        } else {
+            /* 3.93 audit (2) · CUSTOM: the settings stay as they are (a hand change is what sets
+             * this back to Custom), but the summary stops naming a preset that no longer applies,
+             * and a refusal about that preset goes with it. */
+            say("preset", "warn", "");
+            renderSettings();
+        }
     });
 
     /* THE MODE. Two buttons, one state — the whole body of this is in setCutFrom(), beside
@@ -10828,15 +12698,24 @@
      * here in the wiring. */
     el.modesrc.addEventListener("click", function () { setCutFrom("source"); });
     el.modeseq.addEventListener("click", function () { setCutFrom("render"); });
+    // 3.93 · the third: Source Render into raw/, then Timeline Render into edited/, one press.
+    el.modeboth.addEventListener("click", function () { setCutFrom("both"); });
 
     el.vtrack.addEventListener("change", function () {
         state.vtrackWant = String(el.vtrack.value || "");
         renderListLabel();
         // The new master must be ticked and locked, and the old one released.
         renderIncludeTracks();
-        try { window.localStorage.setItem("xmlcut.vtrack", state.vtrackWant); } catch (e) {}
+        try { lsSet("xmlcut.vtrack", state.vtrackWant); } catch (e) {}
         renderSettings();
         if (state.clips.length) renderClips();
+        /* 3.93 audit · AND READ AGAIN WHERE THE READ DEPENDS ON IT. A Timeline Render read (and
+         * Both's Timeline one) is numbered by --video-track, the engine giving every other
+         * track's cuts no number — so after a switch from V1 to V2 the V2 rows kept the V1
+         * read's 0 and showed "—" (becomes no file) while the export wrote them 01..N. A read
+         * already out is read again when it lands (scanClips). Source Render's read does not
+         * carry the flag, and is left alone. */
+        if (shownHas("render")) rescanForSetting("Re-reading…");
     });
     el.savepreset.addEventListener("click", function () {
         cs.evalScript("askName(" + jsStr("Save these export settings as:") + ")",
@@ -10852,7 +12731,17 @@
                 // engine records vcodec_of(args), which resolves an absent --vcodec to
                 // libx264, so a preset always names one.
                 if (s.vcodec && s.vcodec !== "libx264") a.push("--vcodec", s.vcodec);
-                runJson(a, function () {
+                runJson(a, function (r, err) {
+                    /* 3.93 audit (2) · A REFUSED SAVE IS SAID. The engine answers ok:false with
+                     * `error` when presets.json cannot be read (it will not write over it); this
+                     * callback ignored the reply, so the press did nothing, in silence. */
+                    if (!r || r.ok === false) {
+                        loadPresets(function () {
+                            say("presetfile", "warn", "\u201c" + name + "\u201d was not saved — "
+                                + ((r && r.error) || err || "the engine gave no answer") + ".");
+                        });
+                        return;
+                    }
                     loadPresets(function () {
                         el.preset.value = name;
                         el.delpreset.disabled = false;
@@ -10863,9 +12752,16 @@
     el.delpreset.addEventListener("click", function () {
         var name = el.preset.value;
         if (!name) return;
-        runJson(["--delete-preset", name, "--presets-only"], function () {
+        runJson(["--delete-preset", name, "--presets-only"], function (r, err) {
             el.preset.value = "";
-            loadPresets();
+            // 3.93 audit (2) · and a refused (or answerless) Delete is said, after the relist.
+            loadPresets(function () {
+                if (!r || r.ok === false) {
+                    say("presetfile", "warn", "\u201c" + name + "\u201d was not deleted — "
+                        + ((r && r.error) || err || (r ? "it is not in the presets file any more"
+                                                      : "the engine gave no answer")) + ".");
+                }
+            });
         });
     });
 
@@ -10887,6 +12783,80 @@
         setTab(tabNow === "tabinfo" ? "tabclips" : "tabinfo");
     });
 
+    /* ═══════════════════ 3.93 audit · THE REMEMBERED CHOICES ARE KEPT IN A FILE AS WELL
+     *
+     * CEP keeps this panel's localStorage in a folder named after the PREMIERE version
+     * (…/CSXS/cep_cache/PPRO_<version>_com.bom.xmlcutreader.panel), so it survives every panel
+     * update and is EMPTY after every Premiere update — measured on this Mac, four stores in
+     * seven weeks, each starting from nothing. What went with it, without a word: the product
+     * picked over a wrong match (the export went to the match), the folder chosen with Change
+     * (the export went to the matched product), Save to (back to the Desktop default, which
+     * exists on a Mac that ran an early build and was then taken), the cross-dissolve split
+     * and the export settings.
+     *
+     * So every write goes through lsSet()/lsDel(), which also keeps a copy of the panel's keys
+     * in ~/Library/Application Support/Raw-cutter/panel-settings.json (beside the engine's
+     * presets.json). At boot, a store holding NONE of the keys — a new Premiere version's, or a
+     * wiped cache — is filled from that copy before anything reads it, and the Info tab says
+     * so. A store holding any key is this store and is never overwritten from the file. */
+    var STORE_KEYS = ["xmlcut.out", "xmlcut.productpick", "xmlcut.freedest", "xmlcut.cutfrom",
+                      "xmlcut.vtrack", "xmlcut.export", "xmlcut.transitions", "xmlcut.resume",
+                      "xmlcut.types", "xmlcut.vinclude", "xmlcut.vinclude.by", "xmlcut.audio.v2",
+                      "xmlcut.audioclips", "xmlcut.audiohear", "xmlcut.audiohear.by", "xmlcut.setopen", "xmlcut.seenver",
+                      "xmlcut.script"];
+    var storeTimer = null;
+    function storeFile() {
+        var h = (fs && path) ? userHome() : "";
+        return h ? path.join(h, "Library", "Application Support", "Raw-cutter", "panel-settings.json") : "";
+    }
+    // Throws as setItem throws — every caller already has its try.
+    function lsSet(k, v) { window.localStorage.setItem(k, v); keepStoreSoon(); }
+    function lsDel(k) { window.localStorage.removeItem(k); keepStoreSoon(); }
+    function keepStoreSoon() {
+        if (storeTimer) return;
+        storeTimer = setTimeout(function () { storeTimer = null; keepStore(); }, 250);
+    }
+    function keepStore() {
+        var f = storeFile(), o = {}, n = 0, i, v;
+        if (!f) return;
+        try {
+            for (i = 0; i < STORE_KEYS.length; i++) {
+                v = window.localStorage.getItem(STORE_KEYS[i]);
+                if (v !== null && v !== undefined) { o[STORE_KEYS[i]] = String(v); n++; }
+            }
+        } catch (e) { return; }
+        if (!n) return;
+        try {
+            fs.mkdirSync(path.dirname(f), { recursive: true });
+            var tmp = f + ".part";
+            fs.writeFileSync(tmp, JSON.stringify({ keys: o }, null, 1), "utf8");
+            fs.renameSync(tmp, f);
+        } catch (e2) { log("settings copy: could not write " + f + ": " + e2); }
+    }
+    function restoreStore() {
+        var f = storeFile(), i, k, o = null, put = [];
+        if (!f) return;
+        try {
+            for (i = 0; i < STORE_KEYS.length; i++) {
+                if (window.localStorage.getItem(STORE_KEYS[i]) !== null) return;   // this store's own
+            }
+            o = JSON.parse(fs.readFileSync(f, "utf8"));
+        } catch (e) { return; }                 // no copy yet (a first install), or unreadable
+        var keys = (o && typeof o.keys === "object" && o.keys) || {};
+        for (i = 0; i < STORE_KEYS.length; i++) {
+            k = STORE_KEYS[i];
+            if (!Object.prototype.hasOwnProperty.call(keys, k) || typeof keys[k] !== "string") continue;
+            try { window.localStorage.setItem(k, keys[k]); put.push(k); } catch (e3) {}
+        }
+        if (!put.length) return;
+        log("settings: this Premiere started the panel with none — " + put.length
+            + " put back from " + f + " (" + put.join(", ") + ")");
+        say("restored", "info", "This Premiere version started the panel with none of its settings "
+            + "(each Premiere version keeps its own), so they were put back from the panel's own "
+            + "copy: Save to, each project's picked product and chosen folder, and the export settings.",
+            f, true);
+    }
+
     /* --------------------------------------------------------------- boot */
 
     if (!node) {
@@ -10894,6 +12864,10 @@
              + "the panel and restart Premiere.");
         el.read.disabled = true;
     } else {
+        // 3.93 audit · before ANYTHING reads the store (noteVersion reads it inside setScript),
+        // and a copy made of it once boot has settled — the first boot of this build included.
+        restoreStore();
+        keepStoreSoon();
         state.python = findPython();
         setScript(findScript());
         if (!state.script) {
@@ -10972,9 +12946,10 @@
          * a property of how he works, not of this one timeline. The track number is kept
          * too but re-validated against whatever gets read — V3 on the last project may not
          * exist on this one, and renderVideoTracks() falls back to the lowest track. */
+        // 3.93 · "both" is remembered the same way; anything unknown is Source Render.
         try {
-            state.cutFrom = window.localStorage.getItem("xmlcut.cutfrom") === "render"
-                ? "render" : "source";
+            var savedMode = window.localStorage.getItem("xmlcut.cutfrom");
+            state.cutFrom = (savedMode === "render" || savedMode === "both") ? savedMode : "source";
         } catch (e) { state.cutFrom = "source"; }
         try {
             state.vtrackWant = window.localStorage.getItem("xmlcut.vtrack") || "";
@@ -10989,8 +12964,15 @@
          * so a two-track sequence inherited a six-track job's exclusions and rendered without
          * V2. The per-layout store below is what the ticks are actually read from; this flat
          * value is the pre-per-layout setting, and it waits for a layout it fits. */
+        /* 3.93 audit · AND ONLY FROM A STORE THAT IS PRE-PER-LAYOUT — one with no
+         * xmlcut.vinclude.by. rememberInclude() rewrites the flat key on every repaint of the
+         * ticks (for a rollback), so this read the LAST timeline's ticks back on every start and
+         * handed them to the first unseen layout they fit: after a restart, a V1..V3 job opened
+         * with V2 and V3 off because V2 had been unticked on a V1..V2 one — or with V3 off after
+         * nothing but a two-track job (measured by the audit). An unseen layout gets every track. */
         try {
-            state.vIncludeLegacy = window.localStorage.getItem("xmlcut.vinclude") || "";
+            state.vIncludeLegacy = window.localStorage.getItem("xmlcut.vinclude.by") ? ""
+                : (window.localStorage.getItem("xmlcut.vinclude") || "");
         } catch (e) { state.vIncludeLegacy = ""; }
         state.vIncludeWant = "";
         state.vIncludeSig = "";

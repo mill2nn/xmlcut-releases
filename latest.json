@@ -1,6 +1,6 @@
 {
-  "version": "3.92",
-  "notes": "Project \u1edf team drive: th\u01b0 m\u1ee5c c\u00f3 t\u00ean B\u1eaeT \u0110\u1ea6U b\u1eb1ng t\u00ean s\u1ea3n ph\u1ea9m tr\u00ean SAMX_WORKSPACE nay t\u1ef1 kh\u1edbp, kh\u00f4ng c\u1ea7n ch\u1ecdn menu. N\u00fat Change nh\u1eadn M\u1eccI th\u01b0 m\u1ee5c: th\u01b0 m\u1ee5c trong SAMX_WORKSPACE l\u00e0 ch\u1ecdn s\u1ea3n ph\u1ea9m \u0111\u00f3; th\u01b0 m\u1ee5c kh\u00e1c th\u00ec clip v\u00e0o <th\u01b0 m\u1ee5c>/<version>/raw ho\u1eb7c /edited, nh\u1edb ri\u00eang t\u1eebng project; menu c\u00f3 Back to \u2026 \u0111\u1ec3 quay l\u1ea1i s\u1ea3n ph\u1ea9m SAMX.",
+  "version": "3.93",
+  "notes": "N\u00daT M\u1edaI \u00abBoth\u00bb: m\u1ed9t l\u1ea7n Export l\u00e0m c\u1ea3 hai \u2014 Source Render v\u00e0o <version>/raw/ r\u1ed3i Timeline Render v\u00e0o <version>/edited/; n\u1eeda n\u00e0o b\u1ecb ch\u1eb7n th\u00ec n\u00f3i r\u00f5. S\u1eeda 71 l\u1ed7i t\u1eeb \u0111\u1ee3t audit: kh\u00f4ng c\u00f2n gi\u1eef clip edited/ c\u0169 sau khi s\u1eeda timeline, Cancel kh\u00f4ng l\u00e0m tr\u1ed1ng th\u01b0 m\u1ee5c giao, hai export kh\u00f4ng ghi chung m\u1ed9t th\u01b0 m\u1ee5c, c\u1eadp nh\u1eadt Premiere kh\u00f4ng m\u1ea5t l\u1ef1a ch\u1ecdn s\u1ea3n ph\u1ea9m/th\u01b0 m\u1ee5c, Retry render l\u1ea1i clip b\u1ecb thi\u1ebfu.",
   "files": [
     "xmlcut.py",
     "xmlcut_gui.py",
@@ -18,5 +18,23 @@
     "tools/compare_panel.py",
     "tools/source_check.py",
     "tools/speed_check.py"
-  ]
+  ],
+  "sha256": {
+    "xmlcut.py": "8b083c31082edc736655f27e418bd79ec23a3b0c0e5c159cf17d82fb3310fdd3",
+    "xmlcut_gui.py": "ffee76bab6e1405af005ef9c0c913ec9242fc49c2347fee4d485f418cc3338df",
+    "README.md": "0261af070a07f67bd5299dac551d4dd5b670d586f241102aa5f4f53fab602bd7",
+    "Open xmlcut GUI.command": "d5768e9bbed2af3b3c89f79284d50535ed16aecb3efe2e4679e731ccee674850",
+    "panel/CSXS/manifest.xml": "ca667222c5927ffd621e1bd31ec12f540e2cd605a12c0dd50c61d7f333346108",
+    "panel/client/index.html": "627dbe4b986810c102bd3cadcc4de0639a357ca62faed22f7fbc4f83c3358caf",
+    "panel/client/main.js": "6d957428b55b8aae3113292ec1b201675b07f679594daac87a313f8cd6dee11e",
+    "panel/client/style.css": "5ec6866cb1e9575871c43a0bc1872961132b8f9ba4a82df29506c81aba18daf8",
+    "panel/client/CSInterface.js": "1bbf73eab973258817211786dda6096faa6e3977eca1bc8baf8f088588bb3683",
+    "panel/jsx/host.jsx": "e368cb77e254bd15bb6520b7ea04244b209de55619d961911270d061260dac0d",
+    "panel/.debug": "cee8c02d37a11d1463cc8646504fe0556b6885cfcbe0da5069b52f34b835018f",
+    "panel/Install xmlcut reader (Mac).command": "885b7b5a580031c459b558b9c5ce4aa794c23c596f2330391837148ed84de3cd",
+    "panel/Uninstall xmlcut reader (Mac).command": "85e577e484508160e5d791165c60ac5bedba8e6edb0207f3074d7278f030ce01",
+    "tools/compare_panel.py": "632aeb01047363b24fdad65518ec28ead187689430981d8e71693ebe4400c113",
+    "tools/source_check.py": "ec908ed51ecd652639e95ec709b5a44900255a280d1adf898c3340f94ff95add",
+    "tools/speed_check.py": "7a10f78b7b138b59a1d65e8ddbb7db7ccd9bbdaf33f7dfa92db954b3a2b6b83d"
+  }
 }

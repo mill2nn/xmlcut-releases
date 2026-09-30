@@ -288,6 +288,13 @@ body {
     --mode-hue: 183, 140, 255;
     background-image: linear-gradient(rgba(183, 140, 255, .34), rgba(183, 140, 255, .34));
 }
+/* 3.93 · BOTH IS THE OTHER TWO TOGETHER, and so is its colour: the two hues side by side, left
+ * to right in the order the halves run — no third colour. A border cannot be a gradient, so
+ * its edge and glow take the first half's accent. */
+#modeboth {
+    --mode-hue: 0, 180, 255;
+    background-image: linear-gradient(90deg, rgba(0, 180, 255, .34), rgba(183, 140, 255, .34));
+}
 
 .modebtn { border-color: rgba(var(--mode-hue), .45); }
 .modebtn:hover:not(.on):not(:disabled) {
@@ -328,14 +335,25 @@ body {
 #modeseq.on {
     background-image: linear-gradient(rgba(183, 140, 255, 1), rgba(183, 140, 255, 1));
 }
+/* Dark ink on it clears 7.39:1 at its violet end and 8.08:1 at its blue one (measured above). */
+#modeboth.on {
+    background-image: linear-gradient(90deg, rgba(0, 180, 255, 1), rgba(183, 140, 255, 1));
+}
 .modebtn.on:hover:not(:disabled) { filter: brightness(1.06); }
+/* ⚠️ 3.93 · A NAME WRAPS BETWEEN ITS WORDS, WHERE IT USED TO BE nowrap. Three buttons share
+ * the 270px of a 320px dock — 84.7px each, 63px of text — and measured in headless Chrome at
+ * 13.5px/600 "Source Render" needs 98px and "Timeline Render" 107px on one line, while the
+ * longest single word, "Timeline", needs 55.6px. So at a dock the two long names take two lines
+ * ("Timeline / Render") and every button stretches to the tallest, and a word is never cut:
+ * check_layout still asserts scrollWidth <= clientWidth on every name. Undocked there is room
+ * and nothing wraps. */
 .modename {
     display: block;
     font-size: 13.5px;
     letter-spacing: .01em;
     font-weight: 600;
     color: var(--fg);
-    white-space: nowrap;
+    white-space: normal;
 }
 /* What it PRODUCES, in three words — the difference between the two, which is the only thing
  * the sub-line has to carry.
@@ -353,9 +371,9 @@ body {
     font-weight: 400;
     color: var(--fg);
 }
-/* THE ACHROMATIC MARK, on .modenote and not on .modename: the name is nowrap and
- * check_layout measures its scrollWidth against its clientWidth, so a glyph there would eat
- * 10px of the tightest text at a 320px dock. */
+/* THE ACHROMATIC MARK, on .modenote and not on .modename: check_layout measures the name's
+ * scrollWidth against its clientWidth, and a glyph there would eat 10px of the tightest text
+ * at a 320px dock (3.93: the name wraps now, but a word it cannot break still must fit). */
 .modebtn.on .modenote::before { content: "\25CF\00A0"; font-size: 9px; }
 /* Dark ink on the solid fill — 8.08:1 on the accent, 7.39:1 on the violet. --fg would be
  * 1.6:1 on the accent, which is why the name cannot simply stay light. */
